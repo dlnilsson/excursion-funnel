@@ -1,0 +1,182 @@
+// Package config loads daemon configuration.
+//
+// Precedence (highest wins): CLI flags > environment variables > config file
+// > built-in defaults. The TOML config-file layer is not wired up yet; when it
+// lands it sits between env and defaults. See EXCURSION_FUNNEL_PLAN.md.
+package config
+
+import (
+	"flag"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strconv"
+	"time"
+
+	"github.com/dlnilsson/excursion-funnel/internal/queue"
+)
+
+// Config holds the resolved runtime configuration for `serve`.
+//
+// The daemon is a transparent multi-provider proxy. It picks the upstream by
+// the request endpoint (/v1/responses → OpenAI, /v1/messages → Anthropic). The
+// Anthropic path is forwarded verbatim, so its upstream is a bare root. The
+// OpenAI path has its leading /v1 stripped before joining, so its upstream root
+// must carry the correct prefix itself (…/backend-api/codex or …/v1).
+type Config struct {
+	Addr string
+
+	OpenAIUpstream    string // root for Codex / Responses API, e.g. https://chatgpt.com/backend-api/codex
+	AnthropicUpstream string // root for Claude Code / Messages API, e.g. https://api.anthropic.com
+
+	DBPath          string
+	ShutdownTimeout time.Duration
+	RequestTimeout  time.Duration
+	IdleTimeout     time.Duration
+	RetentionDays   int
+	UIEnabled       bool
+
+	Queue                    queue.Config
+	QueueDrainTimeout        time.Duration
+	AggregateRefreshInterval time.Duration
+}
+
+const (
+	// defaultOpenAIUpstream targets the ChatGPT Codex backend rather than the
+	// platform API, because Codex's ChatGPT-subscription auth (auth_mode =
+	// chatgpt) only carries connector scopes — never api.responses.write — so
+	// those tokens are accepted here and rejected by https://api.openai.com/v1.
+	// The proxy strips the client's leading /v1 for OpenAI routes, so this root
+	// already includes the correct path prefix. To use a platform API key
+	// instead, override with https://api.openai.com/v1.
+	defaultOpenAIUpstream    = "https://chatgpt.com/backend-api/codex"
+	defaultAnthropicUpstream = "https://api.anthropic.com"
+)
+
+// Default returns the built-in defaults, the lowest-precedence layer.
+func Default() Config {
+	return Config{
+		Addr:                     "127.0.0.1:8787",
+		OpenAIUpstream:           defaultOpenAIUpstream,
+		AnthropicUpstream:        defaultAnthropicUpstream,
+		DBPath:                   defaultDBPath(),
+		ShutdownTimeout:          5 * time.Second,
+		RequestTimeout:           2 * time.Minute,
+		IdleTimeout:              2 * time.Minute,
+		RetentionDays:            0,
+		UIEnabled:                true,
+		Queue:                    queue.DefaultConfig(),
+		QueueDrainTimeout:        5 * time.Second,
+		AggregateRefreshInterval: 5 * time.Minute,
+	}
+}
+
+// Load resolves configuration from defaults, then environment, then flags.
+// args is everything after the `serve` subcommand (i.e. os.Args[2:]).
+func Load(args []string) (Config, error) {
+	cfg := Default()
+
+	// Environment layer.
+	if v := os.Getenv("EF_ADDR"); v != "" {
+		cfg.Addr = v
+	}
+	if v := os.Getenv("EF_OPENAI_UPSTREAM"); v != "" {
+		cfg.OpenAIUpstream = v
+	}
+	if v := os.Getenv("EF_ANTHROPIC_UPSTREAM"); v != "" {
+		cfg.AnthropicUpstream = v
+	}
+	if v := os.Getenv("EF_DB"); v != "" {
+		cfg.DBPath = v
+	}
+	if v := os.Getenv("EF_SHUTDOWN_TIMEOUT"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			return Config{}, fmt.Errorf("EF_SHUTDOWN_TIMEOUT: %w", err)
+		}
+		cfg.ShutdownTimeout = d
+	}
+	if v := os.Getenv("EF_REQUEST_TIMEOUT"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			return Config{}, fmt.Errorf("EF_REQUEST_TIMEOUT: %w", err)
+		}
+		cfg.RequestTimeout = d
+	}
+	if v := os.Getenv("EF_IDLE_TIMEOUT"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			return Config{}, fmt.Errorf("EF_IDLE_TIMEOUT: %w", err)
+		}
+		cfg.IdleTimeout = d
+	}
+	if v := os.Getenv("EF_QUEUE_DRAIN_TIMEOUT"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			return Config{}, fmt.Errorf("EF_QUEUE_DRAIN_TIMEOUT: %w", err)
+		}
+		cfg.QueueDrainTimeout = d
+	}
+	if v := os.Getenv("EF_AGGREGATE_REFRESH_INTERVAL"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			return Config{}, fmt.Errorf("EF_AGGREGATE_REFRESH_INTERVAL: %w", err)
+		}
+		cfg.AggregateRefreshInterval = d
+	}
+	if v := os.Getenv("EF_RETENTION_DAYS"); v != "" {
+		days, err := strconv.Atoi(v)
+		if err != nil {
+			return Config{}, fmt.Errorf("EF_RETENTION_DAYS: %w", err)
+		}
+		cfg.RetentionDays = days
+	}
+	if v := os.Getenv("EF_UI_ENABLED"); v != "" {
+		enabled, err := strconv.ParseBool(v)
+		if err != nil {
+			return Config{}, fmt.Errorf("EF_UI_ENABLED: %w", err)
+		}
+		cfg.UIEnabled = enabled
+	}
+
+	// Flag layer — seeded from post-env values so a flag only wins when set,
+	// preserving flags > env > defaults.
+	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
+	fs.StringVar(&cfg.Addr, "addr", cfg.Addr, "listen address (host:port)")
+	fs.StringVar(&cfg.OpenAIUpstream, "openai-upstream", cfg.OpenAIUpstream, "OpenAI upstream root (Codex / Responses API)")
+	fs.StringVar(&cfg.AnthropicUpstream, "anthropic-upstream", cfg.AnthropicUpstream, "Anthropic upstream root (Claude Code / Messages API)")
+	fs.StringVar(&cfg.DBPath, "db", cfg.DBPath, "sqlite database path")
+	fs.DurationVar(&cfg.ShutdownTimeout, "shutdown-timeout", cfg.ShutdownTimeout, "graceful HTTP shutdown timeout")
+	fs.DurationVar(&cfg.RequestTimeout, "request-timeout", cfg.RequestTimeout, "upstream response-header timeout (0 disables)")
+	fs.DurationVar(&cfg.IdleTimeout, "idle-timeout", cfg.IdleTimeout, "idle client-write timeout while proxying responses (0 disables)")
+	fs.DurationVar(&cfg.QueueDrainTimeout, "queue-drain-timeout", cfg.QueueDrainTimeout, "usage queue drain timeout during shutdown")
+	fs.DurationVar(&cfg.AggregateRefreshInterval, "aggregate-refresh-interval", cfg.AggregateRefreshInterval, "historical aggregate refresh interval (0 disables)")
+	fs.IntVar(&cfg.RetentionDays, "retention-days", cfg.RetentionDays, "delete usage rows older than this many days at startup (0 disables)")
+	fs.BoolVar(&cfg.UIEnabled, "ui-enabled", cfg.UIEnabled, "serve the read-only dashboard at /ui/")
+	if err := fs.Parse(args); err != nil {
+		return Config{}, err
+	}
+
+	if cfg.RetentionDays < 0 {
+		return Config{}, fmt.Errorf("retention-days must be >= 0")
+	}
+	if cfg.ShutdownTimeout < 0 || cfg.RequestTimeout < 0 || cfg.IdleTimeout < 0 || cfg.QueueDrainTimeout < 0 || cfg.AggregateRefreshInterval < 0 {
+		return Config{}, fmt.Errorf("timeouts must be >= 0")
+	}
+
+	return cfg, nil
+}
+
+// defaultDBPath mirrors the Windows-first layout from the plan:
+// %LOCALAPPDATA%\excursion-funnel\usage.sqlite, with a home-dir fallback.
+func defaultDBPath() string {
+	base := os.Getenv("LOCALAPPDATA")
+	if base == "" {
+		if home, err := os.UserHomeDir(); err == nil {
+			base = home
+		} else {
+			base = "."
+		}
+	}
+	return filepath.Join(base, "excursion-funnel", "usage.sqlite")
+}

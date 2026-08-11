@@ -1,0 +1,15 @@
+[Unit]
+Description=Excursion Funnel proxy
+PartOf=graphical-session.target
+Requires=graphical-session.target
+After=graphical-session.target
+
+[Service]
+ExecStart=%h/go/bin/ef serve
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=excursion-funnel
+Restart=on-failure
+
+[Install]
+WantedBy=graphical-session.target

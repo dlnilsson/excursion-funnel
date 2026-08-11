@@ -1,0 +1,750 @@
+package proxy
+
+import (
+	"bytes"
+	"compress/gzip"
+	"context"
+	"io"
+	"log/slog"
+	"net/http"
+	"net/http/httptest"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/dlnilsson/excursion-funnel/internal/queue"
+)
+
+type recordingSink struct {
+	mu     sync.Mutex
+	events []queue.UsageEvent
+}
+
+func (s *recordingSink) Enqueue(ev queue.UsageEvent) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.events = append(s.events, ev)
+}
+
+func (s *recordingSink) one(t *testing.T) queue.UsageEvent {
+	t.Helper()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.events) != 1 {
+		t.Fatalf("events len = %d, want 1", len(s.events))
+	}
+	return s.events[0]
+}
+
+func TestProxy_OpenAIStreamingUsage(t *testing.T) {
+	body := `event: response.completed
+data: {"type":"response.completed","response":{"id":"resp_stream","model":"gpt-5.3-codex","status":"completed","usage":{"input_tokens":11,"output_tokens":7,"total_tokens":18}}}
+
+`
+	// Codex posts /v1/responses; the proxy strips /v1 for OpenAI routes, so the
+	// upstream root sees /responses.
+	upstream := streamingUpstream(t, "/responses", body)
+	defer upstream.Close()
+
+	sink := &recordingSink{}
+	p := newTestProxy(t, upstream.URL, upstream.URL, sink)
+	resp := postJSON(t, p.Handler(), "/v1/responses", `{"model":"gpt-5.3-codex","stream":true}`)
+	defer resp.Body.Close()
+	gotBody, _ := io.ReadAll(resp.Body)
+	if string(gotBody) != body {
+		t.Fatalf("response body = %q, want %q", gotBody, body)
+	}
+
+	ev := sink.one(t)
+	if !ev.Stream || ev.ResponseID != "resp_stream" || ev.ModelReported != "gpt-5.3-codex" {
+		t.Fatalf("event = %+v, want streaming OpenAI metadata", ev)
+	}
+	checkUsagePtr(t, "InputTokens", ev.Usage.InputTokens, 11)
+	checkUsagePtr(t, "OutputTokens", ev.Usage.OutputTokens, 7)
+	checkUsagePtr(t, "TotalTokens", ev.Usage.TotalTokens, 18)
+	if ev.ErrorType != "" {
+		t.Fatalf("ErrorType = %q, want empty", ev.ErrorType)
+	}
+}
+
+// The ChatGPT Codex backend streams SSE with no Content-Type header. The proxy
+// must still classify a 2xx response to a stream=true request as SSE and parse
+// usage from the frames, rather than json-parsing "event: ..." as a JSON body.
+func TestProxy_OpenAIStreamingUsageWithoutContentType(t *testing.T) {
+	body := `event: response.completed
+data: {"type":"response.completed","response":{"id":"resp_noct","model":"gpt-5.5","status":"completed","usage":{"input_tokens":5,"output_tokens":3,"total_tokens":8}}}
+
+`
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/responses" {
+			t.Fatalf("upstream path = %q, want %q", r.URL.Path, "/responses")
+		}
+		// Deliberately omit Content-Type, mirroring the ChatGPT Codex backend.
+		_, _ = io.WriteString(w, body)
+	}))
+	defer upstream.Close()
+
+	sink := &recordingSink{}
+	p := newTestProxy(t, upstream.URL, upstream.URL, sink)
+	resp := postJSON(t, p.Handler(), "/v1/responses", `{"model":"gpt-5.5","stream":true}`)
+	defer resp.Body.Close()
+	gotBody, _ := io.ReadAll(resp.Body)
+	if string(gotBody) != body {
+		t.Fatalf("response body = %q, want %q", gotBody, body)
+	}
+
+	ev := sink.one(t)
+	if ev.ErrorType != "" {
+		t.Fatalf("ErrorType = %q, want empty (no parse_error)", ev.ErrorType)
+	}
+	if !ev.Stream || ev.ResponseID != "resp_noct" || ev.ModelReported != "gpt-5.5" {
+		t.Fatalf("event = %+v, want streaming OpenAI metadata", ev)
+	}
+	checkUsagePtr(t, "InputTokens", ev.Usage.InputTokens, 5)
+	checkUsagePtr(t, "OutputTokens", ev.Usage.OutputTokens, 3)
+	checkUsagePtr(t, "TotalTokens", ev.Usage.TotalTokens, 8)
+}
+
+// The ChatGPT Codex backend can additionally wrap each Responses frame in a
+// second SSE layer (an outer data: line whose value is itself `event:`/`data:`
+// text) and still omit Content-Type. The proxy must classify it as SSE and the
+// parser must unwrap the inner frame to recover usage, not record a parse_error.
+func TestProxy_OpenAIStreamingUsageNestedSSE(t *testing.T) {
+	body := "data: event: response.completed\n" +
+		`data: data: {"type":"response.completed","response":{"id":"resp_nested","model":"gpt-5.5","status":"completed","usage":{"input_tokens":9,"output_tokens":4,"total_tokens":13}}}` + "\n\n"
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/responses" {
+			t.Fatalf("upstream path = %q, want %q", r.URL.Path, "/responses")
+		}
+		// Mirror the ChatGPT Codex backend: nested SSE, no Content-Type.
+		_, _ = io.WriteString(w, body)
+	}))
+	defer upstream.Close()
+
+	sink := &recordingSink{}
+	p := newTestProxy(t, upstream.URL, upstream.URL, sink)
+	resp := postJSON(t, p.Handler(), "/v1/responses", `{"model":"gpt-5.5","stream":true}`)
+	defer resp.Body.Close()
+	gotBody, _ := io.ReadAll(resp.Body)
+	if string(gotBody) != body {
+		t.Fatalf("response body = %q, want %q", gotBody, body)
+	}
+
+	ev := sink.one(t)
+	if ev.ErrorType != "" {
+		t.Fatalf("ErrorType = %q (%q), want empty (no parse_error)", ev.ErrorType, ev.ErrorMessage)
+	}
+	if !ev.Stream || ev.ResponseID != "resp_nested" || ev.ModelReported != "gpt-5.5" {
+		t.Fatalf("event = %+v, want streaming OpenAI metadata", ev)
+	}
+	checkUsagePtr(t, "InputTokens", ev.Usage.InputTokens, 9)
+	checkUsagePtr(t, "OutputTokens", ev.Usage.OutputTokens, 4)
+	checkUsagePtr(t, "TotalTokens", ev.Usage.TotalTokens, 13)
+}
+
+func TestProxy_OpenAIStreamingToolCall(t *testing.T) {
+	body := `event: response.output_item.added
+data: {"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"fc_item","call_id":"call_bash","name":"Bash","arguments":""}}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","item_id":"fc_item","delta":"{\"cmd\":\"go test ./...\"}"}
+
+event: response.completed
+data: {"type":"response.completed","response":{"id":"resp_tool_proxy","model":"gpt-5.5-codex","status":"completed","usage":{"input_tokens":12,"output_tokens":4,"total_tokens":16}}}
+
+`
+	upstream := streamingUpstream(t, "/responses", body)
+	defer upstream.Close()
+
+	sink := &recordingSink{}
+	p := newTestProxy(t, upstream.URL, upstream.URL, sink)
+	resp := postJSON(t, p.Handler(), "/v1/responses", `{"model":"gpt-5.5-codex","stream":true}`)
+	defer resp.Body.Close()
+	_, _ = io.ReadAll(resp.Body)
+
+	ev := sink.one(t)
+	if len(ev.ToolCalls) != 1 {
+		t.Fatalf("ToolCalls = %+v, want one Codex tool call", ev.ToolCalls)
+	}
+	call := ev.ToolCalls[0]
+	if call.ID != "call_bash" || call.Name != "Bash" || call.Command != "go test ./..." {
+		t.Fatalf("tool call = %+v, want persisted Codex Bash call", call)
+	}
+}
+
+func TestProxy_AnthropicStreamingUsage(t *testing.T) {
+	body := `event: message_start
+data: {"type":"message_start","message":{"id":"msg_stream","model":"claude-opus-5","usage":{"input_tokens":13,"cache_read_input_tokens":8}}}
+
+event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_bash","name":"Bash","input":{}}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"command\":\"go test ./...\",\"description\":\"Run tests\"}"}}
+
+event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":21}}
+
+event: message_stop
+data: {"type":"message_stop"}
+
+`
+	upstream := streamingUpstream(t, "/v1/messages", body)
+	defer upstream.Close()
+
+	sink := &recordingSink{}
+	p := newTestProxy(t, upstream.URL, upstream.URL, sink)
+	resp := postJSON(t, p.Handler(), "/v1/messages", `{"model":"claude-opus-5","stream":true}`)
+	defer resp.Body.Close()
+	gotBody, _ := io.ReadAll(resp.Body)
+	if string(gotBody) != body {
+		t.Fatalf("response body = %q, want %q", gotBody, body)
+	}
+
+	ev := sink.one(t)
+	if !ev.Stream || ev.ResponseID != "msg_stream" || ev.ModelReported != "claude-opus-5" {
+		t.Fatalf("event = %+v, want streaming Anthropic metadata", ev)
+	}
+	// Input is normalized to include cache read: fresh 13 + cache read 8 = 21.
+	checkUsagePtr(t, "InputTokens", ev.Usage.InputTokens, 21)
+	checkUsagePtr(t, "OutputTokens", ev.Usage.OutputTokens, 21)
+	checkUsagePtr(t, "CachedInputTokens", ev.Usage.CachedInputTokens, 8)
+	// Anthropic sends no total_tokens; derived from Input 21 + Output 21.
+	checkUsagePtr(t, "TotalTokens", ev.Usage.TotalTokens, 42)
+	if len(ev.ToolCalls) != 1 {
+		t.Fatalf("ToolCalls = %+v, want one Bash call", ev.ToolCalls)
+	}
+	call := ev.ToolCalls[0]
+	if call.ID != "toolu_bash" || call.Name != "Bash" || call.Command != "go test ./..." || call.Description != "Run tests" {
+		t.Fatalf("tool call = %+v, want complete streamed Bash call", call)
+	}
+}
+
+// The client's Accept-Encoding is forwarded verbatim, so the upstream can
+// return a gzip-compressed SSE body. The proxy must relay those bytes to the
+// client untouched while still decoding its own telemetry copy — otherwise the
+// parser sees gzip noise, never reaches message_stop, and falsely reports a
+// parse_error on an otherwise-healthy 200 stream.
+func TestProxy_AnthropicGzipStreamingUsage(t *testing.T) {
+	raw := `event: message_start
+data: {"type":"message_start","message":{"id":"msg_gzip","model":"claude-opus-4-8","usage":{"input_tokens":13,"cache_read_input_tokens":8}}}
+
+event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":21}}
+
+event: message_stop
+data: {"type":"message_stop"}
+
+`
+	var gz bytes.Buffer
+	zw := gzip.NewWriter(&gz)
+	if _, err := zw.Write([]byte(raw)); err != nil {
+		t.Fatalf("gzip write: %v", err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatalf("gzip close: %v", err)
+	}
+	compressed := gz.Bytes()
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/messages" {
+			t.Errorf("upstream path = %q, want /v1/messages", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Content-Encoding", "gzip")
+		_, _ = w.Write(compressed)
+	}))
+	defer upstream.Close()
+
+	sink := &recordingSink{}
+	p := newTestProxy(t, upstream.URL, upstream.URL, sink)
+	resp := postJSON(t, p.Handler(), "/v1/messages", `{"model":"claude-opus-4-8","stream":true}`)
+	defer resp.Body.Close()
+
+	gotBody, _ := io.ReadAll(resp.Body)
+	if !bytes.Equal(gotBody, compressed) {
+		t.Fatalf("client body was re-encoded; proxy must stay byte-transparent")
+	}
+
+	ev := sink.one(t)
+	if ev.ErrorType != "" {
+		t.Fatalf("ErrorType = %q (%s), want empty", ev.ErrorType, ev.ErrorMessage)
+	}
+	if ev.ResponseID != "msg_gzip" || ev.ModelReported != "claude-opus-4-8" {
+		t.Fatalf("event = %+v, want decoded gzip metadata", ev)
+	}
+	// Input normalized to include cache read: fresh 13 + cache read 8 = 21.
+	checkUsagePtr(t, "InputTokens", ev.Usage.InputTokens, 21)
+	checkUsagePtr(t, "OutputTokens", ev.Usage.OutputTokens, 21)
+	checkUsagePtr(t, "CachedInputTokens", ev.Usage.CachedInputTokens, 8)
+}
+
+// An encoding the stdlib cannot decode must not become a bogus parse_error: the
+// client still gets its bytes, and the row simply carries no usage.
+func TestProxy_UndecodableEncodingSkipsUsageWithoutParseError(t *testing.T) {
+	body := []byte("this is not really brotli, but the proxy cannot decode br")
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Content-Encoding", "br")
+		_, _ = w.Write(body)
+	}))
+	defer upstream.Close()
+
+	sink := &recordingSink{}
+	p := newTestProxy(t, upstream.URL, upstream.URL, sink)
+	resp := postJSON(t, p.Handler(), "/v1/messages", `{"model":"claude-opus-4-8","stream":true}`)
+	defer resp.Body.Close()
+
+	gotBody, _ := io.ReadAll(resp.Body)
+	if !bytes.Equal(gotBody, body) {
+		t.Fatalf("client body altered; proxy must stay byte-transparent")
+	}
+
+	ev := sink.one(t)
+	if ev.ErrorType != "" {
+		t.Fatalf("ErrorType = %q, want empty for an undecodable body", ev.ErrorType)
+	}
+}
+
+// The proxy pins the upstream to gzip when the client accepts it, so the usage
+// parser always gets a stdlib-decodable body regardless of what fancier codec
+// (br, zstd) the client also advertised.
+func TestProxy_ForcesGzipUpstreamWhenClientAcceptsIt(t *testing.T) {
+	raw := `event: message_start
+data: {"type":"message_start","message":{"id":"msg_forced","model":"claude-opus-4-8","usage":{"input_tokens":5}}}
+
+event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":9}}
+
+event: message_stop
+data: {"type":"message_stop"}
+
+`
+	var gotAcceptEncoding string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAcceptEncoding = r.Header.Get("Accept-Encoding")
+		var gz bytes.Buffer
+		zw := gzip.NewWriter(&gz)
+		_, _ = zw.Write([]byte(raw))
+		_ = zw.Close()
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Content-Encoding", "gzip")
+		_, _ = w.Write(gz.Bytes())
+	}))
+	defer upstream.Close()
+
+	sink := &recordingSink{}
+	p := newTestProxy(t, upstream.URL, upstream.URL, sink)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewBufferString(`{"model":"claude-opus-4-8","stream":true}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept-Encoding", "br, gzip, deflate")
+	rec := httptest.NewRecorder()
+	p.Handler().ServeHTTP(rec, req)
+	resp := rec.Result()
+	defer resp.Body.Close()
+	_, _ = io.ReadAll(resp.Body)
+
+	if gotAcceptEncoding != "gzip" {
+		t.Fatalf("upstream Accept-Encoding = %q, want %q", gotAcceptEncoding, "gzip")
+	}
+
+	ev := sink.one(t)
+	if ev.ErrorType != "" {
+		t.Fatalf("ErrorType = %q (%s), want empty", ev.ErrorType, ev.ErrorMessage)
+	}
+	checkUsagePtr(t, "InputTokens", ev.Usage.InputTokens, 5)
+	checkUsagePtr(t, "OutputTokens", ev.Usage.OutputTokens, 9)
+}
+
+func TestClientAcceptsGzip(t *testing.T) {
+	tests := []struct {
+		name   string
+		header string
+		want   bool
+	}{
+		{name: "missing", header: "", want: false},
+		{name: "gzip only", header: "gzip", want: true},
+		{name: "list with gzip", header: "br, gzip, deflate", want: true},
+		{name: "wildcard", header: "*", want: true},
+		{name: "gzip with q", header: "gzip;q=0.5", want: true},
+		{name: "gzip disabled by q0", header: "gzip;q=0", want: false},
+		{name: "wildcard disabled by q0", header: "*;q=0", want: false},
+		{name: "no gzip", header: "br, zstd", want: false},
+		{name: "identity only", header: "identity", want: false},
+		{name: "case insensitive", header: "GZIP", want: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := http.Header{}
+			if tt.header != "" {
+				h.Set("Accept-Encoding", tt.header)
+			}
+			if got := clientAcceptsGzip(h); got != tt.want {
+				t.Fatalf("clientAcceptsGzip(%q) = %v, want %v", tt.header, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestClientName(t *testing.T) {
+	tests := []struct {
+		name       string
+		userAgent  string
+		originator string
+		want       string
+	}{
+		{name: "codex cli", userAgent: "codex-tui/0.146.0", want: "Codex CLI"},
+		{name: "zed originator", userAgent: "codex-tui/0.146.0", originator: "zed", want: "Zed"},
+		{name: "codex generic", userAgent: "codex-acp/1.0", want: "Codex"},
+		{name: "claude code", userAgent: "claude-cli/2.1.218", want: "Claude Code"},
+		{name: "originator fallback", originator: "custom-editor", want: "custom-editor"},
+		{name: "user-agent fallback", userAgent: "curl/8.21.0", want: "curl/8.21.0"},
+		{name: "unknown", want: "Unknown"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := http.Header{}
+			if tt.userAgent != "" {
+				h.Set("User-Agent", tt.userAgent)
+			}
+			if tt.originator != "" {
+				h.Set("Originator", tt.originator)
+			}
+			if got := clientName(h); got != tt.want {
+				t.Fatalf("clientName() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestUpstreamPath(t *testing.T) {
+	tests := []struct {
+		name     string
+		provider string
+		path     string
+		want     string
+	}{
+		{"openai strips v1 responses", "openai", "/v1/responses", "/responses"},
+		{"openai strips v1 chat", "openai", "/v1/chat/completions", "/chat/completions"},
+		{"openai without v1 unchanged", "openai", "/responses", "/responses"},
+		{"openai bare v1 becomes root", "openai", "/v1", "/"},
+		{"anthropic verbatim", "anthropic", "/v1/messages", "/v1/messages"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := upstreamPath(tt.provider, tt.path); got != tt.want {
+				t.Fatalf("upstreamPath(%q, %q) = %q, want %q", tt.provider, tt.path, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestProxy_BrokenStreamingUsageRecordsParseError(t *testing.T) {
+	body := "event: response.created\ndata: {\"type\":\"response.created\"}\n\n"
+	upstream := streamingUpstream(t, "/responses", body)
+	defer upstream.Close()
+
+	sink := &recordingSink{}
+	p := newTestProxy(t, upstream.URL, upstream.URL, sink)
+	resp := postJSON(t, p.Handler(), "/v1/responses", `{"model":"gpt-5.3-codex","stream":true}`)
+	defer resp.Body.Close()
+	gotBody, _ := io.ReadAll(resp.Body)
+	if string(gotBody) != body {
+		t.Fatalf("response body = %q, want %q", gotBody, body)
+	}
+
+	ev := sink.one(t)
+	if ev.ErrorType != "parse_error" {
+		t.Fatalf("ErrorType = %q, want parse_error", ev.ErrorType)
+	}
+}
+
+func TestProxy_UpstreamResponseHeaderTimeout(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(50 * time.Millisecond)
+		_, _ = io.WriteString(w, `{"id":"late"}`)
+	}))
+	defer upstream.Close()
+
+	sink := &recordingSink{}
+	p, err := NewWithOptions(upstream.URL, upstream.URL, sink, slog.New(slog.DiscardHandler), Options{
+		RequestTimeout: time.Nanosecond,
+	})
+	if err != nil {
+		t.Fatalf("NewWithOptions() error = %v", err)
+	}
+
+	resp := postJSON(t, p.Handler(), "/v1/responses", `{"model":"gpt-5.3-codex"}`)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadGateway {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusBadGateway)
+	}
+	sink.mu.Lock()
+	defer sink.mu.Unlock()
+	if len(sink.events) != 0 {
+		t.Fatalf("events len = %d, want 0", len(sink.events))
+	}
+}
+
+// An idle stream is an upstream-side failure: the caller is still connected and
+// tokens may already have been spent, so it must produce a row.
+func TestProxy_IdleStreamTimeoutRecordsInterruptedStream(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		<-r.Context().Done()
+	}))
+	defer upstream.Close()
+
+	sink := &recordingSink{}
+	p, err := NewWithOptions(upstream.URL, upstream.URL, sink, slog.New(slog.DiscardHandler), Options{
+		IdleWriteTimeout: 20 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("NewWithOptions() error = %v", err)
+	}
+	proxyServer := httptest.NewServer(p.Handler())
+	defer proxyServer.Close()
+
+	start := time.Now()
+	resp, err := http.Post(proxyServer.URL+"/v1/responses", "application/json", bytes.NewBufferString(`{"model":"gpt-5.3-codex","stream":true}`))
+	if err != nil {
+		t.Fatalf("POST proxy: %v", err)
+	}
+	_, _ = io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("idle stream returned after %v, want under 1s", elapsed)
+	}
+
+	ev := waitForEvent(t, sink)
+	if ev.ErrorType != errStreamInterrupted {
+		t.Fatalf("ErrorType = %q, want %q", ev.ErrorType, errStreamInterrupted)
+	}
+	if ev.ModelRequested != "gpt-5.3-codex" || !ev.Stream {
+		t.Fatalf("event = %+v, want the streaming request's identity preserved", ev)
+	}
+}
+
+// An upstream that dies mid-stream must still produce a row carrying whatever
+// usage was already reported — that spend is real.
+func TestProxy_UpstreamDiesMidStreamRecordsPartialUsage(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, `event: message_start
+data: {"type":"message_start","message":{"id":"msg_cut","model":"claude-opus-5","usage":{"input_tokens":97,"cache_read_input_tokens":12}}}
+
+`)
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		// Hijack and slam the socket so the proxy sees a read failure rather
+		// than a clean EOF.
+		conn, _, err := http.NewResponseController(w).Hijack()
+		if err != nil {
+			t.Errorf("hijack: %v", err)
+			return
+		}
+		_ = conn.Close()
+	}))
+	defer upstream.Close()
+
+	sink := &recordingSink{}
+	p := newTestProxy(t, upstream.URL, upstream.URL, sink)
+	proxyServer := httptest.NewServer(p.Handler())
+	defer proxyServer.Close()
+
+	resp, err := http.Post(proxyServer.URL+"/v1/messages", "application/json", bytes.NewBufferString(`{"model":"claude-opus-5","stream":true}`))
+	if err != nil {
+		t.Fatalf("POST proxy: %v", err)
+	}
+	_, _ = io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+
+	ev := waitForEvent(t, sink)
+	if ev.ErrorType != errStreamInterrupted {
+		t.Fatalf("ErrorType = %q, want %q", ev.ErrorType, errStreamInterrupted)
+	}
+	if ev.ResponseID != "msg_cut" || ev.ModelReported != "claude-opus-5" {
+		t.Fatalf("event = %+v, want partial identity from message_start", ev)
+	}
+	// Input normalized to include cache read: fresh 97 + cache read 12 = 109.
+	checkUsagePtr(t, "InputTokens", ev.Usage.InputTokens, 109)
+	checkUsagePtr(t, "CachedInputTokens", ev.Usage.CachedInputTokens, 12)
+}
+
+// A client that hangs up mid-stream is not a completed request; there is
+// nothing to attribute, so no row is written.
+func TestProxy_ClientDisconnectRecordsNothing(t *testing.T) {
+	release := make(chan struct{})
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, "event: response.created\ndata: {\"type\":\"response.created\"}\n\n")
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		select {
+		case <-release:
+		case <-r.Context().Done():
+		}
+	}))
+	defer upstream.Close()
+	defer close(release)
+
+	sink := &recordingSink{}
+	p := newTestProxy(t, upstream.URL, upstream.URL, sink)
+	proxyServer := httptest.NewServer(p.Handler())
+	defer proxyServer.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, proxyServer.URL+"/v1/responses",
+		bytes.NewBufferString(`{"model":"gpt-5.3-codex","stream":true}`))
+	if err != nil {
+		t.Fatalf("NewRequestWithContext: %v", err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("POST proxy: %v", err)
+	}
+	// Read the first frame so the copy is underway, then hang up.
+	buf := make([]byte, 16)
+	_, _ = resp.Body.Read(buf)
+	cancel()
+	_ = resp.Body.Close()
+
+	// Give the handler time to notice and finish; it must stay silent.
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		sink.mu.Lock()
+		n := len(sink.events)
+		sink.mu.Unlock()
+		if n != 0 {
+			t.Fatalf("events len = %d, want 0 for a client disconnect", n)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// TestProxy_ClientDisconnectAfterTerminalRecordsUsage covers Codex's real
+// behavior: it closes the socket the instant it reads the terminal SSE event,
+// before the proxy reads the upstream EOF. The full response was delivered and
+// parsed, so the request must still be recorded with its usage — not discarded
+// as an abandoned disconnect.
+func TestProxy_ClientDisconnectAfterTerminalRecordsUsage(t *testing.T) {
+	const body = `event: response.completed
+data: {"type":"response.completed","response":{"id":"resp_disc","model":"gpt-5.6-sol","status":"completed","usage":{"input_tokens":11,"output_tokens":7,"total_tokens":18}}}
+
+`
+	release := make(chan struct{})
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, body)
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		// Hold the connection open past the terminal event so the proxy is still
+		// mid-copy when the client hangs up — exactly the window Codex closes in.
+		select {
+		case <-release:
+		case <-r.Context().Done():
+		}
+	}))
+	defer upstream.Close()
+	defer close(release)
+
+	sink := &recordingSink{}
+	p := newTestProxy(t, upstream.URL, upstream.URL, sink)
+	proxyServer := httptest.NewServer(p.Handler())
+	defer proxyServer.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, proxyServer.URL+"/v1/responses",
+		bytes.NewBufferString(`{"model":"gpt-5.6-sol","stream":true}`))
+	if err != nil {
+		t.Fatalf("NewRequestWithContext: %v", err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("POST proxy: %v", err)
+	}
+	// Drain exactly the terminal frame the upstream wrote, then hang up.
+	if _, err := io.ReadFull(resp.Body, make([]byte, len(body))); err != nil {
+		t.Fatalf("read terminal frame: %v", err)
+	}
+	cancel()
+	_ = resp.Body.Close()
+
+	ev := waitForEvent(t, sink)
+	if ev.ModelReported != "gpt-5.6-sol" {
+		t.Fatalf("ModelReported = %q, want %q", ev.ModelReported, "gpt-5.6-sol")
+	}
+	if ev.ErrorType != "" {
+		t.Fatalf("ErrorType = %q, want empty (complete response)", ev.ErrorType)
+	}
+	checkUsagePtr(t, "InputTokens", ev.Usage.InputTokens, 11)
+	checkUsagePtr(t, "OutputTokens", ev.Usage.OutputTokens, 7)
+	checkUsagePtr(t, "TotalTokens", ev.Usage.TotalTokens, 18)
+}
+
+func waitForEvent(t *testing.T, sink *recordingSink) queue.UsageEvent {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		sink.mu.Lock()
+		n := len(sink.events)
+		sink.mu.Unlock()
+		if n > 0 {
+			return sink.one(t)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal("timed out waiting for a usage event")
+	return queue.UsageEvent{}
+}
+
+func streamingUpstream(t *testing.T, wantPath, body string) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != wantPath {
+			t.Fatalf("upstream path = %q, want %q", r.URL.Path, wantPath)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, body)
+	}))
+}
+
+func newTestProxy(t *testing.T, openaiUpstream, anthropicUpstream string, sink EventSink) *Proxy {
+	t.Helper()
+	p, err := New(openaiUpstream, anthropicUpstream, sink, slog.New(slog.DiscardHandler))
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	return p
+}
+
+func postJSON(t *testing.T, h http.Handler, path, body string) *http.Response {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, path, bytes.NewBufferString(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	return rec.Result()
+}
+
+func checkUsagePtr(t *testing.T, name string, got *int64, want int64) {
+	t.Helper()
+	if got == nil {
+		t.Fatalf("%s = nil, want %d", name, want)
+	}
+	if *got != want {
+		t.Fatalf("%s = %d, want %d", name, *got, want)
+	}
+}
