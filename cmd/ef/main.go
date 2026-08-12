@@ -341,6 +341,7 @@ func runServe(args []string) error {
 		IdleWriteTimeout: cfg.IdleTimeout,
 		Source:           cfg.Source,
 		Host:             cfg.Host,
+		WebProxyEnabled:  cfg.WebProxyEnabled,
 	})
 	if err != nil {
 		return err
@@ -348,10 +349,18 @@ func runServe(args []string) error {
 
 	handler := p.Handler()
 	if dashboard != nil {
-		mux := http.NewServeMux()
-		mux.Handle("/ui/", dashboard)
-		mux.Handle("/", p.Handler())
-		handler = mux
+		proxyHandler := p.Handler()
+		// A ServeMux cannot receive CONNECT (authority-form target, empty path)
+		// or classify absolute-form URLs, so dispatch forward-proxy traffic to
+		// the proxy handler ahead of any path matching; only origin-form /ui/
+		// requests go to the dashboard.
+		handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodConnect && !r.URL.IsAbs() && strings.HasPrefix(r.URL.Path, "/ui/") {
+				dashboard.ServeHTTP(w, r)
+				return
+			}
+			proxyHandler.ServeHTTP(w, r)
+		})
 	}
 	log.Info("excursion-funnel configured", "mode", mode, "source", cfg.Source,
 		"openai_upstream", cfg.OpenAIUpstream, "anthropic_upstream", cfg.AnthropicUpstream,
@@ -690,6 +699,24 @@ func printInspectRows(rows []report.InspectRow) {
 			}
 			if call.ArgumentsJSON != "" {
 				fmt.Fprintf(os.Stdout, "  arguments_json: %s\n", call.ArgumentsJSON)
+			}
+		}
+		for _, request := range r.WebRequests {
+			fmt.Fprintf(os.Stdout, "web_request[%d]: %s\n", request.Ordinal, request.Name)
+			if request.ID != "" {
+				fmt.Fprintf(os.Stdout, "  id: %s\n", request.ID)
+			}
+			if request.Query != "" {
+				fmt.Fprintf(os.Stdout, "  query: %s\n", request.Query)
+			}
+			if request.URL != "" {
+				fmt.Fprintf(os.Stdout, "  url: %s\n", request.URL)
+			}
+			if request.Domain != "" {
+				fmt.Fprintf(os.Stdout, "  domain: %s\n", request.Domain)
+			}
+			if request.ArgumentsJSON != "" {
+				fmt.Fprintf(os.Stdout, "  arguments_json: %s\n", request.ArgumentsJSON)
 			}
 		}
 	}

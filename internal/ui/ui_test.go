@@ -46,6 +46,9 @@ func TestHandleIndex_ServesDashboardHTML(t *testing.T) {
 		`fetch("/ui/api/sources")`,
 		`id="tools-table"`,
 		`fetch("/ui/api/tools")`,
+		`data-table-key="web-requests"`,
+		`id="web-requests-table"`,
+		`fetch("/ui/api/web-requests")`,
 		`https://cdn.jsdelivr.net/npm/highlight.js@11.11.1/lib/common.min.js`,
 		`hljs.highlightElement`,
 		`data-command-index`,
@@ -98,6 +101,34 @@ func TestHandleToolCalls_ReturnsTodaysCalls(t *testing.T) {
 	got := rows[0]
 	if got.RequestID != "req-ok-1" || got.Client != "Zed" || got.Model != "gpt-5.3-codex" || got.Name != "Bash" || got.Command != "go test ./..." || got.Description != "Run tests" {
 		t.Fatalf("tool row = %+v, want the persisted Bash call", got)
+	}
+}
+
+func TestHandleWebRequests_ReturnsTodaysRequests(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "usage.sqlite")
+	st, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatalf("store.Open() error = %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	today := beginningOfDay(time.Now())
+	if err := st.InsertBatch(t.Context(), []queue.UsageEvent{{
+		RequestID: "req-web-today", StartedAt: today.Add(time.Hour), CompletedAt: today.Add(time.Hour + time.Second),
+		Method: "POST", Path: "/v1/responses", UpstreamURL: "https://api.openai.com/v1/responses",
+		ModelReported: "gpt-5.5-codex", ClientName: "Codex", WebRequests: []queue.WebRequest{{Name: "web_search_call", Query: "Go release"}},
+	}}); err != nil {
+		t.Fatalf("InsertBatch() error = %v", err)
+	}
+	rec := doRequest(t, New(report.New(st), slog.New(slog.DiscardHandler)), http.MethodGet, "/ui/api/web-requests")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	var rows []report.WebRequestRow
+	if err := json.Unmarshal(rec.Body.Bytes(), &rows); err != nil {
+		t.Fatalf("decode body: %v: %s", err, rec.Body.String())
+	}
+	if len(rows) != 1 || rows[0].Name != "web_search_call" || rows[0].Query != "Go release" {
+		t.Fatalf("rows = %+v, want today's web search", rows)
 	}
 }
 
@@ -339,6 +370,15 @@ func newTestHandler(t *testing.T) http.Handler {
 			ClientName:   "Claude Code",
 			ErrorType:    "parse_error",
 			ErrorMessage: "boom",
+		},
+		{
+			RequestID:   "req-health-check",
+			StartedAt:   now.Add(2 * time.Minute),
+			CompletedAt: now.Add(2*time.Minute + time.Second),
+			Method:      "GET",
+			Path:        "/health",
+			UpstreamURL: "http://localhost:8787/health",
+			UserAgent:   "curl/8.21.0",
 		},
 	}
 	if err := st.InsertBatch(t.Context(), events); err != nil {

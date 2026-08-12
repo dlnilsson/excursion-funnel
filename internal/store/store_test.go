@@ -28,6 +28,9 @@ func TestOpenCreatesLiveDuckDBSchema(t *testing.T) {
 			t.Fatalf("requests missing %q", name)
 		}
 	}
+	if _, err := tableColumns(st.db, "web_requests"); err != nil {
+		t.Fatalf("web_requests schema: %v", err)
+	}
 	var aggregateTables int
 	if err := st.db.QueryRow(`SELECT COUNT(*) FROM information_schema.tables
 		WHERE table_name IN ('usage_daily_model', 'usage_model_histogram')`).Scan(&aggregateTables); err != nil {
@@ -88,7 +91,8 @@ func TestInsertBatchIsIdempotentAndPreservesTypes(t *testing.T) {
 		StartedAt: started, CompletedAt: started.Add(500 * time.Millisecond),
 		Method: "POST", Path: "/v1/responses", UpstreamURL: "https://example.test/v1/responses",
 		HTTPStatus: 200, Usage: queue.Usage{InputTokens: &input},
-		ToolCalls: []queue.ToolCall{{ID: "call-1", Name: "Bash", Command: "go test ./..."}},
+		ToolCalls:   []queue.ToolCall{{ID: "call-1", Name: "Bash", Command: "go test ./..."}},
+		WebRequests: []queue.WebRequest{{ID: "web-1", Name: "web_search_call", Query: "DuckDB"}},
 	}
 	if err := st.InsertBatch(t.Context(), []queue.UsageEvent{event, event}); err != nil {
 		t.Fatal(err)
@@ -96,7 +100,7 @@ func TestInsertBatchIsIdempotentAndPreservesTypes(t *testing.T) {
 	if err := st.InsertBatch(t.Context(), []queue.UsageEvent{event}); err != nil {
 		t.Fatal(err)
 	}
-	var count, toolCount, duration int64
+	var count, toolCount, webCount, duration int64
 	var gotStarted time.Time
 	var source, host string
 	if err := st.db.QueryRow(`SELECT COUNT(*), min(started_at), min(source), min(host), min(duration_ms) FROM requests`).
@@ -106,8 +110,11 @@ func TestInsertBatchIsIdempotentAndPreservesTypes(t *testing.T) {
 	if err := st.db.QueryRow(`SELECT COUNT(*) FROM tool_calls`).Scan(&toolCount); err != nil {
 		t.Fatal(err)
 	}
-	if count != 1 || toolCount != 1 || duration != 500 || source != "daniel" || host != "workstation" || !gotStarted.Equal(started) {
-		t.Fatalf("round trip count=%d tools=%d duration=%d source=%q host=%q started=%v", count, toolCount, duration, source, host, gotStarted)
+	if err := st.db.QueryRow(`SELECT COUNT(*) FROM web_requests`).Scan(&webCount); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 || toolCount != 1 || webCount != 1 || duration != 500 || source != "daniel" || host != "workstation" || !gotStarted.Equal(started) {
+		t.Fatalf("round trip count=%d tools=%d web=%d duration=%d source=%q host=%q started=%v", count, toolCount, webCount, duration, source, host, gotStarted)
 	}
 }
 
@@ -120,7 +127,7 @@ func TestDeleteRequestsStartedBefore(t *testing.T) {
 	old := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
 	newer := old.AddDate(0, 1, 0)
 	events := []queue.UsageEvent{
-		{RequestID: "old", StartedAt: old, CompletedAt: old.Add(time.Second), Method: "POST", Path: "/v1/responses", UpstreamURL: "/", ToolCalls: []queue.ToolCall{{Name: "Bash"}}},
+		{RequestID: "old", StartedAt: old, CompletedAt: old.Add(time.Second), Method: "POST", Path: "/v1/responses", UpstreamURL: "/", ToolCalls: []queue.ToolCall{{Name: "Bash"}}, WebRequests: []queue.WebRequest{{Name: "web_search_call", Query: "old"}}},
 		{RequestID: "new", StartedAt: newer, CompletedAt: newer.Add(time.Second), Method: "POST", Path: "/v1/messages", UpstreamURL: "/"},
 	}
 	if err := st.InsertBatch(t.Context(), events); err != nil {
@@ -129,6 +136,13 @@ func TestDeleteRequestsStartedBefore(t *testing.T) {
 	deleted, err := st.DeleteRequestsStartedBefore(t.Context(), newer)
 	if err != nil || deleted != 1 {
 		t.Fatalf("deleted=%d err=%v", deleted, err)
+	}
+	var webCount int
+	if err := st.db.QueryRow(`SELECT COUNT(*) FROM web_requests`).Scan(&webCount); err != nil {
+		t.Fatal(err)
+	}
+	if webCount != 0 {
+		t.Fatalf("remaining web requests = %d, want 0", webCount)
 	}
 }
 
@@ -200,6 +214,17 @@ CREATE TABLE tool_calls (
   arguments_json TEXT,
   PRIMARY KEY (request_id, ordinal)
 );
+CREATE TABLE web_requests (
+  request_id TEXT NOT NULL,
+  ordinal INTEGER NOT NULL,
+  web_request_id TEXT,
+  name TEXT NOT NULL,
+  query TEXT,
+  url TEXT,
+  domain TEXT,
+  arguments_json TEXT,
+  PRIMARY KEY (request_id, ordinal)
+);
 INSERT INTO requests (
   id, response_id, started_at, completed_at, duration_ms, method, path,
   upstream_url, model_requested, model_reported, stream, http_status,
@@ -210,7 +235,8 @@ INSERT INTO requests (
   'https://example.test', 'gpt-5', 'gpt-5', 1, 200, 10, 4, 14,
   '2026-08-17T12:35:00+02:00'
 );
-INSERT INTO tool_calls VALUES ('legacy-1', 0, 'call-1', 'shell', 'echo ok', NULL, '{}');`)
+INSERT INTO tool_calls VALUES ('legacy-1', 0, 'call-1', 'shell', 'echo ok', NULL, '{}');
+INSERT INTO web_requests VALUES ('legacy-1', 0, 'web-1', 'web_search_call', 'DuckDB migration', NULL, NULL, '{}');`)
 	if err != nil {
 		_ = legacy.Close()
 		t.Fatal(err)
@@ -245,15 +271,18 @@ FROM requests WHERE id = 'legacy-1'`).Scan(&source, &started, &originator, &clie
 	if originator.Valid || clientName.Valid {
 		t.Fatalf("missing legacy fields should migrate as NULL: originator=%+v client=%+v", originator, clientName)
 	}
-	var requestCount, toolCount int
+	var requestCount, toolCount, webCount int
 	if err := st.db.QueryRow(`SELECT COUNT(*) FROM requests`).Scan(&requestCount); err != nil {
 		t.Fatal(err)
 	}
 	if err := st.db.QueryRow(`SELECT COUNT(*) FROM tool_calls`).Scan(&toolCount); err != nil {
 		t.Fatal(err)
 	}
-	if requestCount != 1 || toolCount != 1 {
-		t.Fatalf("migrated counts: requests=%d tools=%d", requestCount, toolCount)
+	if err := st.db.QueryRow(`SELECT COUNT(*) FROM web_requests`).Scan(&webCount); err != nil {
+		t.Fatal(err)
+	}
+	if requestCount != 1 || toolCount != 1 || webCount != 1 {
+		t.Fatalf("migrated counts: requests=%d tools=%d web=%d", requestCount, toolCount, webCount)
 	}
 }
 
@@ -299,7 +328,8 @@ func TestQuackRoundTrip(t *testing.T) {
 	event := queue.UsageEvent{
 		RequestID: "remote-1", Source: "integration", StartedAt: time.Now(),
 		Method: "POST", Path: "/v1/responses", UpstreamURL: "/", ErrorMessage: "it's recoverable",
-		ToolCalls: []queue.ToolCall{{ID: "call-1", Name: "shell", Command: "echo 'ok'"}},
+		ToolCalls:   []queue.ToolCall{{ID: "call-1", Name: "shell", Command: "echo 'ok'"}},
+		WebRequests: []queue.WebRequest{{ID: "web-1", Name: "web_search_call", Query: "DuckDB Quack"}},
 	}
 	for range 2 {
 		if err := remote.InsertBatch(t.Context(), []queue.UsageEvent{event}); err != nil {
@@ -313,15 +343,18 @@ func TestQuackRoundTrip(t *testing.T) {
 	if source != "integration" || errorMessage != "it's recoverable" {
 		t.Fatalf("source = %q error_message = %q", source, errorMessage)
 	}
-	var requestCount, toolCount int
+	var requestCount, toolCount, webCount int
 	if err := ledger.db.QueryRow(`SELECT COUNT(*) FROM requests WHERE id = 'remote-1'`).Scan(&requestCount); err != nil {
 		t.Fatal(err)
 	}
 	if err := ledger.db.QueryRow(`SELECT COUNT(*) FROM tool_calls WHERE request_id = 'remote-1'`).Scan(&toolCount); err != nil {
 		t.Fatal(err)
 	}
-	if requestCount != 1 || toolCount != 1 {
-		t.Fatalf("idempotent remote counts: requests=%d tools=%d", requestCount, toolCount)
+	if err := ledger.db.QueryRow(`SELECT COUNT(*) FROM web_requests WHERE request_id = 'remote-1'`).Scan(&webCount); err != nil {
+		t.Fatal(err)
+	}
+	if requestCount != 1 || toolCount != 1 || webCount != 1 {
+		t.Fatalf("idempotent remote counts: requests=%d tools=%d web=%d", requestCount, toolCount, webCount)
 	}
 	var remoteCount int
 	if err := remote.DB().QueryRow(`SELECT COUNT(*) FROM requests WHERE id = ?`, "remote-1").Scan(&remoteCount); err != nil {

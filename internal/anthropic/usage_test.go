@@ -76,6 +76,56 @@ func TestExtractCompleted_ToolUse(t *testing.T) {
 	}
 }
 
+func TestExtractCompleted_WebSearchUsage(t *testing.T) {
+	body := []byte(`{
+		"id":"msg_web","model":"claude-opus-5",
+		"usage":{"input_tokens":4,"output_tokens":2,"server_tool_use":{"web_search_requests":2}}
+	}`)
+	got, err := ExtractCompleted(body)
+	if err != nil {
+		t.Fatalf("ExtractCompleted() error = %v", err)
+	}
+	if len(got.WebRequests) != 2 {
+		t.Fatalf("WebRequests = %+v, want two synthetic web requests", got.WebRequests)
+	}
+	for _, request := range got.WebRequests {
+		if request.Name != "web_search" || request.ArgumentsJSON == "" {
+			t.Fatalf("web request = %+v, want synthetic usage details", request)
+		}
+	}
+}
+
+// Claude Code's WebSearch/WebFetch are client-side tools: the API body carries
+// a plain tool_use block named WebSearch/WebFetch (no server_tool_use count).
+// These belong in the web-request ledger, not the generic tool-call ledger.
+func TestExtractCompleted_ClientWebTools(t *testing.T) {
+	body := []byte(`{
+		"id":"msg_client_web","model":"claude-opus-5",
+		"content":[
+			{"type":"tool_use","id":"toolu_ws","name":"WebSearch","input":{"query":"nord theme"}},
+			{"type":"tool_use","id":"toolu_wf","name":"WebFetch","input":{"url":"https://example.com/docs"}}
+		]
+	}`)
+	got, err := ExtractCompleted(body)
+	if err != nil {
+		t.Fatalf("ExtractCompleted() error = %v", err)
+	}
+	if len(got.ToolCalls) != 0 {
+		t.Fatalf("ToolCalls = %+v, want none (web tools must not be double-counted)", got.ToolCalls)
+	}
+	if len(got.WebRequests) != 2 {
+		t.Fatalf("WebRequests = %+v, want two client web requests", got.WebRequests)
+	}
+	search := got.WebRequests[0]
+	if search.Name != "WebSearch" || search.Query != "nord theme" {
+		t.Fatalf("web search = %+v, want WebSearch with projected query", search)
+	}
+	fetch := got.WebRequests[1]
+	if fetch.Name != "WebFetch" || fetch.URL != "https://example.com/docs" {
+		t.Fatalf("web fetch = %+v, want WebFetch with projected url", fetch)
+	}
+}
+
 func TestExtractCompleted_MissingUsageFields(t *testing.T) {
 	body := []byte(`{
 		"id": "msg_def456",
@@ -191,6 +241,37 @@ data: {"type":"message_stop"}
 	call := got.ToolCalls[0]
 	if call.ID != "toolu_bash" || call.Name != "Bash" || call.Command != "go test ./..." || call.Description != "Run tests" {
 		t.Fatalf("tool call = %+v, want complete streamed Bash call", call)
+	}
+}
+
+// The streaming path must classify a client-side WebSearch block the same way
+// the non-streaming path does: as a web request, never a generic tool call.
+func TestStreamParser_ClientWebSearch(t *testing.T) {
+	p := NewStreamParser(1024 * 1024)
+	p.Feed([]byte(`event: content_block_start
+data: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_ws","name":"WebSearch","input":{}}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"query\":\"nord theme\"}"}}
+
+event: message_stop
+data: {"type":"message_stop"}
+
+`))
+
+	got, err := p.Result()
+	if err != nil {
+		t.Fatalf("Result() error = %v", err)
+	}
+	if len(got.ToolCalls) != 0 {
+		t.Fatalf("ToolCalls = %+v, want none (WebSearch must not be double-counted)", got.ToolCalls)
+	}
+	if len(got.WebRequests) != 1 {
+		t.Fatalf("WebRequests = %+v, want one streamed WebSearch", got.WebRequests)
+	}
+	request := got.WebRequests[0]
+	if request.ID != "toolu_ws" || request.Name != "WebSearch" || request.Query != "nord theme" {
+		t.Fatalf("web request = %+v, want complete streamed WebSearch call", request)
 	}
 }
 

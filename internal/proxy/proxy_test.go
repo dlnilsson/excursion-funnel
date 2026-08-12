@@ -1,13 +1,17 @@
 package proxy
 
 import (
+	"bufio"
 	"bytes"
 	"compress/gzip"
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"sync"
 	"testing"
 	"time"
@@ -34,6 +38,30 @@ func (s *recordingSink) one(t *testing.T) queue.UsageEvent {
 		t.Fatalf("events len = %d, want 1", len(s.events))
 	}
 	return s.events[0]
+}
+
+// waitOne polls for exactly one recorded event, tolerating the asynchronous
+// teardown of a CONNECT tunnel that records its event after both copy loops
+// drain.
+func (s *recordingSink) waitOne(t *testing.T, timeout time.Duration) queue.UsageEvent {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for {
+		s.mu.Lock()
+		n := len(s.events)
+		var ev queue.UsageEvent
+		if n == 1 {
+			ev = s.events[0]
+		}
+		s.mu.Unlock()
+		if n == 1 {
+			return ev
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("events len = %d after %s, want 1", n, timeout)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
 func TestProxy_OpenAIStreamingUsage(t *testing.T) {
@@ -169,6 +197,146 @@ data: {"type":"response.completed","response":{"id":"resp_tool_proxy","model":"g
 	call := ev.ToolCalls[0]
 	if call.ID != "call_bash" || call.Name != "Bash" || call.Command != "go test ./..." {
 		t.Fatalf("tool call = %+v, want persisted Codex Bash call", call)
+	}
+}
+
+func TestProxy_ForwardProxyDoesNotRecordHTTPWebRequest(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/robots.txt" || r.URL.RawQuery != "source=test" {
+			t.Errorf("upstream URL = %q, want /robots.txt?source=test", r.URL.RequestURI())
+		}
+		w.Header().Set("Content-Type", "text/plain")
+		_, _ = io.WriteString(w, "User-agent: *\nDisallow: /private\n")
+	}))
+	defer upstream.Close()
+
+	sink := &recordingSink{}
+	p := newTestWebProxy(t, upstream.URL, upstream.URL, sink)
+	proxyServer := httptest.NewServer(p.Handler())
+	defer proxyServer.Close()
+
+	target := upstream.URL + "/robots.txt?source=test"
+	req, err := http.NewRequest(http.MethodGet, target, nil)
+	if err != nil {
+		t.Fatalf("NewRequest() error = %v", err)
+	}
+	req.Header.Set("User-Agent", "web-capture-test")
+	proxyURL, err := url.Parse(proxyServer.URL)
+	if err != nil {
+		t.Fatalf("Parse proxy URL: %v", err)
+	}
+	client := &http.Client{Transport: &http.Transport{Proxy: http.ProxyURL(proxyURL)}}
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("GET through forward proxy: %v", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK || string(body) != "User-agent: *\nDisallow: /private\n" {
+		t.Fatalf("proxy response = (%d, %q), want successful forwarded body", resp.StatusCode, body)
+	}
+
+	sink.mu.Lock()
+	n := len(sink.events)
+	sink.mu.Unlock()
+	if n != 0 {
+		t.Fatalf("events len = %d, want no generic forward-proxy event", n)
+	}
+}
+
+func TestProxy_ForwardProxyDisabledByDefault(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		t.Error("upstream must not be reached when the web proxy is disabled")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	sink := &recordingSink{}
+	p := newTestProxy(t, upstream.URL, upstream.URL, sink)
+	proxyServer := httptest.NewServer(p.Handler())
+	defer proxyServer.Close()
+
+	proxyURL, err := url.Parse(proxyServer.URL)
+	if err != nil {
+		t.Fatalf("Parse proxy URL: %v", err)
+	}
+	client := &http.Client{Transport: &http.Transport{Proxy: http.ProxyURL(proxyURL)}}
+	resp, err := client.Get(upstream.URL + "/robots.txt")
+	if err != nil {
+		t.Fatalf("GET through forward proxy: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 when web proxy disabled", resp.StatusCode)
+	}
+	sink.mu.Lock()
+	n := len(sink.events)
+	sink.mu.Unlock()
+	if n != 0 {
+		t.Fatalf("events len = %d, want none recorded when web proxy disabled", n)
+	}
+}
+
+func TestProxy_ForwardProxyCONNECTTunnel(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		_, _ = io.WriteString(w, "tunneled")
+	}))
+	defer upstream.Close()
+
+	sink := &recordingSink{}
+	p := newTestWebProxy(t, upstream.URL, upstream.URL, sink)
+	proxyServer := httptest.NewServer(p.Handler())
+	defer proxyServer.Close()
+
+	// Route an HTTPS-style request to the upstream host through CONNECT. The
+	// upstream is plain HTTP, so dial the tunnel and speak HTTP over it to
+	// prove the tunnel carries bytes end to end past the ServeMux.
+	proxyURL, err := url.Parse(proxyServer.URL)
+	if err != nil {
+		t.Fatalf("Parse proxy URL: %v", err)
+	}
+	upstreamURL, err := url.Parse(upstream.URL)
+	if err != nil {
+		t.Fatalf("Parse upstream URL: %v", err)
+	}
+	conn, err := net.Dial("tcp", proxyURL.Host)
+	if err != nil {
+		t.Fatalf("dial proxy: %v", err)
+	}
+	defer conn.Close()
+	if _, err := fmt.Fprintf(conn, "CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", upstreamURL.Host, upstreamURL.Host); err != nil {
+		t.Fatalf("write CONNECT: %v", err)
+	}
+	br := bufio.NewReader(conn)
+	connectResp, err := http.ReadResponse(br, &http.Request{Method: http.MethodConnect})
+	if err != nil {
+		t.Fatalf("read CONNECT response: %v", err)
+	}
+	if connectResp.StatusCode != http.StatusOK {
+		t.Fatalf("CONNECT status = %d, want 200 Connection Established", connectResp.StatusCode)
+	}
+
+	if _, err := fmt.Fprintf(conn, "GET / HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n", upstreamURL.Host); err != nil {
+		t.Fatalf("write tunneled GET: %v", err)
+	}
+	tunneled, err := http.ReadResponse(br, &http.Request{Method: http.MethodGet})
+	if err != nil {
+		t.Fatalf("read tunneled response: %v", err)
+	}
+	body, _ := io.ReadAll(tunneled.Body)
+	tunneled.Body.Close()
+	if string(body) != "tunneled" {
+		t.Fatalf("tunneled body = %q, want %q", body, "tunneled")
+	}
+
+	_ = conn.Close()
+	time.Sleep(20 * time.Millisecond)
+	sink.mu.Lock()
+	n := len(sink.events)
+	sink.mu.Unlock()
+	if n != 0 {
+		t.Fatalf("events len = %d, want no generic CONNECT event", n)
 	}
 }
 
@@ -728,6 +896,15 @@ func newTestProxy(t *testing.T, openaiUpstream, anthropicUpstream string, sink E
 	p, err := New(openaiUpstream, anthropicUpstream, sink, slog.New(slog.DiscardHandler))
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
+	}
+	return p
+}
+
+func newTestWebProxy(t *testing.T, openaiUpstream, anthropicUpstream string, sink EventSink) *Proxy {
+	t.Helper()
+	p, err := NewWithOptions(openaiUpstream, anthropicUpstream, sink, slog.New(slog.DiscardHandler), Options{WebProxyEnabled: true})
+	if err != nil {
+		t.Fatalf("NewWithOptions() error = %v", err)
 	}
 	return p
 }

@@ -641,6 +641,14 @@
   </table>
 </details>
 
+<details class="table-section" data-table-key="web-requests" id="web-requests-section" open>
+  <summary>Web requests today</summary>
+  <table id="web-requests-table">
+    <thead><tr><th>Started</th><th>Client</th><th>Model</th><th>Web tool</th><th>Query</th><th>URL/domain</th></tr></thead>
+    <tbody></tbody>
+  </table>
+</details>
+
 <footer class="agent-config-footer">
   <details class="agent-config" id="agent-config">
     <summary>Configure your agent</summary>
@@ -828,13 +836,14 @@ function setHistoryMetric(metric) {
 }
 
 async function load() {
-  const [summary, sources, history, modelHistory, errors, tools] = await Promise.all([
+  const [summary, sources, history, modelHistory, errors, tools, webRequests] = await Promise.all([
     fetch("/ui/api/summary").then(r => r.json()),
     fetch("/ui/api/sources").then(r => r.json()),
     fetch("/ui/api/history").then(r => r.json()),
     fetch("/ui/api/history/models").then(r => r.json()),
     fetch("/ui/api/errors").then(r => r.json()),
     fetch("/ui/api/tools").then(r => r.json()),
+    fetch("/ui/api/web-requests").then(r => r.json()),
   ]);
   renderStats(summary);
   renderSummary(summary);
@@ -842,6 +851,7 @@ async function load() {
   renderHistoryCharts(history, modelHistory);
   renderErrors(errors);
   renderTools(tools);
+  renderWebRequests(webRequests);
 }
 
 function renderSources(rows) {
@@ -1113,6 +1123,21 @@ function renderTools(rows) {
   </tr>`;
   }).join("");
   highlightToolCommands();
+}
+
+function renderWebRequests(rows) {
+  const tbody = document.querySelector("#web-requests-table tbody");
+  if (rows.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="6" class="empty">No web requests captured yet</td></tr>';
+    return;
+  }
+  tbody.innerHTML = rows.map(r => {
+    const destination = r.URL || r.Domain || "-";
+    return `<tr>
+      <td>${escapeHTML(toolTimestamp(r.StartedAt))}</td><td>${escapeHTML(clientLabel(r))}</td><td>${escapeHTML(r.Model)}</td>
+      <td>${escapeHTML(r.Name)}</td><td>${escapeHTML(r.Query || "-")}</td><td>${escapeHTML(destination)}</td>
+    </tr>`;
+  }).join("");
 }
 
 function highlightToolCommands() {

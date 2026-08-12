@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/dlnilsson/excursion-funnel/internal/queue"
 	"github.com/dlnilsson/excursion-funnel/internal/store"
 )
 
@@ -94,9 +95,10 @@ func (r *Reporter) Close() error {
 
 // SummaryOptions controls a usage aggregate query.
 type SummaryOptions struct {
-	Since   time.Time
-	Until   time.Time
-	GroupBy string
+	Since              time.Time
+	Until              time.Time
+	GroupBy            string
+	KnownProvidersOnly bool
 }
 
 // SummaryRow is one aggregate row from the usage ledger.
@@ -149,6 +151,7 @@ type InspectRow struct {
 	Total             sql.NullInt64
 	UsageJSON         string
 	ToolCalls         []ToolCall
+	WebRequests       []WebRequest
 }
 
 type ToolCall struct {
@@ -160,6 +163,20 @@ type ToolCall struct {
 	ArgumentsJSON string
 }
 
+// WebRequest is one provider-reported external web request associated with an
+// inspected model request.
+type WebRequest struct {
+	Ordinal       int
+	ID            string
+	Name          string
+	Query         string
+	URL           string
+	Domain        string
+	ArgumentsJSON string
+}
+
+// ToolCallRow is a tool invocation with the request metadata needed by the
+// dashboard's recent-tool table.
 type ToolCallRow struct {
 	RequestID   string
 	Source      string
@@ -174,6 +191,25 @@ type ToolCallRow struct {
 	Description string
 }
 
+// WebRequestRow is a web request with parent request metadata for reporting
+// and the dashboard.
+type WebRequestRow struct {
+	RequestID     string
+	StartedAt     time.Time
+	Provider      string
+	Client        string
+	Model         string
+	Ordinal       int
+	ID            string
+	Name          string
+	Query         string
+	URL           string
+	Domain        string
+	ArgumentsJSON string
+}
+
+// ToolCallOptions controls a tool-call query. Since is inclusive and Until is
+// exclusive, matching the usage-reporting date range semantics.
 type ToolCallOptions struct {
 	Since time.Time
 	Until time.Time
@@ -191,6 +227,14 @@ func (r *Reporter) Summary(ctx context.Context, opts SummaryOptions) ([]SummaryR
 		return nil, err
 	}
 	where, args := timeRange("started_at", opts.Since, opts.Until)
+	if opts.KnownProvidersOnly {
+		predicate := providerSQL("path") + " != 'unknown'"
+		if where == "" {
+			where = "WHERE " + predicate
+		} else {
+			where += " AND " + predicate
+		}
+	}
 	return r.scanSummary(ctx, buildSummaryQuery(selectGroup, where, groupExpr, orderBy), args...)
 }
 
@@ -379,6 +423,91 @@ FROM tool_calls WHERE request_id IN (`+strings.Join(placeholders, ", ")+`)`, ids
 	return out, nil
 }
 
+// WebRequests returns provider-reported web activity within the requested
+// interval, newest request first and event order preserved within a request.
+func (r *Reporter) WebRequests(ctx context.Context, opts ToolCallOptions) ([]WebRequestRow, error) {
+	limit := opts.Limit
+	if limit <= 0 {
+		limit = DefaultRecentToolCallLimit
+	}
+	where, args := timeRange("started_at", opts.Since, opts.Until)
+
+	// Quack cannot stream-scan requests and web_requests in one query, so use
+	// the same expanding two-scan strategy as ToolCalls and join the rows in Go.
+	const maxRequestWindow = 1 << 16
+	requestWindow := limit
+	for {
+		requests, err := r.candidateRequestsForToolCalls(ctx, where, args, requestWindow)
+		if err != nil {
+			return nil, err
+		}
+		out, err := r.joinRequestsToWebRequests(ctx, requests, limit)
+		if err != nil {
+			return nil, err
+		}
+		if len(out) >= limit || len(requests) < requestWindow || requestWindow >= maxRequestWindow {
+			return out, nil
+		}
+		requestWindow *= 2
+	}
+}
+
+func (r *Reporter) joinRequestsToWebRequests(ctx context.Context, requests []toolCallRequest, limit int) ([]WebRequestRow, error) {
+	if len(requests) == 0 {
+		return nil, nil
+	}
+	byID := make(map[string]toolCallRequest, len(requests))
+	ids := make([]any, len(requests))
+	placeholders := make([]string, len(requests))
+	for i, req := range requests {
+		byID[req.ID] = req
+		ids[i] = req.ID
+		placeholders[i] = "?"
+	}
+	rows, err := r.store.DB().QueryContext(ctx, `
+SELECT request_id, ordinal, COALESCE(web_request_id, ''), name,
+  COALESCE(query, ''), COALESCE(url, ''), COALESCE(domain, ''), COALESCE(arguments_json, '')
+FROM web_requests WHERE request_id IN (`+strings.Join(placeholders, ", ")+`)`, ids...)
+	if err != nil {
+		return nil, fmt.Errorf("query web requests for candidate requests: %w", err)
+	}
+	defer rows.Close()
+	byRequest := make(map[string][]WebRequestRow, len(requests))
+	for rows.Next() {
+		var (
+			requestID string
+			row       WebRequestRow
+		)
+		if err := rows.Scan(&requestID, &row.Ordinal, &row.ID, &row.Name, &row.Query, &row.URL, &row.Domain, &row.ArgumentsJSON); err != nil {
+			return nil, fmt.Errorf("scan web request for candidate requests: %w", err)
+		}
+		if !queue.IsWebToolName(row.Name) {
+			continue
+		}
+		req := byID[requestID]
+		row.RequestID = requestID
+		row.StartedAt = req.StartedAt
+		row.Provider = req.Provider
+		row.Client = req.Client
+		row.Model = req.Model
+		byRequest[requestID] = append(byRequest[requestID], row)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate web requests for candidate requests: %w", err)
+	}
+
+	out := make([]WebRequestRow, 0, limit)
+	for _, req := range requests {
+		webRequests := byRequest[req.ID]
+		sort.Slice(webRequests, func(i, j int) bool { return webRequests[i].Ordinal < webRequests[j].Ordinal })
+		out = append(out, webRequests...)
+	}
+	if len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
+}
+
 func (r *Reporter) queryInspectRows(ctx context.Context, whereClause, orderBy string, limit int, args ...any) ([]InspectRow, error) {
 	rows, err := r.store.DB().QueryContext(ctx, buildInspectQuery(whereClause, orderBy), append(args, limit)...)
 	if err != nil {
@@ -412,6 +541,11 @@ func (r *Reporter) queryInspectRows(ctx context.Context, whereClause, orderBy st
 			return nil, err
 		}
 		out[i].ToolCalls = calls
+		requests, err := r.webRequests(ctx, out[i].ID)
+		if err != nil {
+			return nil, err
+		}
+		out[i].WebRequests = requests
 	}
 	return out, nil
 }
@@ -433,6 +567,36 @@ FROM tool_calls WHERE request_id = ? ORDER BY ordinal`, requestID)
 		out = append(out, call)
 	}
 	return out, rows.Err()
+}
+
+func (r *Reporter) webRequests(ctx context.Context, requestID string) ([]WebRequest, error) {
+	rows, err := r.store.DB().QueryContext(ctx, `
+SELECT ordinal, COALESCE(web_request_id, ''), name,
+  COALESCE(query, ''), COALESCE(url, ''), COALESCE(domain, ''), COALESCE(arguments_json, '')
+FROM web_requests
+WHERE request_id = ?
+ORDER BY ordinal`, requestID)
+	if err != nil {
+		return nil, fmt.Errorf("query web requests for request %s: %w", requestID, err)
+	}
+	defer rows.Close()
+
+	var out []WebRequest
+	for rows.Next() {
+		var request WebRequest
+		if err := rows.Scan(&request.Ordinal, &request.ID, &request.Name, &request.Query,
+			&request.URL, &request.Domain, &request.ArgumentsJSON); err != nil {
+			return nil, fmt.Errorf("scan web request for request %s: %w", requestID, err)
+		}
+		if !queue.IsWebToolName(request.Name) {
+			continue
+		}
+		out = append(out, request)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate web requests for request %s: %w", requestID, err)
+	}
+	return out, nil
 }
 
 func summaryGrouping(groupBy string) (selectGroup, groupExpr, orderBy string, err error) {

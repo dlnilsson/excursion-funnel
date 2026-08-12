@@ -19,6 +19,8 @@ const recentErrorsLimit = 20
 
 const recentToolCallsLimit = 50
 
+const recentWebRequestsLimit = 50
+
 // New builds the dashboard handler, rooted at /ui/.
 func New(rep *report.Reporter, log *slog.Logger) http.Handler {
 	mux := http.NewServeMux()
@@ -29,6 +31,7 @@ func New(rep *report.Reporter, log *slog.Logger) http.Handler {
 	mux.HandleFunc("GET /ui/api/history/models", handleModelHistory(rep, log))
 	mux.HandleFunc("GET /ui/api/errors", handleErrors(rep, log))
 	mux.HandleFunc("GET /ui/api/tools", handleToolCalls(rep, log))
+	mux.HandleFunc("GET /ui/api/web-requests", handleWebRequests(rep, log))
 	return mux
 }
 
@@ -36,7 +39,10 @@ func handleSources(rep *report.Reporter, log *slog.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		since := beginningOfDay(time.Now())
 		rows, err := rep.Summary(r.Context(), report.SummaryOptions{
-			Since: since, Until: since.AddDate(0, 0, 1), GroupBy: "source",
+			Since:              since,
+			Until:              since.AddDate(0, 0, 1),
+			GroupBy:            "source",
+			KnownProvidersOnly: true,
 		})
 		if err != nil {
 			log.Error("ui: query sources", "err", err)
@@ -58,9 +64,10 @@ func handleSummary(rep *report.Reporter, log *slog.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		since := beginningOfDay(time.Now())
 		rows, err := rep.Summary(r.Context(), report.SummaryOptions{
-			Since:   since,
-			Until:   since.AddDate(0, 0, 1),
-			GroupBy: "model",
+			Since:              since,
+			Until:              since.AddDate(0, 0, 1),
+			GroupBy:            "model",
+			KnownProvidersOnly: true,
 		})
 		if err != nil {
 			log.Error("ui: query summary", "err", err)
@@ -70,7 +77,7 @@ func handleSummary(rep *report.Reporter, log *slog.Logger) http.HandlerFunc {
 		if rows == nil {
 			rows = []report.SummaryRow{}
 		}
-		writeJSON(w, rows)
+		writeJSON(w, knownProviderRows(rows))
 	}
 }
 
@@ -86,7 +93,7 @@ func handleHistory(rep *report.Reporter, log *slog.Logger) http.HandlerFunc {
 		if rows == nil {
 			rows = []report.SummaryRow{}
 		}
-		writeJSON(w, rows)
+		writeJSON(w, knownProviderRows(rows))
 	}
 }
 
@@ -101,7 +108,7 @@ func handleModelHistory(rep *report.Reporter, log *slog.Logger) http.HandlerFunc
 		if rows == nil {
 			rows = []report.SummaryRow{}
 		}
-		writeJSON(w, rows)
+		writeJSON(w, knownProviderRows(rows))
 	}
 }
 
@@ -141,9 +148,43 @@ func handleToolCalls(rep *report.Reporter, log *slog.Logger) http.HandlerFunc {
 	}
 }
 
+func handleWebRequests(rep *report.Reporter, log *slog.Logger) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		since := beginningOfDay(time.Now())
+		rows, err := rep.WebRequests(r.Context(), report.ToolCallOptions{
+			Since: since,
+			Until: since.AddDate(0, 0, 1),
+			Limit: recentWebRequestsLimit,
+		})
+		if err != nil {
+			log.Error("ui: query web requests", "err", err)
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		if rows == nil {
+			rows = []report.WebRequestRow{}
+		}
+		writeJSON(w, rows)
+	}
+}
+
 func writeJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(v)
+}
+
+// knownProviderRows keeps non-model requests (for example, curl health
+// checks) out of usage views. They have no provider or token accounting and
+// would otherwise appear as an "Unknown" usage card and model row.
+func knownProviderRows(rows []report.SummaryRow) []report.SummaryRow {
+	filtered := make([]report.SummaryRow, 0, len(rows))
+	for _, row := range rows {
+		if row.Provider == "unknown" {
+			continue
+		}
+		filtered = append(filtered, row)
+	}
+	return filtered
 }
 
 func beginningOfDay(t time.Time) time.Time {

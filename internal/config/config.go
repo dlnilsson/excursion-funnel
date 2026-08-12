@@ -42,6 +42,7 @@ type Config struct {
 	IdleTimeout     time.Duration
 	RetentionDays   int
 	UIEnabled       bool
+	WebProxyEnabled bool
 
 	Queue             queue.Config
 	QueueDrainTimeout time.Duration
@@ -77,6 +78,7 @@ func Default() Config {
 		IdleTimeout:       2 * time.Minute,
 		RetentionDays:     0,
 		UIEnabled:         true,
+		WebProxyEnabled:   false,
 		Queue:             queue.DefaultConfig(),
 		QueueDrainTimeout: 5 * time.Second,
 		ForwardInterval:   time.Second,
@@ -172,6 +174,13 @@ func Load(args []string) (Config, error) {
 		}
 		cfg.UIEnabled = enabled
 	}
+	if v := os.Getenv("EF_WEB_PROXY"); v != "" {
+		enabled, err := strconv.ParseBool(v)
+		if err != nil {
+			return Config{}, fmt.Errorf("EF_WEB_PROXY: %w", err)
+		}
+		cfg.WebProxyEnabled = enabled
+	}
 
 	// Flag layer — seeded from post-env values so a flag only wins when set,
 	// preserving flags > env > defaults.
@@ -193,6 +202,7 @@ func Load(args []string) (Config, error) {
 	fs.DurationVar(&cfg.ForwardInterval, "forward-interval", cfg.ForwardInterval, "distributed outbox polling interval")
 	fs.IntVar(&cfg.RetentionDays, "retention-days", cfg.RetentionDays, "delete usage rows older than this many days at startup (0 disables)")
 	fs.BoolVar(&cfg.UIEnabled, "ui-enabled", cfg.UIEnabled, "serve the read-only dashboard at /ui/")
+	fs.BoolVar(&cfg.WebProxyEnabled, "web-proxy", cfg.WebProxyEnabled, "act as a forward/CONNECT proxy for non-provider web traffic (opt-in; default off)")
 	if err := fs.Parse(args); err != nil {
 		return Config{}, err
 	}

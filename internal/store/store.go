@@ -235,6 +235,11 @@ func (s *Store) DeleteRequestsStartedBefore(ctx context.Context, cutoff time.Tim
 WHERE request_id IN (SELECT id FROM requests WHERE started_at < ?)`, cutoff); err != nil {
 		return 0, fmt.Errorf("delete old tool calls: %w", err)
 	}
+	if _, err := tx.ExecContext(ctx, `
+DELETE FROM web_requests
+WHERE request_id IN (SELECT id FROM requests WHERE started_at < ?)`, cutoff); err != nil {
+		return 0, fmt.Errorf("delete old web requests: %w", err)
+	}
 	res, err := tx.ExecContext(ctx, `DELETE FROM requests WHERE started_at < ?`, cutoff)
 	if err != nil {
 		return 0, fmt.Errorf("delete old requests: %w", err)
@@ -295,7 +300,20 @@ CREATE TABLE IF NOT EXISTS tool_calls (
   arguments_json VARCHAR,
   PRIMARY KEY (request_id, ordinal)
 );
-CREATE INDEX IF NOT EXISTS idx_tool_calls_request_id ON tool_calls(request_id);`)
+CREATE INDEX IF NOT EXISTS idx_tool_calls_request_id ON tool_calls(request_id);
+
+CREATE TABLE IF NOT EXISTS web_requests (
+  request_id VARCHAR NOT NULL,
+  ordinal INTEGER NOT NULL,
+  web_request_id VARCHAR,
+  name VARCHAR NOT NULL,
+  query VARCHAR,
+  url VARCHAR,
+  domain VARCHAR,
+  arguments_json VARCHAR,
+  PRIMARY KEY (request_id, ordinal)
+);
+CREATE INDEX IF NOT EXISTS idx_web_requests_request_id ON web_requests(request_id);`)
 	if err != nil {
 		return fmt.Errorf("create schema: %w", err)
 	}
@@ -351,6 +369,9 @@ func validateSchema(db *sql.DB) error {
 		}
 	}
 	if _, err := tableColumns(db, "tool_calls"); err != nil {
+		return err
+	}
+	if _, err := tableColumns(db, "web_requests"); err != nil {
 		return err
 	}
 	var viewCount int
@@ -437,6 +458,11 @@ const insertToolCallSQL = `INSERT INTO tool_calls (
 ) VALUES (?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT (request_id, ordinal) DO NOTHING`
 
+const insertWebRequestSQL = `INSERT INTO web_requests (
+	request_id, ordinal, web_request_id, name, query, url, domain, arguments_json
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT (request_id, ordinal) DO NOTHING`
+
 // InsertBatch writes events idempotently in one transaction.
 func (s *Store) InsertBatch(ctx context.Context, events []queue.UsageEvent) error {
 	if len(events) == 0 {
@@ -460,6 +486,13 @@ func (s *Store) InsertBatch(ctx context.Context, events []queue.UsageEvent) erro
 		return fmt.Errorf("prepare tool call insert: %w", err)
 	}
 	defer toolStmt.Close()
+
+	webStmt, err := tx.PrepareContext(ctx, insertWebRequestSQL)
+	if err != nil {
+		return fmt.Errorf("prepare web request insert: %w", err)
+	}
+	defer webStmt.Close()
+
 	for _, ev := range events {
 		var completedAt, durationMS any
 		if !ev.CompletedAt.IsZero() {
@@ -492,6 +525,22 @@ func (s *Store) InsertBatch(ctx context.Context, events []queue.UsageEvent) erro
 				return fmt.Errorf("insert tool call for request %s: %w", ev.RequestID, err)
 			}
 		}
+		for ordinal, request := range ev.WebRequests {
+			// The activity ledger records provider web-tool calls from both
+			// providers (Codex's web_search_call and Claude Code's client-side
+			// WebSearch/WebFetch). Generic forward-proxy traffic is not a
+			// web-tool call, so IsWebToolName keeps it out.
+			if !queue.IsWebToolName(request.Name) {
+				continue
+			}
+			if _, err := webStmt.ExecContext(ctx,
+				ev.RequestID, ordinal, nullableString(request.ID), request.Name,
+				nullableString(request.Query), nullableString(request.URL), nullableString(request.Domain),
+				nullableString(request.ArgumentsJSON),
+			); err != nil {
+				return fmt.Errorf("insert web request for request %s: %w", ev.RequestID, err)
+			}
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit: %w", err)
@@ -507,6 +556,7 @@ func (s *Store) InsertBatch(ctx context.Context, events []queue.UsageEvent) erro
 func (s *Store) insertRemoteBatch(ctx context.Context, events []queue.UsageEvent) error {
 	requestRows := make([]string, 0, len(events))
 	toolRows := make([]string, 0)
+	webRows := make([]string, 0)
 	for _, ev := range events {
 		var completedAt, durationMS string
 		if ev.CompletedAt.IsZero() {
@@ -538,6 +588,15 @@ func (s *Store) insertRemoteBatch(ctx context.Context, events []queue.UsageEvent
 				sqlNullableString(call.Command), sqlNullableString(call.Description), sqlNullableString(call.ArgumentsJSON),
 			}, ", ")+")")
 		}
+		for ordinal, request := range ev.WebRequests {
+			if !queue.IsWebToolName(request.Name) {
+				continue
+			}
+			webRows = append(webRows, "("+strings.Join([]string{
+				sqlString(ev.RequestID), strconv.Itoa(ordinal), sqlNullableString(request.ID), sqlString(request.Name),
+				sqlNullableString(request.Query), sqlNullableString(request.URL), sqlNullableString(request.Domain), sqlNullableString(request.ArgumentsJSON),
+			}, ", ")+")")
+		}
 	}
 	requestQuery := `INSERT INTO requests (
   id, response_id, source, host, started_at, completed_at, duration_ms,
@@ -549,14 +608,21 @@ func (s *Store) insertRemoteBatch(ctx context.Context, events []queue.UsageEvent
 	if err := s.execRemoteQuery(ctx, requestQuery); err != nil {
 		return fmt.Errorf("insert remote requests: %w", err)
 	}
-	if len(toolRows) == 0 {
-		return nil
-	}
-	toolQuery := `INSERT INTO tool_calls (
+	if len(toolRows) > 0 {
+		toolQuery := `INSERT INTO tool_calls (
   request_id, ordinal, tool_call_id, name, command, description, arguments_json
 ) VALUES ` + strings.Join(toolRows, ", ") + ` ON CONFLICT (request_id, ordinal) DO NOTHING`
-	if err := s.execRemoteQuery(ctx, toolQuery); err != nil {
-		return fmt.Errorf("insert remote tool calls: %w", err)
+		if err := s.execRemoteQuery(ctx, toolQuery); err != nil {
+			return fmt.Errorf("insert remote tool calls: %w", err)
+		}
+	}
+	if len(webRows) > 0 {
+		webQuery := `INSERT INTO web_requests (
+  request_id, ordinal, web_request_id, name, query, url, domain, arguments_json
+) VALUES ` + strings.Join(webRows, ", ") + ` ON CONFLICT (request_id, ordinal) DO NOTHING`
+		if err := s.execRemoteQuery(ctx, webQuery); err != nil {
+			return fmt.Errorf("insert remote web requests: %w", err)
+		}
 	}
 	return nil
 }
@@ -629,6 +695,10 @@ func MigrateSQLite(ctx context.Context, duckPath, sqlitePath string) error {
 	if err != nil {
 		return fmt.Errorf("inspect legacy tool calls: %w", err)
 	}
+	webCols, err := catalogTableColumns(ctx, conn, "old", "web_requests")
+	if err != nil {
+		return fmt.Errorf("inspect legacy web requests: %w", err)
+	}
 	tx, err := conn.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin migration: %w", err)
@@ -659,6 +729,24 @@ FROM old.requests ON CONFLICT (id) DO NOTHING`); err != nil {
 SELECT `+strings.Join(toolSelect, ", ")+`
 FROM old.tool_calls ON CONFLICT (request_id, ordinal) DO NOTHING`); err != nil {
 			return fmt.Errorf("migrate tool calls: %w", err)
+		}
+	}
+	if len(webCols) > 0 {
+		for _, required := range []string{"request_id", "ordinal", "name"} {
+			if !webCols[required] {
+				return fmt.Errorf("legacy web_requests missing required column %q", required)
+			}
+		}
+		webSelect := []string{
+			"request_id", "ordinal", legacyColumn(webCols, "web_request_id", "NULL"), "name",
+			legacyColumn(webCols, "query", "NULL"), legacyColumn(webCols, "url", "NULL"),
+			legacyColumn(webCols, "domain", "NULL"), legacyColumn(webCols, "arguments_json", "NULL"),
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO web_requests (
+ request_id, ordinal, web_request_id, name, query, url, domain, arguments_json)
+SELECT `+strings.Join(webSelect, ", ")+`
+FROM old.web_requests ON CONFLICT (request_id, ordinal) DO NOTHING`); err != nil {
+			return fmt.Errorf("migrate web requests: %w", err)
 		}
 	}
 	if err := tx.Commit(); err != nil {
