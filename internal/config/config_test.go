@@ -74,3 +74,33 @@ func TestLoad_UIEnabledEnvAndFlagPrecedence(t *testing.T) {
 		t.Fatalf("UIEnabled = false, want flag override true")
 	}
 }
+
+func TestLoad_WebProxyDefaultsToFalse(t *testing.T) {
+	cfg, err := Load(nil)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.WebProxyEnabled {
+		t.Fatalf("WebProxyEnabled = true, want false by default")
+	}
+}
+
+func TestLoad_WebProxyEnvAndFlagPrecedence(t *testing.T) {
+	t.Setenv("EF_WEB_PROXY", "true")
+
+	cfg, err := Load(nil)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if !cfg.WebProxyEnabled {
+		t.Fatalf("WebProxyEnabled = false, want env override true")
+	}
+
+	cfg, err = Load([]string{"--web-proxy=false"})
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.WebProxyEnabled {
+		t.Fatalf("WebProxyEnabled = true, want flag override false")
+	}
+}

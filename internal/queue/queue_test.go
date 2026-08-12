@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -106,5 +107,38 @@ func TestQueue_CloseDrainsBufferedEvents(t *testing.T) {
 	}
 	if got := fw.count(); got != 2 {
 		t.Fatalf("writer received %d events after Close, want 2", got)
+	}
+}
+
+func TestNewWebRequestProjectsAndRedactsPayload(t *testing.T) {
+	request := NewWebRequest("web-1", "web_search", []byte(`{"query":"Go release","url":"https://go.dev","api_key":"secret"}`))
+	if request.ID != "web-1" || request.Name != "web_search" || request.Query != "Go release" || request.URL != "https://go.dev" {
+		t.Fatalf("request = %+v, want projected web fields", request)
+	}
+	if strings.Contains(request.ArgumentsJSON, "secret") || !strings.Contains(request.ArgumentsJSON, "REDACTED") {
+		t.Fatalf("ArgumentsJSON = %q, want redacted api key", request.ArgumentsJSON)
+	}
+}
+
+func TestIsWebToolName(t *testing.T) {
+	webTools := []string{
+		"web_search_call", // OpenAI / Codex
+		"web_search",      // Anthropic server-side + synthetic
+		"web_fetch",       // Anthropic server-side
+		"web-fetch",       // Anthropic hyphenated variant
+		"WebSearch",       // Claude Code client-side
+		"WebFetch",        // Claude Code client-side
+	}
+	for _, name := range webTools {
+		if !IsWebToolName(name) {
+			t.Errorf("IsWebToolName(%q) = false, want true", name)
+		}
+	}
+
+	nonWeb := []string{"GET", "POST", "CONNECT", "Bash", "Read", "", "search"}
+	for _, name := range nonWeb {
+		if IsWebToolName(name) {
+			t.Errorf("IsWebToolName(%q) = true, want false", name)
+		}
 	}
 }

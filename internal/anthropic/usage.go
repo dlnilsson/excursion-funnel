@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"maps"
+	"strings"
 
 	"github.com/dlnilsson/excursion-funnel/internal/queue"
 	"github.com/dlnilsson/excursion-funnel/internal/sse"
@@ -17,12 +18,13 @@ import (
 // CompletedResult is the metadata extracted from a completed Messages API
 // JSON body.
 type CompletedResult struct {
-	ResponseID string
-	Model      string
-	StopReason string
-	Usage      queue.Usage
-	UsageJSON  json.RawMessage
-	ToolCalls  []queue.ToolCall
+	ResponseID  string
+	Model       string
+	StopReason  string
+	Usage       queue.Usage
+	UsageJSON   json.RawMessage
+	ToolCalls   []queue.ToolCall
+	WebRequests []queue.WebRequest
 }
 
 type messagePayload struct {
@@ -40,14 +42,19 @@ type contentBlock struct {
 	Input json.RawMessage `json:"input"`
 }
 
+type serverToolUsage struct {
+	WebSearchRequests *int64 `json:"web_search_requests"`
+}
+
 // messageUsage is the Messages API usage object. Unlike OpenAI's Responses
 // API, Anthropic reports cache tokens as top-level fields and has no
 // total_tokens or reasoning_tokens field.
 type messageUsage struct {
-	InputTokens              *int64 `json:"input_tokens"`
-	OutputTokens             *int64 `json:"output_tokens"`
-	CacheCreationInputTokens *int64 `json:"cache_creation_input_tokens"`
-	CacheReadInputTokens     *int64 `json:"cache_read_input_tokens"`
+	InputTokens              *int64          `json:"input_tokens"`
+	OutputTokens             *int64          `json:"output_tokens"`
+	CacheCreationInputTokens *int64          `json:"cache_creation_input_tokens"`
+	CacheReadInputTokens     *int64          `json:"cache_read_input_tokens"`
+	ServerToolUse            serverToolUsage `json:"server_tool_use"`
 }
 
 // ExtractCompleted parses a non-streaming Messages API JSON body and returns
@@ -60,11 +67,12 @@ func ExtractCompleted(body []byte) (CompletedResult, error) {
 	}
 
 	result := CompletedResult{
-		ResponseID: payload.ID,
-		Model:      payload.Model,
-		StopReason: payload.StopReason,
-		UsageJSON:  payload.Usage,
-		ToolCalls:  toolCallsFromContent(payload.Content),
+		ResponseID:  payload.ID,
+		Model:       payload.Model,
+		StopReason:  payload.StopReason,
+		UsageJSON:   payload.Usage,
+		ToolCalls:   toolCallsFromContent(payload.Content),
+		WebRequests: webRequestsFromContent(payload.Content),
 	}
 	if len(payload.Usage) == 0 {
 		return result, nil
@@ -75,18 +83,47 @@ func ExtractCompleted(body []byte) (CompletedResult, error) {
 		return result, err
 	}
 	result.Usage = u.toUsage()
+	result.WebRequests = addSyntheticWebRequests(result.WebRequests, u.ServerToolUse.WebSearchRequests)
 	return result, nil
 }
 
 func toolCallsFromContent(content []contentBlock) []queue.ToolCall {
 	var calls []queue.ToolCall
 	for _, block := range content {
-		if block.Type != "tool_use" || block.Name == "" {
+		if block.Type != "tool_use" || block.Name == "" || isWebContentBlock(block.Type, block.Name) {
 			continue
 		}
 		calls = append(calls, queue.NewToolCall(block.ID, block.Name, block.Input))
 	}
 	return calls
+}
+
+func webRequestsFromContent(content []contentBlock) []queue.WebRequest {
+	var requests []queue.WebRequest
+	for _, block := range content {
+		if !isWebContentBlock(block.Type, block.Name) {
+			continue
+		}
+		requests = append(requests, queue.NewWebRequest(block.ID, block.Name, block.Input))
+	}
+	return requests
+}
+
+func isWebContentBlock(typ, name string) bool {
+	value := strings.ToLower(typ + " " + name)
+	return strings.Contains(value, "web_search") || strings.Contains(value, "web-fetch") || strings.Contains(value, "web_fetch") ||
+		strings.Contains(value, "websearch") || // Claude Code client-side WebSearch tool
+		strings.Contains(value, "webfetch") // Claude Code client-side WebFetch tool
+}
+
+func addSyntheticWebRequests(requests []queue.WebRequest, count *int64) []queue.WebRequest {
+	if count == nil || *count <= int64(len(requests)) {
+		return requests
+	}
+	for i := int64(len(requests)); i < *count; i++ {
+		requests = append(requests, queue.NewWebRequest("", "web_search", []byte(`{"source":"usage","web_search_requests":1}`)))
+	}
+	return requests
 }
 
 // toUsage projects Anthropic's usage fields onto the provider-independent
@@ -170,6 +207,7 @@ type streamToolCall struct {
 	Name         string
 	Input        []byte
 	PartialInput []byte
+	Web          bool
 }
 
 // NewStreamParser creates a bounded Anthropic Messages SSE parser.
@@ -267,7 +305,7 @@ func (p *StreamParser) handleEvent(ev sse.Event) error {
 		}
 		p.mergeUsage(envelope.Usage)
 	case "content_block_start":
-		if envelope.ContentBlock != nil && envelope.ContentBlock.Type == "tool_use" && envelope.ContentBlock.Name != "" {
+		if envelope.ContentBlock != nil && envelope.ContentBlock.Type == "tool_use" && envelope.ContentBlock.Name != "" && !isWebContentBlock(envelope.ContentBlock.Type, envelope.ContentBlock.Name) {
 			call := p.toolCall(envelope.Index)
 			call.ID = envelope.ContentBlock.ID
 			call.Name = envelope.ContentBlock.Name
@@ -276,12 +314,26 @@ func (p *StreamParser) handleEvent(ev sse.Event) error {
 				call.Input = append(call.Input[:0], input...)
 			}
 			p.syncToolCalls()
+		} else if envelope.ContentBlock != nil && isWebContentBlock(envelope.ContentBlock.Type, envelope.ContentBlock.Name) {
+			call := p.toolCall(envelope.Index)
+			call.ID = envelope.ContentBlock.ID
+			call.Name = envelope.ContentBlock.Name
+			call.Web = true
+			input := bytes.TrimSpace(envelope.ContentBlock.Input)
+			if len(input) > 0 && !bytes.Equal(input, []byte("{}")) {
+				call.Input = append(call.Input[:0], input...)
+			}
+			p.syncWebRequests()
 		}
 	case "content_block_delta":
 		if envelope.Delta.Type == "input_json_delta" {
 			call := p.toolCall(envelope.Index)
 			call.PartialInput = append(call.PartialInput, envelope.Delta.PartialJSON...)
-			p.syncToolCalls()
+			if call.Web {
+				p.syncWebRequests()
+			} else {
+				p.syncToolCalls()
+			}
 		}
 	case "message_stop":
 		p.terminal = true
@@ -322,6 +374,24 @@ func (p *StreamParser) syncToolCalls() {
 	p.result.ToolCalls = calls
 }
 
+func (p *StreamParser) syncWebRequests() {
+	var requests []queue.WebRequest
+	for _, call := range p.toolCalls {
+		if !call.Web || call.Name == "" {
+			continue
+		}
+		input := call.Input
+		if len(call.PartialInput) > 0 {
+			input = call.PartialInput
+		}
+		requests = append(requests, queue.NewWebRequest(call.ID, call.Name, input))
+	}
+	if p.usage.ServerToolUse.WebSearchRequests != nil {
+		requests = addSyntheticWebRequests(requests, p.usage.ServerToolUse.WebSearchRequests)
+	}
+	p.result.WebRequests = requests
+}
+
 // mergeUsage folds one event's usage object into the accumulated state, both
 // as typed counters (for the numeric columns) and as raw JSON fields (for
 // usage_json). Later events win per field; fields absent from an event leave
@@ -358,7 +428,11 @@ func (p *StreamParser) mergeUsage(raw json.RawMessage) {
 	if u.CacheReadInputTokens != nil {
 		p.usage.CacheReadInputTokens = u.CacheReadInputTokens
 	}
+	if u.ServerToolUse.WebSearchRequests != nil {
+		p.usage.ServerToolUse.WebSearchRequests = u.ServerToolUse.WebSearchRequests
+	}
 	p.syncUsage()
+	p.syncWebRequests()
 }
 
 // syncUsage projects the accumulated state onto result so that both Result and

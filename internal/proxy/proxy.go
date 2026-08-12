@@ -90,15 +90,23 @@ type Proxy struct {
 	openai           *url.URL // upstream root for OpenAI Responses traffic
 	anthropic        *url.URL // upstream root for Anthropic Messages traffic
 	client           *http.Client
+	webClient        *http.Client
+	dialer           *net.Dialer
 	sink             EventSink
 	log              *slog.Logger
 	idleWriteTimeout time.Duration
+	webProxyEnabled  bool
 }
 
 // Options tunes proxy-side timeouts. Zero durations disable that timeout.
 type Options struct {
 	RequestTimeout   time.Duration
 	IdleWriteTimeout time.Duration
+	// WebProxyEnabled turns on the opt-in forward/CONNECT proxy for
+	// non-provider web traffic. When false, absolute-form and CONNECT
+	// requests, and unroutable origin-form paths, are rejected rather than
+	// forwarded — keeping the daemon a provider-only LLM proxy by default.
+	WebProxyEnabled bool
 }
 
 // New builds a Proxy from the two upstream roots (e.g. https://api.openai.com
@@ -119,12 +127,13 @@ func NewWithOptions(openaiUpstream, anthropicUpstream string, sink EventSink, lo
 		return nil, errors.New("proxy: invalid anthropic upstream: " + err.Error())
 	}
 
+	dialer := &net.Dialer{
+		Timeout:   30 * time.Second,
+		KeepAlive: 30 * time.Second,
+	}
 	transport := &http.Transport{
-		Proxy: http.ProxyFromEnvironment,
-		DialContext: (&net.Dialer{
-			Timeout:   30 * time.Second,
-			KeepAlive: 30 * time.Second,
-		}).DialContext,
+		Proxy:                 http.ProxyFromEnvironment,
+		DialContext:           dialer.DialContext,
 		ForceAttemptHTTP2:     true,
 		MaxIdleConns:          100,
 		IdleConnTimeout:       90 * time.Second,
@@ -135,6 +144,11 @@ func NewWithOptions(openaiUpstream, anthropicUpstream string, sink EventSink, lo
 		// auto-decompress upstream bodies — keeps the proxy byte-transparent.
 		DisableCompression: true,
 	}
+	webTransport := transport.Clone()
+	// Requests arriving through this process's forward-proxy endpoint must go
+	// directly to their destination. Reusing the environment proxy here would
+	// recurse when HTTP_PROXY/HTTPS_PROXY points at this same daemon.
+	webTransport.Proxy = nil
 	return &Proxy{
 		openai:    oa,
 		anthropic: an,
@@ -148,18 +162,38 @@ func NewWithOptions(openaiUpstream, anthropicUpstream string, sink EventSink, lo
 				return http.ErrUseLastResponse
 			},
 		},
+		webClient: &http.Client{
+			Transport: webTransport,
+			CheckRedirect: func(*http.Request, []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
+		},
+		dialer:           dialer,
 		sink:             sink,
 		log:              log,
 		idleWriteTimeout: opts.IdleWriteTimeout,
+		webProxyEnabled:  opts.WebProxyEnabled,
 	}, nil
 }
 
 // Handler returns the routed HTTP handler.
+//
+// CONNECT and absolute-form (forward-proxy) requests are dispatched to
+// handleProxy directly, ahead of the ServeMux. A CONNECT request carries its
+// target in authority-form with an empty URL.Path, which ServeMux cannot match
+// against the "/" pattern — routing it through the mux would 404 it before the
+// CONNECT tunnel handler ever ran.
 func (p *Proxy) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", p.handleHealth)
 	mux.HandleFunc("/", p.handleProxy)
-	return mux
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodConnect || r.URL.IsAbs() {
+			p.handleProxy(w, r)
+			return
+		}
+		mux.ServeHTTP(w, r)
+	})
 }
 
 func (p *Proxy) handleHealth(w http.ResponseWriter, _ *http.Request) {
@@ -188,11 +222,29 @@ func (p *Proxy) handleProxy(w http.ResponseWriter, r *http.Request) {
 		reqID = newRequestID()
 		start = time.Now()
 	)
+	// Standard forward-proxy requests use absolute-form URLs; CONNECT carries
+	// its destination in Host. Handle both before provider path routing so a
+	// web URL containing /messages or /responses is never misclassified. The
+	// forward proxy is opt-in; when disabled these are rejected rather than
+	// forwarded so the daemon stays a provider-only LLM proxy.
+	if r.Method == http.MethodConnect || r.URL.IsAbs() {
+		if !p.webProxyEnabled {
+			p.log.Warn("web proxy disabled", "req_id", reqID, "method", r.Method, "host", r.Host)
+			http.Error(w, "forward proxy is disabled; start ef with -web-proxy to enable", http.StatusForbidden)
+			return
+		}
+		p.handleWebProxy(w, r)
+		return
+	}
 
 	base, provider, ok := p.route(r.URL.Path)
 	if !ok {
-		p.log.Warn("unroutable request", "req_id", reqID, "method", r.Method, "path", r.URL.Path)
-		http.Error(w, "no upstream for this endpoint", http.StatusNotFound)
+		if !p.webProxyEnabled {
+			p.log.Warn("unroutable request", "req_id", reqID, "method", r.Method, "path", r.URL.Path)
+			http.Error(w, "no upstream for this endpoint", http.StatusNotFound)
+			return
+		}
+		p.handleWebProxy(w, r)
 		return
 	}
 
@@ -393,6 +445,112 @@ func (p *Proxy) handleProxy(w http.ResponseWriter, r *http.Request) {
 	p.sink.Enqueue(ev)
 }
 
+// handleWebProxy accepts standard forward-proxy requests. HTTP requests use
+// an absolute URL and are forwarded normally; HTTPS requests use CONNECT and
+// are tunneled byte-for-byte. CONNECT cannot reveal the encrypted path, so it
+// records the destination host, while plain HTTP records the full URL.
+//
+// The daemon defaults to loopback, making this suitable for a local agent
+// proxy. Do not expose the listen address publicly without adding an
+// authentication boundary.
+func (p *Proxy) handleWebProxy(w http.ResponseWriter, r *http.Request) {
+	reqID := newRequestID()
+	if r.Method == http.MethodConnect {
+		p.handleWebConnect(w, r)
+		return
+	}
+	if !r.URL.IsAbs() || (r.URL.Scheme != "http" && r.URL.Scheme != "https") || r.URL.Host == "" {
+		p.log.Warn("unroutable request", "req_id", reqID, "method", r.Method, "path", r.URL.Path)
+		http.Error(w, "forward proxy requires an absolute URL or CONNECT", http.StatusNotFound)
+		return
+	}
+
+	upReq, err := http.NewRequestWithContext(r.Context(), r.Method, r.URL.String(), r.Body)
+	if err != nil {
+		http.Error(w, "invalid web request", http.StatusBadRequest)
+		return
+	}
+	copyHeaders(upReq.Header, r.Header)
+	upReq.Host = r.URL.Host
+	upReq.RequestURI = ""
+
+	resp, err := p.webClient.Do(upReq)
+	if err != nil {
+		http.Error(w, "web upstream request failed", http.StatusBadGateway)
+		return
+	}
+	defer resp.Body.Close()
+
+	copyHeaders(w.Header(), resp.Header)
+	w.Header().Set("X-Excursion-Request-Id", reqID)
+	w.WriteHeader(resp.StatusCode)
+	buf := getCopyBuffer()
+	_, _ = io.CopyBuffer(w, resp.Body, buf)
+	putCopyBuffer(buf)
+}
+
+func (p *Proxy) handleWebConnect(w http.ResponseWriter, r *http.Request) {
+	target := r.Host
+	if target == "" {
+		target = r.URL.Host
+	}
+	if target == "" {
+		http.Error(w, "CONNECT target is required", http.StatusBadRequest)
+		return
+	}
+
+	hijacker, ok := w.(http.Hijacker)
+	if !ok {
+		http.Error(w, "CONNECT is not supported", http.StatusNotImplemented)
+		return
+	}
+	clientConn, clientRW, err := hijacker.Hijack()
+	if err != nil {
+		return
+	}
+	defer clientConn.Close()
+
+	upstreamConn, err := p.dialer.DialContext(context.Background(), "tcp", target)
+	if err != nil {
+		_, _ = clientRW.WriteString("HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n")
+		_ = clientRW.Flush()
+		return
+	}
+	defer upstreamConn.Close()
+
+	if _, err := clientRW.WriteString("HTTP/1.1 200 Connection Established\r\n\r\n"); err != nil {
+		return
+	}
+	if err := clientRW.Flush(); err != nil {
+		return
+	}
+
+	copyDone := make(chan error, 2)
+	go func() {
+		// Hijack may leave already-read request bytes in clientRW.Reader (for
+		// example the beginning of a TLS ClientHello), so copy that reader rather
+		// than the raw connection to avoid dropping bytes.
+		_, copyErr := io.Copy(upstreamConn, clientRW.Reader)
+		copyDone <- copyErr
+	}()
+	go func() {
+		_, copyErr := io.Copy(clientConn, upstreamConn)
+		copyDone <- copyErr
+	}()
+	firstErr := <-copyDone
+	_ = clientConn.Close()
+	_ = upstreamConn.Close()
+	secondErr := <-copyDone
+	if firstErr == io.EOF {
+		firstErr = nil
+	}
+	if secondErr == io.EOF {
+		secondErr = nil
+	}
+	_ = firstErr
+	_ = secondErr
+}
+
 // populateUsage extracts model/usage/error metadata from a captured
 // non-streaming response body using the parser for provider, and fills in
 // the corresponding UsageEvent fields. Parse failures are recorded as
@@ -409,7 +567,7 @@ func populateUsage(ev *queue.UsageEvent, provider string, httpStatus int, body [
 				ev.ErrorType, ev.ErrorMessage = errParseError, err.Error()
 				return
 			}
-			ev.ResponseID, ev.ModelReported, ev.Usage, ev.UsageJSON, ev.ToolCalls = result.ResponseID, result.Model, result.Usage, result.UsageJSON, result.ToolCalls
+			ev.ResponseID, ev.ModelReported, ev.Usage, ev.UsageJSON, ev.ToolCalls, ev.WebRequests = result.ResponseID, result.Model, result.Usage, result.UsageJSON, result.ToolCalls, result.WebRequests
 			return
 		}
 		if errType, errMessage, ok := openai.ExtractError(body); ok {
@@ -422,7 +580,7 @@ func populateUsage(ev *queue.UsageEvent, provider string, httpStatus int, body [
 				ev.ErrorType, ev.ErrorMessage = errParseError, err.Error()
 				return
 			}
-			ev.ResponseID, ev.ModelReported, ev.Usage, ev.UsageJSON, ev.ToolCalls = result.ResponseID, result.Model, result.Usage, result.UsageJSON, result.ToolCalls
+			ev.ResponseID, ev.ModelReported, ev.Usage, ev.UsageJSON, ev.ToolCalls, ev.WebRequests = result.ResponseID, result.Model, result.Usage, result.UsageJSON, result.ToolCalls, result.WebRequests
 			return
 		}
 		if errType, errMessage, ok := anthropic.ExtractError(body); ok {
@@ -449,6 +607,7 @@ func populateStreamUsage(ev *queue.UsageEvent, capture *streamCapture) {
 		result, err := capture.openai.Result()
 		if err != nil {
 			ev.ToolCalls = capture.openai.PartialResult().ToolCalls
+			ev.WebRequests = capture.openai.PartialResult().WebRequests
 			ev.ErrorType, ev.ErrorMessage = errParseError, err.Error()
 			return
 		}
@@ -457,12 +616,14 @@ func populateStreamUsage(ev *queue.UsageEvent, capture *streamCapture) {
 		ev.Usage = result.Usage
 		ev.UsageJSON = result.UsageJSON
 		ev.ToolCalls = result.ToolCalls
+		ev.WebRequests = result.WebRequests
 		ev.ErrorType = result.ErrorType
 		ev.ErrorMessage = result.ErrorMessage
 	case "anthropic":
 		result, err := capture.anthropic.Result()
 		if err != nil {
 			ev.ToolCalls = capture.anthropic.PartialResult().ToolCalls
+			ev.WebRequests = capture.anthropic.PartialResult().WebRequests
 			ev.ErrorType, ev.ErrorMessage = errParseError, err.Error()
 			return
 		}
@@ -471,6 +632,7 @@ func populateStreamUsage(ev *queue.UsageEvent, capture *streamCapture) {
 		ev.Usage = result.Usage
 		ev.UsageJSON = result.UsageJSON
 		ev.ToolCalls = result.ToolCalls
+		ev.WebRequests = result.WebRequests
 		ev.ErrorType = result.ErrorType
 		ev.ErrorMessage = result.ErrorMessage
 	}
@@ -481,7 +643,7 @@ func populateStreamUsage(ev *queue.UsageEvent, capture *streamCapture) {
 // is kept; the row is marked stream_interrupted so it stays distinguishable
 // from a clean response and from a response that merely failed to parse.
 func populateInterruptedStreamUsage(ev *queue.UsageEvent, capture *streamCapture, cause error) {
-	ev.ResponseID, ev.ModelReported, ev.Usage, ev.UsageJSON, ev.ToolCalls = capture.partial()
+	ev.ResponseID, ev.ModelReported, ev.Usage, ev.UsageJSON, ev.ToolCalls, ev.WebRequests = capture.partial()
 	ev.ErrorType, ev.ErrorMessage = errStreamInterrupted, cause.Error()
 }
 
@@ -616,16 +778,16 @@ func (s *streamCapture) terminated() bool {
 
 // partial returns the metadata accumulated so far, without requiring the
 // stream to have reached a terminal event.
-func (s *streamCapture) partial() (responseID, model string, usage queue.Usage, usageJSON json.RawMessage, toolCalls []queue.ToolCall) {
+func (s *streamCapture) partial() (responseID, model string, usage queue.Usage, usageJSON json.RawMessage, toolCalls []queue.ToolCall, webRequests []queue.WebRequest) {
 	switch s.provider {
 	case "openai":
 		r := s.openai.PartialResult()
-		return r.ResponseID, r.Model, r.Usage, r.UsageJSON, r.ToolCalls
+		return r.ResponseID, r.Model, r.Usage, r.UsageJSON, r.ToolCalls, r.WebRequests
 	case "anthropic":
 		r := s.anthropic.PartialResult()
-		return r.ResponseID, r.Model, r.Usage, r.UsageJSON, r.ToolCalls
+		return r.ResponseID, r.Model, r.Usage, r.UsageJSON, r.ToolCalls, r.WebRequests
 	}
-	return "", "", queue.Usage{}, nil, nil
+	return "", "", queue.Usage{}, nil, nil, nil
 }
 
 func newTeeCapture(limit int) *teeCapture {

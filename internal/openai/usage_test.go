@@ -111,6 +111,24 @@ func TestExtractCompleted_FunctionCall(t *testing.T) {
 	}
 }
 
+func TestExtractCompleted_WebSearch(t *testing.T) {
+	body := []byte(`{
+		"id":"resp_web","model":"gpt-5.5-codex","output":[{
+			"type":"web_search_call","id":"ws-1","name":"web_search","query":"Go release"
+		}]
+	}`)
+	got, err := ExtractCompleted(body)
+	if err != nil {
+		t.Fatalf("ExtractCompleted() error = %v", err)
+	}
+	if len(got.WebRequests) != 1 || got.WebRequests[0].Name != "web_search_call" || got.WebRequests[0].Query != "Go release" {
+		t.Fatalf("WebRequests = %+v, want one projected web search", got.WebRequests)
+	}
+	if len(got.ToolCalls) != 0 {
+		t.Fatalf("ToolCalls = %+v, want web search excluded from ordinary tools", got.ToolCalls)
+	}
+}
+
 func TestExtractCompleted_CodexJavaScriptToolCall(t *testing.T) {
 	body := []byte(`{
 		"id": "resp_codex_tool",
@@ -269,6 +287,55 @@ data: {"type":"response.completed","response":{"id":"resp_tool_stream","model":"
 		t.Fatalf("tool call = %+v, want streamed Bash command and description", call)
 	}
 	checkInt64Ptr(t, "InputTokens", got.Usage.InputTokens, 12)
+}
+
+func TestStreamParser_CodexWebSearchCallLifecycle(t *testing.T) {
+	p := NewStreamParser(1024 * 1024)
+	p.Feed([]byte(`event: response.web_search_call.in_progress
+data: {"type":"response.web_search_call.in_progress","item_id":"ws_1","output_index":0}
+
+event: response.web_search_call.searching
+data: {"type":"response.web_search_call.searching","item_id":"ws_1","output_index":0,"action":{"type":"search","query":"OpenAI Responses API"}}
+
+event: response.web_search_call.completed
+data: {"type":"response.web_search_call.completed","item_id":"ws_1","output_index":0}
+
+event: response.output_item.done
+data: {"type":"response.output_item.done","output_index":0,"item":{"type":"web_search_call","id":"ws_1","status":"completed","action":{"type":"search","query":"OpenAI Responses API"}}}
+
+event: response.completed
+data: {"type":"response.completed","response":{"id":"resp_web_stream","model":"gpt-5.6-codex","status":"completed","usage":{"input_tokens":3,"output_tokens":2,"total_tokens":5}}}
+
+`))
+
+	got, err := p.Result()
+	if err != nil {
+		t.Fatalf("Result() error = %v", err)
+	}
+	if len(got.WebRequests) != 1 {
+		t.Fatalf("WebRequests = %+v, want one Codex web_search_call", got.WebRequests)
+	}
+	request := got.WebRequests[0]
+	if request.ID != "ws_1" || request.Name != "web_search_call" || request.Query != "OpenAI Responses API" {
+		t.Fatalf("web request = %+v, want ws_1/web_search_call/query", request)
+	}
+	if len(got.ToolCalls) != 0 {
+		t.Fatalf("ToolCalls = %+v, want web_search_call excluded", got.ToolCalls)
+	}
+}
+
+func TestExtractCompleted_IgnoresNonCodexWebNames(t *testing.T) {
+	body := []byte(`{"id":"resp_other","output":[
+{"type":"browser_call","id":"browser-1","name":"browser"},
+{"type":"web_search_call","id":"ws-1","action":{"type":"search","query":"Go release"}}
+]}`)
+	got, err := ExtractCompleted(body)
+	if err != nil {
+		t.Fatalf("ExtractCompleted() error = %v", err)
+	}
+	if len(got.WebRequests) != 1 || got.WebRequests[0].ID != "ws-1" {
+		t.Fatalf("WebRequests = %+v, want only web_search_call", got.WebRequests)
+	}
 }
 
 func TestStreamParser_FailedEvent(t *testing.T) {

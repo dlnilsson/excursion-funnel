@@ -169,6 +169,115 @@ func TestInspect_IncludesToolCalls(t *testing.T) {
 	}
 }
 
+func TestInspect_IncludesWebRequests(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "usage.sqlite")
+	st, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatalf("store.Open() error = %v", err)
+	}
+	started := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+	if err := st.InsertBatch(t.Context(), []queue.UsageEvent{{
+		RequestID: "req-web", ResponseID: "resp-web", StartedAt: started,
+		CompletedAt: started.Add(time.Second), Method: "POST", Path: "/v1/responses",
+		UpstreamURL: "https://api.openai.com/v1/responses",
+		WebRequests: []queue.WebRequest{{ID: "web-1", Name: "web_search_call", Query: "Go release", Domain: "go.dev"}},
+	}}); err != nil {
+		_ = st.Close()
+		t.Fatalf("InsertBatch() error = %v", err)
+	}
+	if err := st.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+
+	r, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	t.Cleanup(func() { _ = r.Close() })
+	rows, err := r.Inspect(t.Context(), "resp-web", 1)
+	if err != nil {
+		t.Fatalf("Inspect() error = %v", err)
+	}
+	if len(rows) != 1 || len(rows[0].WebRequests) != 1 {
+		t.Fatalf("Inspect() = %+v, want one web request", rows)
+	}
+	request := rows[0].WebRequests[0]
+	if request.ID != "web-1" || request.Name != "web_search_call" || request.Query != "Go release" || request.Domain != "go.dev" {
+		t.Fatalf("web request = %+v, want persisted web search", request)
+	}
+}
+
+// WebRequests must surface web-tool activity from both providers — OpenAI's
+// web_search_call and Claude Code's client-side WebSearch/WebFetch — while
+// leaving stray raw-HTTP rows out of the ledger.
+func TestWebRequests_IncludesBothProviders(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "usage.sqlite")
+	st, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatalf("store.Open() error = %v", err)
+	}
+	started := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+	if err := st.InsertBatch(t.Context(), []queue.UsageEvent{
+		{
+			RequestID: "req-openai", ResponseID: "resp-openai", StartedAt: started,
+			CompletedAt: started.Add(time.Second), Method: "POST", Path: "/v1/responses",
+			UpstreamURL: "https://api.openai.com/v1/responses",
+			WebRequests: []queue.WebRequest{{ID: "ws-1", Name: "web_search_call", Query: "Go release"}},
+		},
+		{
+			RequestID: "req-claude", ResponseID: "resp-claude", StartedAt: started.Add(time.Minute), Method: "POST", Path: "/v1/messages",
+			CompletedAt: started.Add(time.Minute + time.Second),
+			UpstreamURL: "https://api.anthropic.com/v1/messages",
+			WebRequests: []queue.WebRequest{
+				{ID: "toolu_ws", Name: "WebSearch", Query: "nord theme"},
+				{ID: "toolu_wf", Name: "WebFetch", URL: "https://example.com/docs"},
+			},
+		},
+		{
+			RequestID: "req-raw", ResponseID: "resp-raw", StartedAt: started.Add(2 * time.Minute), Method: "GET", Path: "/",
+			CompletedAt: started.Add(2*time.Minute + time.Second),
+			UpstreamURL: "http://example.com/",
+			WebRequests: []queue.WebRequest{{ID: "", Name: "GET", URL: "http://example.com/"}},
+		},
+	}); err != nil {
+		_ = st.Close()
+		t.Fatalf("InsertBatch() error = %v", err)
+	}
+	if err := st.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+
+	r, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	t.Cleanup(func() { _ = r.Close() })
+	rows, err := r.WebRequests(t.Context(), ToolCallOptions{})
+	if err != nil {
+		t.Fatalf("WebRequests() error = %v", err)
+	}
+
+	byName := make(map[string]WebRequestRow, len(rows))
+	for _, row := range rows {
+		byName[row.Name] = row
+		if row.Name == "GET" {
+			t.Fatalf("WebRequests() returned a raw-HTTP row: %+v", row)
+		}
+	}
+	if len(rows) != 3 {
+		t.Fatalf("WebRequests() returned %d rows, want 3 (web_search_call, WebSearch, WebFetch): %+v", len(rows), rows)
+	}
+	if got := byName["web_search_call"]; got.Provider != "openai" || got.Query != "Go release" {
+		t.Fatalf("web_search_call row = %+v, want openai/Go release", got)
+	}
+	if got := byName["WebSearch"]; got.Provider != "anthropic" || got.Query != "nord theme" {
+		t.Fatalf("WebSearch row = %+v, want anthropic/nord theme", got)
+	}
+	if got := byName["WebFetch"]; got.Provider != "anthropic" || got.URL != "https://example.com/docs" {
+		t.Fatalf("WebFetch row = %+v, want anthropic/example.com/docs", got)
+	}
+}
+
 func TestNew_ReusesExistingStore(t *testing.T) {
 	dbPath := seedReportDB(t)
 

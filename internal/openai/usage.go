@@ -18,12 +18,13 @@ import (
 // CompletedResult is the metadata extracted from a completed (or
 // failed/incomplete) Responses API JSON body.
 type CompletedResult struct {
-	ResponseID string
-	Model      string
-	Status     string
-	Usage      queue.Usage
-	UsageJSON  json.RawMessage
-	ToolCalls  []queue.ToolCall
+	ResponseID  string
+	Model       string
+	Status      string
+	Usage       queue.Usage
+	UsageJSON   json.RawMessage
+	ToolCalls   []queue.ToolCall
+	WebRequests []queue.WebRequest
 }
 
 type responsePayload struct {
@@ -49,6 +50,9 @@ type responseOutput struct {
 	Cmd         json.RawMessage `json:"cmd"`
 	Description string          `json:"description"`
 	Action      json.RawMessage `json:"action"`
+	Query       string          `json:"query"`
+	URL         string          `json:"url"`
+	Domain      string          `json:"domain"`
 }
 
 type chatCompletionChoice struct {
@@ -141,11 +145,12 @@ func ExtractCompleted(body []byte) (CompletedResult, error) {
 	}
 
 	result := CompletedResult{
-		ResponseID: payload.ID,
-		Model:      payload.Model,
-		Status:     payload.Status,
-		UsageJSON:  payload.Usage,
-		ToolCalls:  append(toolCallsFromResponseOutput(payload.Output), toolCallsFromChatChoices(payload.Choices)...),
+		ResponseID:  payload.ID,
+		Model:       payload.Model,
+		Status:      payload.Status,
+		UsageJSON:   payload.Usage,
+		ToolCalls:   append(toolCallsFromResponseOutput(payload.Output), toolCallsFromChatChoices(payload.Choices)...),
+		WebRequests: webRequestsFromResponseOutput(payload.Output),
 	}
 	if len(payload.Usage) == 0 {
 		return result, nil
@@ -159,10 +164,35 @@ func ExtractCompleted(body []byte) (CompletedResult, error) {
 	return result, nil
 }
 
+func webRequestsFromResponseOutput(items []responseOutput) []queue.WebRequest {
+	var requests []queue.WebRequest
+	for _, item := range items {
+		if !isCodexWebSearchCall(item.Type, item.Name) {
+			continue
+		}
+		input := responseOutputInput(item)
+		if len(input) == 0 {
+			input, _ = json.Marshal(item)
+		}
+		requests = append(requests, queue.NewWebRequest(firstNonEmpty(item.CallID, item.ID), "web_search_call", decodeToolInput(input)))
+	}
+	return requests
+}
+
+// isCodexWebSearchCall deliberately recognizes only the Responses API
+// web_search_call output item. Other web/browser tools are not part of the
+// Codex web-search activity ledger.
+func isCodexWebSearchCall(typ, name string) bool {
+	return strings.EqualFold(strings.TrimSpace(typ), "web_search_call")
+}
+
 func toolCallsFromResponseOutput(items []responseOutput) []queue.ToolCall {
 	var calls []queue.ToolCall
 	for _, item := range items {
 		name := item.Name
+		if isCodexWebSearchCall(item.Type, item.Name) {
+			continue
+		}
 		if name == "" {
 			if !isToolOutputType(item.Type) {
 				continue
@@ -186,7 +216,7 @@ func responseOutputInput(item responseOutput) []byte {
 	if len(input) > 0 {
 		return input
 	}
-	if len(item.Command) == 0 && len(item.Cmd) == 0 && item.Description == "" && len(item.Action) == 0 {
+	if len(item.Command) == 0 && len(item.Cmd) == 0 && item.Description == "" && len(item.Action) == 0 && item.Query == "" && item.URL == "" && item.Domain == "" {
 		return nil
 	}
 	fields := map[string]json.RawMessage{}
@@ -202,6 +232,18 @@ func responseOutputInput(item responseOutput) []byte {
 	}
 	if len(item.Action) > 0 {
 		fields["action"] = item.Action
+	}
+	if item.Query != "" {
+		encoded, _ := json.Marshal(item.Query)
+		fields["query"] = encoded
+	}
+	if item.URL != "" {
+		encoded, _ := json.Marshal(item.URL)
+		fields["url"] = encoded
+	}
+	if item.Domain != "" {
+		encoded, _ := json.Marshal(item.Domain)
+		fields["domain"] = encoded
 	}
 	raw, _ := json.Marshal(fields)
 	return raw
@@ -305,6 +347,7 @@ type streamToolCall struct {
 	Name         string
 	Input        []byte
 	PartialInput []byte
+	Web          bool
 }
 
 // NewStreamParser creates a bounded OpenAI SSE parser.
@@ -437,8 +480,10 @@ func (p *StreamParser) handleEventDepth(ev sse.Event, depth int) error {
 			if err != nil {
 				p.noteParseErr(err)
 			} else {
+				previousWebRequests := p.result.WebRequests
 				p.result.CompletedResult = result
 				p.mergeCompletedToolCalls(result.ToolCalls)
+				p.result.WebRequests = mergeWebRequests(previousWebRequests, result.WebRequests)
 				if eventType == "response.failed" {
 					p.populateResponseError(envelope.Response)
 				}
@@ -455,6 +500,11 @@ func (p *StreamParser) handleEventDepth(ev sse.Event, depth int) error {
 		}
 	case eventType == "response.output_item.added", eventType == "response.output_item.done":
 		p.mergeResponseOutputItem(envelope.Item, envelope.OutputIndex)
+	case strings.HasPrefix(eventType, "response.web_search_call."):
+		// Codex emits a dedicated web_search_call lifecycle in addition to the
+		// output item. Record the call immediately, then let output_item.done
+		// replace its payload with the action/query when that arrives.
+		p.mergeWebSearchCallEvent(envelope.ItemID, envelope.OutputIndex, ev.Data)
 	case eventType == "response.function_call_arguments.delta", eventType == "response.custom_tool_call_input.delta":
 		p.appendResponseToolInput(envelope.ItemID, envelope.OutputIndex, envelope.Delta)
 	case eventType == "response.function_call_arguments.done":
@@ -581,15 +631,14 @@ func (p *StreamParser) mergeResponseOutputItem(raw json.RawMessage, outputIndex 
 	if name == "" {
 		return
 	}
+	web := isCodexWebSearchCall(item.Type, item.Name)
 	call := p.responseToolCall(item.ID, item.CallID, outputIndex)
 	call.ID = firstNonEmpty(item.ID, call.ID)
 	call.CallID = firstNonEmpty(item.CallID, call.CallID)
 	call.Type = firstNonEmpty(item.Type, call.Type)
 	call.Name = name
-	input := item.Input
-	if len(input) == 0 {
-		input = item.Arguments
-	}
+	call.Web = web
+	input := responseOutputInput(item)
 	if len(input) > 0 {
 		decoded := decodeToolInput(input)
 		if len(decoded) > 0 && !bytes.Equal(bytes.TrimSpace(decoded), []byte("{}")) {
@@ -602,6 +651,7 @@ func (p *StreamParser) mergeResponseOutputItem(raw json.RawMessage, outputIndex 
 		call.Input = append(call.Input[:0], raw...)
 	}
 	p.syncToolCalls()
+	p.syncWebRequests()
 }
 
 func (p *StreamParser) appendResponseToolInput(itemID string, outputIndex *int, delta string) {
@@ -610,14 +660,22 @@ func (p *StreamParser) appendResponseToolInput(itemID string, outputIndex *int, 
 	}
 	call := p.responseToolCall(itemID, "", outputIndex)
 	call.PartialInput = append(call.PartialInput, delta...)
-	p.syncToolCalls()
+	if call.Web {
+		p.syncWebRequests()
+	} else {
+		p.syncToolCalls()
+	}
 }
 
 func (p *StreamParser) setResponseToolInput(itemID string, outputIndex *int, input []byte) {
 	call := p.responseToolCall(itemID, "", outputIndex)
 	call.Input = append(call.Input[:0], input...)
 	call.PartialInput = nil
-	p.syncToolCalls()
+	if call.Web {
+		p.syncWebRequests()
+	} else {
+		p.syncToolCalls()
+	}
 }
 
 func (p *StreamParser) responseToolCall(itemID, callID string, outputIndex *int) *streamToolCall {
@@ -642,10 +700,50 @@ func (p *StreamParser) responseToolCall(itemID, callID string, outputIndex *int)
 	return &p.responseTools[len(p.responseTools)-1]
 }
 
+func (p *StreamParser) mergeWebSearchCallEvent(itemID string, outputIndex *int, raw []byte) {
+	if itemID == "" {
+		return
+	}
+	call := p.responseToolCall(itemID, "", outputIndex)
+	call.ID = itemID
+	call.Type = "web_search_call"
+	call.Name = "web_search_call"
+	call.Web = true
+	var event struct {
+		Action json.RawMessage `json:"action"`
+		Query  string          `json:"query"`
+		URL    string          `json:"url"`
+		Domain string          `json:"domain"`
+	}
+	if json.Unmarshal(raw, &event) == nil &&
+		(len(event.Action) > 0 || event.Query != "" || event.URL != "" || event.Domain != "") {
+		fields := map[string]any{}
+		if len(event.Action) > 0 {
+			fields["action"] = json.RawMessage(event.Action)
+		}
+		if event.Query != "" {
+			fields["query"] = event.Query
+		}
+		if event.URL != "" {
+			fields["url"] = event.URL
+		}
+		if event.Domain != "" {
+			fields["domain"] = event.Domain
+		}
+		call.Input, _ = json.Marshal(fields)
+	} else if len(call.Input) == 0 {
+		// Keep the lifecycle payload until a later event supplies the richer
+		// action/query fields.
+		call.Input = append(call.Input[:0], raw...)
+	}
+	call.PartialInput = nil
+	p.syncWebRequests()
+}
+
 func (p *StreamParser) syncToolCalls() {
 	calls := make([]queue.ToolCall, 0, len(p.responseTools)+len(p.chatToolCalls))
 	for _, call := range p.responseTools {
-		if call.Name == "" {
+		if call.Name == "" || call.Web {
 			continue
 		}
 		input := call.Input
@@ -660,6 +758,44 @@ func (p *StreamParser) syncToolCalls() {
 		}
 	}
 	p.result.ToolCalls = calls
+}
+
+func (p *StreamParser) syncWebRequests() {
+	var requests []queue.WebRequest
+	for _, call := range p.responseTools {
+		if !call.Web || !isCodexWebSearchCall(call.Type, call.Name) {
+			continue
+		}
+		input := call.Input
+		if len(call.PartialInput) > 0 {
+			input = call.PartialInput
+		}
+		requests = append(requests, queue.NewWebRequest(firstNonEmpty(call.CallID, call.ID), call.Name, input))
+	}
+	p.result.WebRequests = requests
+}
+
+func mergeWebRequests(previous, incoming []queue.WebRequest) []queue.WebRequest {
+	if len(previous) == 0 {
+		return incoming
+	}
+	if len(incoming) == 0 {
+		return previous
+	}
+	merged := append([]queue.WebRequest(nil), previous...)
+	for _, candidate := range incoming {
+		duplicate := false
+		for _, existing := range merged {
+			if candidate.ID != "" && candidate.ID == existing.ID {
+				duplicate = true
+				break
+			}
+		}
+		if !duplicate {
+			merged = append(merged, candidate)
+		}
+	}
+	return merged
 }
 
 // isNestedSSE reports whether data (already whitespace-trimmed) is an SSE frame

@@ -38,6 +38,126 @@ type ToolCall struct {
 	ArgumentsJSON string
 }
 
+// WebRequest is one provider-reported external web request associated with a
+// model response. ArgumentsJSON preserves the provider payload while the
+// projected fields make common search/browse details easy to query.
+type WebRequest struct {
+	ID            string
+	Name          string
+	Query         string
+	URL           string
+	Domain        string
+	ArgumentsJSON string
+}
+
+// NewWebRequest builds a web-request record from a provider payload. The raw
+// payload is sanitized before persistence so a future provider field cannot
+// accidentally turn this activity ledger into a credential store.
+func NewWebRequest(id, name string, input []byte) WebRequest {
+	request := WebRequest{
+		ID:            id,
+		Name:          name,
+		ArgumentsJSON: SanitizeWebArguments(input),
+	}
+	var fields map[string]any
+	if json.Unmarshal(input, &fields) != nil {
+		return request
+	}
+	request.Query = firstWebString(fields, "query", "search_query", "q")
+	request.URL = firstWebString(fields, "url", "uri", "href")
+	request.Domain = firstWebString(fields, "domain", "host")
+	if action, ok := fields["action"].(map[string]any); ok {
+		if request.Query == "" {
+			request.Query = firstWebString(action, "query", "search_query", "q")
+		}
+		if request.URL == "" {
+			request.URL = firstWebString(action, "url", "uri", "href")
+		}
+		if request.Domain == "" {
+			request.Domain = firstWebString(action, "domain", "host")
+		}
+	}
+	return request
+}
+
+// IsWebToolName reports whether name is a provider web-tool call that belongs
+// in the web-request ledger — OpenAI's web_search_call, Claude Code's
+// client-side WebSearch/WebFetch, and Anthropic's server-side web_search/
+// web_fetch — as opposed to generic forward-proxy traffic (GET/POST/…) built
+// by NewHTTPWebRequest. It is the single Go-side gate the store uses to decide
+// what to persist; the anthropic/openai parsers and the report read query
+// mirror the same web-tool name set.
+func IsWebToolName(name string) bool {
+	n := strings.ToLower(name)
+	return strings.Contains(n, "web_search") ||
+		strings.Contains(n, "websearch") ||
+		strings.Contains(n, "web_fetch") ||
+		strings.Contains(n, "web-fetch") ||
+		strings.Contains(n, "webfetch")
+}
+
+// NewHTTPWebRequest is retained for compatibility with callers that construct
+// generic web activity, but the store intentionally does not persist it: its
+// method-named record is not a web-tool call, so IsWebToolName rejects it.
+func NewHTTPWebRequest(id, method, rawURL, domain string, status int) WebRequest {
+	input, _ := json.Marshal(map[string]any{
+		"source": "http_proxy",
+		"method": method,
+		"url":    rawURL,
+		"domain": domain,
+		"status": status,
+	})
+	return NewWebRequest(id, method, input)
+}
+
+func firstWebString(fields map[string]any, keys ...string) string {
+	for _, key := range keys {
+		if value, ok := fields[key].(string); ok && value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+// SanitizeWebArguments redacts credential-like fields from a provider web
+// event while retaining the rest of the provider payload for inspection.
+func SanitizeWebArguments(input []byte) string {
+	if len(input) == 0 {
+		return ""
+	}
+	var value any
+	if err := json.Unmarshal(input, &value); err != nil {
+		return string(input)
+	}
+	redactWebValue(value)
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return string(input)
+	}
+	return string(encoded)
+}
+
+func redactWebValue(value any) {
+	switch value := value.(type) {
+	case map[string]any:
+		for key, item := range value {
+			lower := strings.ToLower(key)
+			if lower == "authorization" || lower == "cookie" || lower == "set-cookie" ||
+				strings.Contains(lower, "api_key") || strings.Contains(lower, "apikey") ||
+				strings.Contains(lower, "token") || strings.Contains(lower, "secret") ||
+				strings.Contains(lower, "password") {
+				value[key] = "[REDACTED]"
+				continue
+			}
+			redactWebValue(item)
+		}
+	case []any:
+		for _, item := range value {
+			redactWebValue(item)
+		}
+	}
+}
+
 // NewToolCall builds a tool-call record from a provider's JSON input. It keeps
 // the original JSON even when it is incomplete or malformed (which can happen
 // when an SSE stream is interrupted), and extracts the optional command and
@@ -140,9 +260,10 @@ type UsageEvent struct {
 	ErrorType    string
 	ErrorMessage string
 
-	Usage     Usage
-	UsageJSON json.RawMessage
-	ToolCalls []ToolCall
+	Usage       Usage
+	UsageJSON   json.RawMessage
+	ToolCalls   []ToolCall
+	WebRequests []WebRequest
 }
 
 // Writer persists a batch of usage events. Implementations are called only

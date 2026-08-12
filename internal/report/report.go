@@ -93,6 +93,7 @@ type InspectRow struct {
 	Total             sql.NullInt64
 	UsageJSON         string
 	ToolCalls         []ToolCall
+	WebRequests       []WebRequest
 }
 
 // ToolCall is one tool invocation associated with an inspected request.
@@ -102,6 +103,18 @@ type ToolCall struct {
 	Name          string
 	Command       string
 	Description   string
+	ArgumentsJSON string
+}
+
+// WebRequest is one provider-reported external web request associated with an
+// inspected model request.
+type WebRequest struct {
+	Ordinal       int
+	ID            string
+	Name          string
+	Query         string
+	URL           string
+	Domain        string
 	ArgumentsJSON string
 }
 
@@ -118,6 +131,23 @@ type ToolCallRow struct {
 	Name        string
 	Command     string
 	Description string
+}
+
+// WebRequestRow is a web request with parent request metadata for reporting
+// and the dashboard.
+type WebRequestRow struct {
+	RequestID     string
+	StartedAt     string
+	Provider      string
+	Client        string
+	Model         string
+	Ordinal       int
+	ID            string
+	Name          string
+	Query         string
+	URL           string
+	Domain        string
+	ArgumentsJSON string
 }
 
 // ToolCallOptions controls a tool-call query. Since is inclusive and Until is
@@ -328,6 +358,79 @@ LIMIT ?`, args...)
 	return out, nil
 }
 
+// WebRequests returns provider-reported web activity within the requested
+// interval, newest request first and event order preserved within a request.
+func (r *Reporter) WebRequests(ctx context.Context, opts ToolCallOptions) ([]WebRequestRow, error) {
+	limit := opts.Limit
+	if limit <= 0 {
+		limit = DefaultRecentToolCallLimit
+	}
+	providerExpr := providerSQL("r.path")
+	clientExpr := clientSQL()
+	var (
+		args  []any
+		where []string
+	)
+	if !opts.Since.IsZero() {
+		where = append(where, "r.started_at >= ?")
+		args = append(args, formatTime(opts.Since))
+	}
+	if !opts.Until.IsZero() {
+		where = append(where, "r.started_at < ?")
+		args = append(args, formatTime(opts.Until))
+	}
+	// The web-request ledger surfaces provider-reported web-tool activity from
+	// both providers: OpenAI's web_search_call plus Claude Code's client-side
+	// WebSearch/WebFetch and Anthropic's server-side web_search/web_fetch. Match
+	// on the tool name (mirroring the anthropic/openai ingestion classifiers)
+	// rather than a single provider, so both are included while any stray
+	// raw-HTTP rows (GET/POST/…) that are not web tools stay excluded.
+	where = append(where, `(
+		LOWER(wr.name) LIKE '%web_search%'
+		OR LOWER(wr.name) LIKE '%websearch%'
+		OR LOWER(wr.name) LIKE '%web_fetch%'
+		OR LOWER(wr.name) LIKE '%web-fetch%'
+		OR LOWER(wr.name) LIKE '%webfetch%'
+	)`)
+	whereSQL := ""
+	if len(where) > 0 {
+		whereSQL = "WHERE " + strings.Join(where, " AND ")
+	}
+	args = append(args, limit)
+	rows, err := r.store.DB().QueryContext(ctx, `
+SELECT wr.request_id, r.started_at, `+providerExpr+`, `+clientExpr+`,
+  COALESCE(r.model_reported, r.model_requested, 'unknown'),
+  wr.ordinal, COALESCE(wr.web_request_id, ''), wr.name,
+  COALESCE(wr.query, ''), COALESCE(wr.url, ''), COALESCE(wr.domain, ''),
+  COALESCE(wr.arguments_json, '')
+FROM web_requests AS wr
+JOIN requests AS r ON r.id = wr.request_id
+`+whereSQL+`
+ORDER BY r.started_at DESC, wr.ordinal ASC
+LIMIT ?`, args...)
+	if err != nil {
+		return nil, fmt.Errorf("query web requests: %w", err)
+	}
+	defer rows.Close()
+
+	var out []WebRequestRow
+	for rows.Next() {
+		var row WebRequestRow
+		if err := rows.Scan(
+			&row.RequestID, &row.StartedAt, &row.Provider, &row.Client, &row.Model,
+			&row.Ordinal, &row.ID, &row.Name, &row.Query, &row.URL, &row.Domain,
+			&row.ArgumentsJSON,
+		); err != nil {
+			return nil, fmt.Errorf("scan web request: %w", err)
+		}
+		out = append(out, row)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate web requests: %w", err)
+	}
+	return out, nil
+}
+
 func (r *Reporter) queryInspectRows(ctx context.Context, whereClause, orderBy string, limit int, args ...any) ([]InspectRow, error) {
 	query := buildInspectQuery(whereClause, orderBy)
 
@@ -365,6 +468,11 @@ func (r *Reporter) queryInspectRows(ctx context.Context, whereClause, orderBy st
 			return nil, err
 		}
 		out[i].ToolCalls = calls
+		requests, err := r.webRequests(ctx, out[i].ID)
+		if err != nil {
+			return nil, err
+		}
+		out[i].WebRequests = requests
 	}
 	return out, nil
 }
@@ -391,6 +499,36 @@ ORDER BY ordinal`, requestID)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate tool calls for request %s: %w", requestID, err)
+	}
+	return out, nil
+}
+
+func (r *Reporter) webRequests(ctx context.Context, requestID string) ([]WebRequest, error) {
+	rows, err := r.store.DB().QueryContext(ctx, `
+SELECT ordinal, COALESCE(web_request_id, ''), name,
+  COALESCE(query, ''), COALESCE(url, ''), COALESCE(domain, ''), COALESCE(arguments_json, '')
+FROM web_requests AS wr
+JOIN requests AS r ON r.id = wr.request_id
+WHERE wr.request_id = ?
+  AND `+providerSQL("r.path")+` = 'openai'
+  AND wr.name = 'web_search_call'
+ORDER BY ordinal`, requestID)
+	if err != nil {
+		return nil, fmt.Errorf("query web requests for request %s: %w", requestID, err)
+	}
+	defer rows.Close()
+
+	var out []WebRequest
+	for rows.Next() {
+		var request WebRequest
+		if err := rows.Scan(&request.Ordinal, &request.ID, &request.Name, &request.Query,
+			&request.URL, &request.Domain, &request.ArgumentsJSON); err != nil {
+			return nil, fmt.Errorf("scan web request for request %s: %w", requestID, err)
+		}
+		out = append(out, request)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate web requests for request %s: %w", requestID, err)
 	}
 	return out, nil
 }

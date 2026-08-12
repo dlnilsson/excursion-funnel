@@ -119,6 +119,11 @@ DELETE FROM tool_calls
 WHERE request_id IN (SELECT id FROM requests WHERE started_at < ?)`, cutoffText); err != nil {
 		return 0, fmt.Errorf("delete old tool calls: %w", err)
 	}
+	if _, err := tx.ExecContext(ctx, `
+DELETE FROM web_requests
+WHERE request_id IN (SELECT id FROM requests WHERE started_at < ?)`, cutoffText); err != nil {
+		return 0, fmt.Errorf("delete old web requests: %w", err)
+	}
 	res, err := tx.ExecContext(ctx, `DELETE FROM requests WHERE started_at < ?`, cutoffText)
 	if err != nil {
 		return 0, fmt.Errorf("delete old requests: %w", err)
@@ -180,6 +185,20 @@ CREATE TABLE IF NOT EXISTS tool_calls (
 );
 
 CREATE INDEX IF NOT EXISTS idx_tool_calls_request_id ON tool_calls(request_id);
+
+CREATE TABLE IF NOT EXISTS web_requests (
+  request_id TEXT NOT NULL,
+  ordinal INTEGER NOT NULL,
+  web_request_id TEXT,
+  name TEXT NOT NULL,
+  query TEXT,
+  url TEXT,
+  domain TEXT,
+  arguments_json TEXT,
+  PRIMARY KEY (request_id, ordinal)
+);
+
+CREATE INDEX IF NOT EXISTS idx_web_requests_request_id ON web_requests(request_id);
 
 CREATE TABLE IF NOT EXISTS usage_daily_model (
   day TEXT NOT NULL,
@@ -264,6 +283,8 @@ func validateSchema(db *sql.DB) error {
 		"idx_requests_response_id",
 		"tool_calls",
 		"idx_tool_calls_request_id",
+		"web_requests",
+		"idx_web_requests_request_id",
 		"usage_by_day_model",
 		"usage_daily_model",
 		"usage_model_histogram",
@@ -447,6 +468,10 @@ const insertToolCallSQL = `INSERT INTO tool_calls (
 	request_id, ordinal, tool_call_id, name, command, description, arguments_json
 ) VALUES (?, ?, ?, ?, ?, ?, ?)`
 
+const insertWebRequestSQL = `INSERT INTO web_requests (
+	request_id, ordinal, web_request_id, name, query, url, domain, arguments_json
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+
 // InsertBatch writes events in a single transaction. Correctness does not
 // depend on batching: a batch of one event is just as correct as fifty.
 func (s *Store) InsertBatch(ctx context.Context, events []queue.UsageEvent) error {
@@ -471,6 +496,12 @@ func (s *Store) InsertBatch(ctx context.Context, events []queue.UsageEvent) erro
 		return fmt.Errorf("prepare tool call insert: %w", err)
 	}
 	defer toolStmt.Close()
+
+	webStmt, err := tx.PrepareContext(ctx, insertWebRequestSQL)
+	if err != nil {
+		return fmt.Errorf("prepare web request insert: %w", err)
+	}
+	defer webStmt.Close()
 
 	for _, ev := range events {
 		var completedAt any
@@ -507,6 +538,22 @@ func (s *Store) InsertBatch(ctx context.Context, events []queue.UsageEvent) erro
 				nullableString(call.Command), nullableString(call.Description), nullableString(call.ArgumentsJSON),
 			); err != nil {
 				return fmt.Errorf("insert tool call for request %s: %w", ev.RequestID, err)
+			}
+		}
+		for ordinal, request := range ev.WebRequests {
+			// The activity ledger records provider web-tool calls from both
+			// providers (Codex's web_search_call and Claude Code's client-side
+			// WebSearch/WebFetch). Generic forward-proxy traffic is not a
+			// web-tool call, so IsWebToolName keeps it out.
+			if !queue.IsWebToolName(request.Name) {
+				continue
+			}
+			if _, err := webStmt.ExecContext(ctx,
+				ev.RequestID, ordinal, nullableString(request.ID), request.Name,
+				nullableString(request.Query), nullableString(request.URL), nullableString(request.Domain),
+				nullableString(request.ArgumentsJSON),
+			); err != nil {
+				return fmt.Errorf("insert web request for request %s: %w", ev.RequestID, err)
 			}
 		}
 	}

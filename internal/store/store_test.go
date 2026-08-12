@@ -203,7 +203,7 @@ func TestDeleteRequestsStartedBefore(t *testing.T) {
 	oldStart := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
 	newStart := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
 	events := []queue.UsageEvent{
-		{RequestID: "old", StartedAt: oldStart, CompletedAt: oldStart.Add(time.Second), Method: "POST", Path: "/v1/responses", UpstreamURL: "https://api.openai.com/v1/responses", ToolCalls: []queue.ToolCall{{Name: "Bash", Command: "go test ./..."}}},
+		{RequestID: "old", StartedAt: oldStart, CompletedAt: oldStart.Add(time.Second), Method: "POST", Path: "/v1/responses", UpstreamURL: "https://api.openai.com/v1/responses", ToolCalls: []queue.ToolCall{{Name: "Bash", Command: "go test ./..."}}, WebRequests: []queue.WebRequest{{Name: "web_search_call", Query: "old"}}},
 		{RequestID: "new", StartedAt: newStart, CompletedAt: newStart.Add(time.Second), Method: "POST", Path: "/v1/messages", UpstreamURL: "https://api.anthropic.com/v1/messages"},
 	}
 	if err := s.InsertBatch(t.Context(), events); err != nil {
@@ -231,6 +231,13 @@ func TestDeleteRequestsStartedBefore(t *testing.T) {
 	}
 	if remainingTools != 0 {
 		t.Fatalf("remaining tool calls = %d, want 0 after retention cleanup", remainingTools)
+	}
+	var remainingWeb int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM web_requests`).Scan(&remainingWeb); err != nil {
+		t.Fatalf("count remaining web requests: %v", err)
+	}
+	if remainingWeb != 0 {
+		t.Fatalf("remaining web requests = %d, want 0 after retention cleanup", remainingWeb)
 	}
 }
 
@@ -345,6 +352,10 @@ func TestInsertBatch_RoundTrip(t *testing.T) {
 				Description:   "Run tests",
 				ArgumentsJSON: `{"command":"go test ./...","description":"Run tests"}`,
 			}},
+			WebRequests: []queue.WebRequest{{
+				ID: "web-1", Name: "web_search_call", Query: "Go release", URL: "https://go.dev",
+				ArgumentsJSON: `{"query":"Go release"}`,
+			}},
 		}
 	)
 
@@ -406,5 +417,13 @@ func TestInsertBatch_RoundTrip(t *testing.T) {
 	}
 	if toolID != "call-1" || toolName != "Bash" || command != "go test ./..." || description != "Run tests" || arguments != `{"command":"go test ./...","description":"Run tests"}` {
 		t.Fatalf("tool call = (%q, %q, %q, %q, %q), want persisted Bash call", toolID, toolName, command, description, arguments)
+	}
+	var webName, webQuery, webURL, webArgs string
+	if err := s.db.QueryRow(`SELECT name, query, url, arguments_json FROM web_requests WHERE request_id = ?`, "req-1").
+		Scan(&webName, &webQuery, &webURL, &webArgs); err != nil {
+		t.Fatalf("query web request: %v", err)
+	}
+	if webName != "web_search_call" || webQuery != "Go release" || webURL != "https://go.dev" || webArgs != `{"query":"Go release"}` {
+		t.Fatalf("web request = (%q, %q, %q, %q), want persisted web search", webName, webQuery, webURL, webArgs)
 	}
 }
