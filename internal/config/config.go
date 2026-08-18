@@ -30,15 +30,22 @@ type Config struct {
 	AnthropicUpstream string // root for Claude Code / Messages API, e.g. https://api.anthropic.com
 
 	DBPath          string
+	OutboxPath      string
+	QuackAddr       string
+	HubAddr         string
+	HubToken        string
+	HubInsecure     bool
+	Source          string
+	Host            string
 	ShutdownTimeout time.Duration
 	RequestTimeout  time.Duration
 	IdleTimeout     time.Duration
 	RetentionDays   int
 	UIEnabled       bool
 
-	Queue                    queue.Config
-	QueueDrainTimeout        time.Duration
-	AggregateRefreshInterval time.Duration
+	Queue             queue.Config
+	QueueDrainTimeout time.Duration
+	ForwardInterval   time.Duration
 }
 
 const (
@@ -56,18 +63,23 @@ const (
 // Default returns the built-in defaults, the lowest-precedence layer.
 func Default() Config {
 	return Config{
-		Addr:                     "127.0.0.1:8787",
-		OpenAIUpstream:           defaultOpenAIUpstream,
-		AnthropicUpstream:        defaultAnthropicUpstream,
-		DBPath:                   defaultDBPath(),
-		ShutdownTimeout:          5 * time.Second,
-		RequestTimeout:           2 * time.Minute,
-		IdleTimeout:              2 * time.Minute,
-		RetentionDays:            0,
-		UIEnabled:                true,
-		Queue:                    queue.DefaultConfig(),
-		QueueDrainTimeout:        5 * time.Second,
-		AggregateRefreshInterval: 5 * time.Minute,
+		Addr:              "127.0.0.1:8787",
+		OpenAIUpstream:    defaultOpenAIUpstream,
+		AnthropicUpstream: defaultAnthropicUpstream,
+		DBPath:            defaultDBPath(),
+		OutboxPath:        defaultOutboxPath(),
+		QuackAddr:         "127.0.0.1:9494",
+		HubInsecure:       false,
+		Source:            defaultSource(),
+		Host:              defaultHost(),
+		ShutdownTimeout:   5 * time.Second,
+		RequestTimeout:    2 * time.Minute,
+		IdleTimeout:       2 * time.Minute,
+		RetentionDays:     0,
+		UIEnabled:         true,
+		Queue:             queue.DefaultConfig(),
+		QueueDrainTimeout: 5 * time.Second,
+		ForwardInterval:   time.Second,
 	}
 }
 
@@ -88,6 +100,28 @@ func Load(args []string) (Config, error) {
 	}
 	if v := os.Getenv("EF_DB"); v != "" {
 		cfg.DBPath = v
+	}
+	if v := os.Getenv("EF_OUTBOX"); v != "" {
+		cfg.OutboxPath = v
+	}
+	if v := os.Getenv("EF_QUACK_ADDR"); v != "" {
+		cfg.QuackAddr = v
+	}
+	if v := os.Getenv("EF_HUB_ADDR"); v != "" {
+		cfg.HubAddr = v
+	}
+	if v := os.Getenv("EF_HUB_TOKEN"); v != "" {
+		cfg.HubToken = v
+	}
+	if v := os.Getenv("EF_HUB_INSECURE"); v != "" {
+		insecure, err := strconv.ParseBool(v)
+		if err != nil {
+			return Config{}, fmt.Errorf("EF_HUB_INSECURE: %w", err)
+		}
+		cfg.HubInsecure = insecure
+	}
+	if v := os.Getenv("EF_SOURCE"); v != "" {
+		cfg.Source = v
 	}
 	if v := os.Getenv("EF_SHUTDOWN_TIMEOUT"); v != "" {
 		d, err := time.ParseDuration(v)
@@ -117,12 +151,12 @@ func Load(args []string) (Config, error) {
 		}
 		cfg.QueueDrainTimeout = d
 	}
-	if v := os.Getenv("EF_AGGREGATE_REFRESH_INTERVAL"); v != "" {
+	if v := os.Getenv("EF_FORWARD_INTERVAL"); v != "" {
 		d, err := time.ParseDuration(v)
 		if err != nil {
-			return Config{}, fmt.Errorf("EF_AGGREGATE_REFRESH_INTERVAL: %w", err)
+			return Config{}, fmt.Errorf("EF_FORWARD_INTERVAL: %w", err)
 		}
-		cfg.AggregateRefreshInterval = d
+		cfg.ForwardInterval = d
 	}
 	if v := os.Getenv("EF_RETENTION_DAYS"); v != "" {
 		days, err := strconv.Atoi(v)
@@ -145,12 +179,18 @@ func Load(args []string) (Config, error) {
 	fs.StringVar(&cfg.Addr, "addr", cfg.Addr, "listen address (host:port)")
 	fs.StringVar(&cfg.OpenAIUpstream, "openai-upstream", cfg.OpenAIUpstream, "OpenAI upstream root (Codex / Responses API)")
 	fs.StringVar(&cfg.AnthropicUpstream, "anthropic-upstream", cfg.AnthropicUpstream, "Anthropic upstream root (Claude Code / Messages API)")
-	fs.StringVar(&cfg.DBPath, "db", cfg.DBPath, "sqlite database path")
+	fs.StringVar(&cfg.DBPath, "db", cfg.DBPath, "DuckDB ledger path")
+	fs.StringVar(&cfg.OutboxPath, "outbox", cfg.OutboxPath, "distributed-mode SQLite outbox path")
+	fs.StringVar(&cfg.QuackAddr, "quack-addr", cfg.QuackAddr, "standalone Quack listen address (host:port)")
+	fs.StringVar(&cfg.HubAddr, "hub-addr", cfg.HubAddr, "hub Quack address (enables distributed mode for serve)")
+	fs.StringVar(&cfg.HubToken, "hub-token", cfg.HubToken, "hub Quack authentication token")
+	fs.BoolVar(&cfg.HubInsecure, "insecure", cfg.HubInsecure, "allow an unencrypted connection to the hub; TLS is required unless this is set")
+	fs.StringVar(&cfg.Source, "source", cfg.Source, "developer or machine identity stamped on usage")
 	fs.DurationVar(&cfg.ShutdownTimeout, "shutdown-timeout", cfg.ShutdownTimeout, "graceful HTTP shutdown timeout")
 	fs.DurationVar(&cfg.RequestTimeout, "request-timeout", cfg.RequestTimeout, "upstream response-header timeout (0 disables)")
 	fs.DurationVar(&cfg.IdleTimeout, "idle-timeout", cfg.IdleTimeout, "idle client-write timeout while proxying responses (0 disables)")
 	fs.DurationVar(&cfg.QueueDrainTimeout, "queue-drain-timeout", cfg.QueueDrainTimeout, "usage queue drain timeout during shutdown")
-	fs.DurationVar(&cfg.AggregateRefreshInterval, "aggregate-refresh-interval", cfg.AggregateRefreshInterval, "historical aggregate refresh interval (0 disables)")
+	fs.DurationVar(&cfg.ForwardInterval, "forward-interval", cfg.ForwardInterval, "distributed outbox polling interval")
 	fs.IntVar(&cfg.RetentionDays, "retention-days", cfg.RetentionDays, "delete usage rows older than this many days at startup (0 disables)")
 	fs.BoolVar(&cfg.UIEnabled, "ui-enabled", cfg.UIEnabled, "serve the read-only dashboard at /ui/")
 	if err := fs.Parse(args); err != nil {
@@ -160,15 +200,21 @@ func Load(args []string) (Config, error) {
 	if cfg.RetentionDays < 0 {
 		return Config{}, fmt.Errorf("retention-days must be >= 0")
 	}
-	if cfg.ShutdownTimeout < 0 || cfg.RequestTimeout < 0 || cfg.IdleTimeout < 0 || cfg.QueueDrainTimeout < 0 || cfg.AggregateRefreshInterval < 0 {
+	if cfg.ShutdownTimeout < 0 || cfg.RequestTimeout < 0 || cfg.IdleTimeout < 0 || cfg.QueueDrainTimeout < 0 || cfg.ForwardInterval < 0 {
 		return Config{}, fmt.Errorf("timeouts must be >= 0")
+	}
+	if cfg.HubAddr != "" && len(cfg.HubToken) < 4 {
+		return Config{}, fmt.Errorf("hub-token must contain at least 4 characters when hub-addr is set")
+	}
+	if cfg.Source == "" {
+		return Config{}, fmt.Errorf("source must not be empty")
 	}
 
 	return cfg, nil
 }
 
 // defaultDBPath mirrors the Windows-first layout from the plan:
-// %LOCALAPPDATA%\excursion-funnel\usage.sqlite, with a home-dir fallback.
+// %LOCALAPPDATA%\excursion-funnel\usage.duckdb, with a home-dir fallback.
 func defaultDBPath() string {
 	base := os.Getenv("LOCALAPPDATA")
 	if base == "" {
@@ -178,5 +224,35 @@ func defaultDBPath() string {
 			base = "."
 		}
 	}
-	return filepath.Join(base, "excursion-funnel", "usage.sqlite")
+	return filepath.Join(base, "excursion-funnel", "usage.duckdb")
+}
+
+// DefaultDBPath returns the platform-specific default DuckDB ledger path.
+func DefaultDBPath() string { return defaultDBPath() }
+
+func defaultOutboxPath() string {
+	return filepath.Join(filepath.Dir(defaultDBPath()), "outbox.sqlite")
+}
+
+func defaultHost() string {
+	host, _ := os.Hostname()
+	return host
+}
+
+func defaultSource() string {
+	name := os.Getenv("USERNAME")
+	if name == "" {
+		name = os.Getenv("USER")
+	}
+	host := defaultHost()
+	switch {
+	case name != "" && host != "":
+		return name + "@" + host
+	case host != "":
+		return host
+	case name != "":
+		return name
+	default:
+		return "unknown"
+	}
 }

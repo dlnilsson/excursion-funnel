@@ -43,21 +43,14 @@ func TestLocalTimestamp_ConvertsToLocalZone(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := parsed.Local().Format("2006-01-02T15:04:05.000Z07:00")
-	if got := localTimestamp(input); got != want {
+	if got := localTimestamp(parsed); got != want {
 		t.Fatalf("localTimestamp(%q) = %q, want %q", input, got, want)
-	}
-}
-
-func TestLocalTimestamp_PreservesInvalidValue(t *testing.T) {
-	const input = "not-a-timestamp"
-	if got := localTimestamp(input); got != input {
-		t.Fatalf("localTimestamp(%q) = %q, want unchanged", input, got)
 	}
 }
 
 // `usage today --since X` used to silently report today and discard the range.
 func TestRunUsage_TodayWithExplicitRangeIsRejected(t *testing.T) {
-	dbPath := filepath.Join(t.TempDir(), "usage.sqlite")
+	dbPath := filepath.Join(t.TempDir(), "usage.duckdb")
 
 	for _, args := range [][]string{
 		{"today", "--db", dbPath, "--since", "2026-07-01"},
@@ -72,7 +65,7 @@ func TestRunUsage_TodayWithExplicitRangeIsRejected(t *testing.T) {
 
 // The reporting commands must not create the ledger they read.
 func TestRunUsage_MissingDatabaseIsAnError(t *testing.T) {
-	dbPath := filepath.Join(t.TempDir(), "absent.sqlite")
+	dbPath := filepath.Join(t.TempDir(), "absent.duckdb")
 
 	if err := runUsage([]string{"today", "--db", dbPath}); err == nil {
 		t.Fatal("runUsage() error = nil, want a missing-database error")
@@ -83,12 +76,11 @@ func TestRunUsage_MissingDatabaseIsAnError(t *testing.T) {
 }
 
 func TestRunUsage_TodayJSON(t *testing.T) {
-	dbPath := filepath.Join(t.TempDir(), "usage.sqlite")
+	dbPath := filepath.Join(t.TempDir(), "usage.duckdb")
 	st, err := store.Open(dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = st.Close() })
 
 	input, output, total := int64(10), int64(4), int64(14)
 	started := beginningOfDay(time.Now()).Add(time.Hour)
@@ -107,6 +99,9 @@ func TestRunUsage_TodayJSON(t *testing.T) {
 			TotalTokens:  &total,
 		},
 	}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Close(); err != nil {
 		t.Fatal(err)
 	}
 
@@ -133,12 +128,11 @@ func TestRunUsage_TodayJSON(t *testing.T) {
 }
 
 func TestRunTools_Today(t *testing.T) {
-	dbPath := filepath.Join(t.TempDir(), "usage.sqlite")
+	dbPath := filepath.Join(t.TempDir(), "usage.duckdb")
 	st, err := store.Open(dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = st.Close() })
 
 	now := time.Now()
 	if err := st.InsertBatch(t.Context(), []queue.UsageEvent{{
@@ -154,6 +148,9 @@ func TestRunTools_Today(t *testing.T) {
 			Command:     "go test ./...",
 		}},
 	}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Close(); err != nil {
 		t.Fatal(err)
 	}
 
@@ -185,7 +182,7 @@ func TestPrintUsageJSON_EmptyRowsIsArray(t *testing.T) {
 }
 
 func TestRunInspect_RejectsNonPositiveLimit(t *testing.T) {
-	dbPath := filepath.Join(t.TempDir(), "usage.sqlite")
+	dbPath := filepath.Join(t.TempDir(), "usage.duckdb")
 
 	if err := runInspect([]string{"--db", dbPath, "--limit", "0", "req-1"}); err == nil {
 		t.Fatal("runInspect() error = nil, want a --limit validation error")

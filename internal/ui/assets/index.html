@@ -594,6 +594,14 @@
   </table>
 </details>
 
+<details class="table-section" data-table-key="sources" open>
+  <summary>Requests by source</summary>
+  <table id="sources-table">
+    <thead><tr><th>Source</th><th>Requests</th><th>Errors</th><th>Total tokens</th></tr></thead>
+    <tbody></tbody>
+  </table>
+</details>
+
 <h2>Model activity</h2>
 <div class="history-layout">
   <div class="history-actions">
@@ -820,8 +828,9 @@ function setHistoryMetric(metric) {
 }
 
 async function load() {
-  const [summary, history, modelHistory, errors, tools] = await Promise.all([
+  const [summary, sources, history, modelHistory, errors, tools] = await Promise.all([
     fetch("/ui/api/summary").then(r => r.json()),
+    fetch("/ui/api/sources").then(r => r.json()),
     fetch("/ui/api/history").then(r => r.json()),
     fetch("/ui/api/history/models").then(r => r.json()),
     fetch("/ui/api/errors").then(r => r.json()),
@@ -829,9 +838,19 @@ async function load() {
   ]);
   renderStats(summary);
   renderSummary(summary);
+  renderSources(sources);
   renderHistoryCharts(history, modelHistory);
   renderErrors(errors);
   renderTools(tools);
+}
+
+function renderSources(rows) {
+  const tbody = document.querySelector("#sources-table tbody");
+  if (rows.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="4" class="empty">No source activity today</td></tr>';
+    return;
+  }
+  tbody.innerHTML = rows.map(r => `<tr><td>${escapeHTML(r.Source)}</td><td>${r.Requests}</td><td>${r.Errors}</td>${tokenCell(r.Total)}</tr>`).join("");
 }
 
 const providerLabels = { anthropic: "Anthropic", openai: "Codex" };

@@ -24,11 +24,30 @@ func New(rep *report.Reporter, log *slog.Logger) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /ui/", handleIndex)
 	mux.HandleFunc("GET /ui/api/summary", handleSummary(rep, log))
+	mux.HandleFunc("GET /ui/api/sources", handleSources(rep, log))
 	mux.HandleFunc("GET /ui/api/history", handleHistory(rep, log))
 	mux.HandleFunc("GET /ui/api/history/models", handleModelHistory(rep, log))
 	mux.HandleFunc("GET /ui/api/errors", handleErrors(rep, log))
 	mux.HandleFunc("GET /ui/api/tools", handleToolCalls(rep, log))
 	return mux
+}
+
+func handleSources(rep *report.Reporter, log *slog.Logger) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		since := beginningOfDay(time.Now())
+		rows, err := rep.Summary(r.Context(), report.SummaryOptions{
+			Since: since, Until: since.AddDate(0, 0, 1), GroupBy: "source",
+		})
+		if err != nil {
+			log.Error("ui: query sources", "err", err)
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		if rows == nil {
+			rows = []report.SummaryRow{}
+		}
+		writeJSON(w, rows)
+	}
 }
 
 func handleIndex(w http.ResponseWriter, r *http.Request) {
@@ -55,9 +74,7 @@ func handleSummary(rep *report.Reporter, log *slog.Logger) http.HandlerFunc {
 	}
 }
 
-// handleHistory serves all-time per-day usage totals from the materialized
-// aggregate tables. Unlike summary it reads the pre-rolled tables rather than
-// scanning requests, so it is only as fresh as the last aggregate refresh.
+// handleHistory serves live all-time per-day usage totals from DuckDB.
 func handleHistory(rep *report.Reporter, log *slog.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		rows, err := rep.HistoricalByDay(r.Context())

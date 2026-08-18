@@ -15,7 +15,7 @@ import (
 func TestSummary_GroupsByProviderAndModel(t *testing.T) {
 	dbPath := seedReportDB(t)
 
-	r, err := Open(dbPath)
+	r, err := Open(dbPath, "")
 	if err != nil {
 		t.Fatalf("Open() error = %v", err)
 	}
@@ -50,7 +50,31 @@ func TestSummary_GroupsByProviderAndModel(t *testing.T) {
 	}
 }
 
-func TestHistorical_ReadsMaterializedAggregates(t *testing.T) {
+func TestSummary_GroupsBySourceWithMixedProviderInput(t *testing.T) {
+	dbPath := seedReportDB(t)
+	r, err := Open(dbPath, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = r.Close() })
+	rows, err := r.Summary(t.Context(), SummaryOptions{
+		Since:   time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC),
+		Until:   time.Date(2026, 8, 2, 0, 0, 0, 0, time.UTC),
+		GroupBy: "source",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0].Source != "unknown" {
+		t.Fatalf("source rows = %+v", rows)
+	}
+	// OpenAI: (10 - 5) + 20; Anthropic: 7 - 3 cache-write.
+	if rows[0].Input != 37 || rows[0].FreshInput != 29 {
+		t.Fatalf("source input totals = %+v, want raw=37 fresh=29", rows[0])
+	}
+}
+
+func TestHistorical_ReadsLiveDuckDBAggregates(t *testing.T) {
 	dbPath := seedReportDB(t)
 
 	st, err := store.Open(dbPath)
@@ -58,10 +82,6 @@ func TestHistorical_ReadsMaterializedAggregates(t *testing.T) {
 		t.Fatalf("store.Open() error = %v", err)
 	}
 	t.Cleanup(func() { _ = st.Close() })
-	if err := st.RefreshUsageAggregates(t.Context()); err != nil {
-		t.Fatalf("RefreshUsageAggregates() error = %v", err)
-	}
-
 	r := New(st)
 
 	byModel, err := r.HistoricalByModel(t.Context())
@@ -98,7 +118,7 @@ func TestHistorical_ReadsMaterializedAggregates(t *testing.T) {
 func TestInspect_FindsByResponseID(t *testing.T) {
 	dbPath := seedReportDB(t)
 
-	r, err := Open(dbPath)
+	r, err := Open(dbPath, "")
 	if err != nil {
 		t.Fatalf("Open() error = %v", err)
 	}
@@ -121,7 +141,7 @@ func TestInspect_FindsByResponseID(t *testing.T) {
 }
 
 func TestInspect_IncludesToolCalls(t *testing.T) {
-	dbPath := filepath.Join(t.TempDir(), "usage.sqlite")
+	dbPath := filepath.Join(t.TempDir(), "usage.duckdb")
 	st, err := store.Open(dbPath)
 	if err != nil {
 		t.Fatalf("store.Open() error = %v", err)
@@ -151,7 +171,7 @@ func TestInspect_IncludesToolCalls(t *testing.T) {
 		t.Fatalf("Close() error = %v", err)
 	}
 
-	r, err := Open(dbPath)
+	r, err := Open(dbPath, "")
 	if err != nil {
 		t.Fatalf("Open() error = %v", err)
 	}
@@ -166,6 +186,83 @@ func TestInspect_IncludesToolCalls(t *testing.T) {
 	call := rows[0].ToolCalls[0]
 	if call.Ordinal != 0 || call.ID != "toolu_bash" || call.Name != "Bash" || call.Command != "go test ./..." || call.Description != "Run tests" {
 		t.Fatalf("tool call = %+v, want persisted Bash call", call)
+	}
+}
+
+// ToolCalls avoids a SQL JOIN between requests and tool_calls (a JOIN across
+// two tables fails over a Quack-attached catalog); it instead joins in Go
+// after two single-table scans, expanding the requests window until enough
+// tool calls are gathered. This test seeds requests with tool calls spaced
+// out so the initial window (sized to the limit) undershoots and must expand,
+// and asserts the result still comes back correctly ordered by request
+// recency then ordinal, and capped at the limit.
+func TestToolCalls_OrdersAcrossRequestsAndExpandsWindow(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "usage.duckdb")
+	st, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatalf("store.Open() error = %v", err)
+	}
+	base := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+	newEvent := func(id string, offset time.Duration, calls ...queue.ToolCall) queue.UsageEvent {
+		started := base.Add(offset)
+		return queue.UsageEvent{
+			RequestID:   id,
+			StartedAt:   started,
+			CompletedAt: started.Add(time.Second),
+			Method:      "POST",
+			Path:        "/v1/messages",
+			UpstreamURL: "https://api.anthropic.com/v1/messages",
+			ToolCalls:   calls,
+		}
+	}
+	bash := func(cmd string) queue.ToolCall { return queue.ToolCall{Name: "Bash", Command: cmd} }
+	// Oldest to newest; only some requests carry tool calls, and the
+	// most-recent request has none, so a window sized to the limit must
+	// expand to reach the tool calls that satisfy it.
+	events := []queue.UsageEvent{
+		newEvent("req-1", 1*time.Minute, bash("one"), bash("two"), bash("three")),
+		newEvent("req-2", 2*time.Minute, bash("four")),
+		newEvent("req-3", 3*time.Minute),
+		newEvent("req-4", 4*time.Minute, bash("five"), bash("six")),
+		newEvent("req-5", 5*time.Minute),
+	}
+	if err := st.InsertBatch(t.Context(), events); err != nil {
+		_ = st.Close()
+		t.Fatalf("InsertBatch() error = %v", err)
+	}
+	if err := st.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+
+	r, err := Open(dbPath, "")
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	t.Cleanup(func() { _ = r.Close() })
+
+	rows, err := r.RecentToolCalls(t.Context(), 3)
+	if err != nil {
+		t.Fatalf("RecentToolCalls() error = %v", err)
+	}
+	if len(rows) != 3 {
+		t.Fatalf("rows len = %d, want 3: %+v", len(rows), rows)
+	}
+	wantCommands := []string{"five", "six", "four"}
+	for i, want := range wantCommands {
+		if rows[i].RequestID != wantRequestFor(want) || rows[i].Command != want {
+			t.Fatalf("rows[%d] = %+v, want command %q", i, rows[i], want)
+		}
+	}
+}
+
+func wantRequestFor(command string) string {
+	switch command {
+	case "five", "six":
+		return "req-4"
+	case "four":
+		return "req-2"
+	default:
+		return "req-1"
 	}
 }
 
@@ -191,9 +288,9 @@ func TestNew_ReusesExistingStore(t *testing.T) {
 // A reporting command must not conjure the ledger it claims to read: a
 // mistyped --db has to surface as an error, not as "no usage rows".
 func TestOpen_MissingDatabaseErrorsWithoutCreatingIt(t *testing.T) {
-	dbPath := filepath.Join(t.TempDir(), "nested", "usage.sqlite")
+	dbPath := filepath.Join(t.TempDir(), "nested", "usage.duckdb")
 
-	r, err := Open(dbPath)
+	r, err := Open(dbPath, "")
 	if err == nil {
 		_ = r.Close()
 		t.Fatal("Open() error = nil, want a missing-database error")
@@ -212,7 +309,7 @@ func TestOpen_MissingDatabaseErrorsWithoutCreatingIt(t *testing.T) {
 func TestRecentErrors_FiltersToErrorRows(t *testing.T) {
 	dbPath := seedReportDBWithError(t)
 
-	r, err := Open(dbPath)
+	r, err := Open(dbPath, "")
 	if err != nil {
 		t.Fatalf("Open() error = %v", err)
 	}
@@ -234,7 +331,7 @@ func TestRecentErrors_FiltersToErrorRows(t *testing.T) {
 func seedReportDBWithError(t *testing.T) string {
 	t.Helper()
 
-	dbPath := filepath.Join(t.TempDir(), "usage.sqlite")
+	dbPath := filepath.Join(t.TempDir(), "usage.duckdb")
 	st, err := store.Open(dbPath)
 	if err != nil {
 		t.Fatalf("store.Open() error = %v", err)
@@ -273,7 +370,7 @@ func seedReportDBWithError(t *testing.T) string {
 func seedReportDB(t *testing.T) string {
 	t.Helper()
 
-	dbPath := filepath.Join(t.TempDir(), "usage.sqlite")
+	dbPath := filepath.Join(t.TempDir(), "usage.duckdb")
 	st, err := store.Open(dbPath)
 	if err != nil {
 		t.Fatalf("store.Open() error = %v", err)

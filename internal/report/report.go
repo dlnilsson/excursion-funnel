@@ -1,42 +1,94 @@
-// Package report reads usage summaries from the SQLite ledger.
+// Package report reads live usage summaries from DuckDB ledgers.
 package report
 
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
+	"net"
+	"os"
+	"slices"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/dlnilsson/excursion-funnel/internal/store"
 )
 
-// Reporter owns a SQLite connection used for reporting queries.
+// Reporter owns a Store only when created by Open or OpenRemote.
 type Reporter struct {
 	store *store.Store
+	owned bool
 }
 
-// Open opens an existing usage ledger for reporting. It fails rather than
-// creating one, so a mistyped --db reports the mistake instead of silently
-// returning an empty result set.
-func Open(path string) (*Reporter, error) {
+// Open first tries the configured daemon/hub through Quack, then falls back to
+// a read-only file open when a standalone daemon is not running. A configured
+// hub never falls back to a stale local ledger.
+//
+// Quack is only consulted when path equals defaultPath — the caller's
+// unmodified default ledger location. An explicit --db override naming a
+// different file always reads that file directly, even if some daemon
+// happens to be reachable on the default Quack port: otherwise a user
+// pointing at a specific archived ledger would silently get a different
+// (whichever daemon's) ledger instead, with no indication their flag was
+// ignored.
+func Open(path, defaultPath string) (*Reporter, error) {
+	if hub := os.Getenv("EF_HUB_ADDR"); hub != "" {
+		insecure := false
+		if raw := os.Getenv("EF_HUB_INSECURE"); raw != "" {
+			parsed, err := strconv.ParseBool(raw)
+			if err != nil {
+				return nil, fmt.Errorf("EF_HUB_INSECURE: %w", err)
+			}
+			insecure = parsed
+		}
+		return OpenRemote(hub, os.Getenv("EF_HUB_TOKEN"), insecure)
+	}
+	var remoteErr error
+	if path == defaultPath {
+		address := os.Getenv("EF_QUACK_ADDR")
+		if address == "" {
+			address = "127.0.0.1:9494"
+		}
+		if quackReachable(address) {
+			remote, err := OpenRemote(address, store.LocalQuackToken, false)
+			if err == nil {
+				return remote, nil
+			}
+			remoteErr = err
+		}
+	}
 	st, err := store.OpenExisting(path)
+	if err != nil {
+		if remoteErr != nil {
+			return nil, errors.Join(remoteErr, err)
+		}
+		return nil, err
+	}
+	return &Reporter{store: st, owned: true}, nil
+}
+
+// OpenRemote opens a Quack-backed reporter directly.
+func OpenRemote(address, token string, insecure bool) (*Reporter, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	st, err := store.OpenRemote(ctx, address, token, insecure)
 	if err != nil {
 		return nil, err
 	}
-	return &Reporter{store: st}, nil
+	return &Reporter{store: st, owned: true}, nil
 }
 
-// New builds a Reporter over an already-open Store, for callers (such as the
-// daemon itself) that already hold a connection and should not open a second
-// one. Unlike Open, Close must not be called on a Reporter built this way —
-// the caller owns the underlying Store's lifecycle.
-func New(st *store.Store) *Reporter {
-	return &Reporter{store: st}
-}
+// New builds a Reporter over an already-open in-process Store.
+func New(st *store.Store) *Reporter { return &Reporter{store: st} }
 
-// Close closes the underlying database connection.
+// Close closes an owned Store and is a no-op for New reporters.
 func (r *Reporter) Close() error {
+	if !r.owned {
+		return nil
+	}
 	return r.store.Close()
 }
 
@@ -53,9 +105,11 @@ type SummaryRow struct {
 	Provider   string
 	Client     string
 	Model      string
+	Source     string
 	Requests   int64
 	Errors     int64
 	Input      int64
+	FreshInput int64
 	Cached     int64
 	CacheWrite int64
 	Output     int64
@@ -67,8 +121,10 @@ type SummaryRow struct {
 type InspectRow struct {
 	ID                string
 	ResponseID        string
-	StartedAt         string
-	CompletedAt       string
+	Source            string
+	Host              string
+	StartedAt         time.Time
+	CompletedAt       sql.NullTime
 	DurationMS        sql.NullInt64
 	Method            string
 	Path              string
@@ -95,7 +151,6 @@ type InspectRow struct {
 	ToolCalls         []ToolCall
 }
 
-// ToolCall is one tool invocation associated with an inspected request.
 type ToolCall struct {
 	Ordinal       int
 	ID            string
@@ -105,11 +160,10 @@ type ToolCall struct {
 	ArgumentsJSON string
 }
 
-// ToolCallRow is a tool invocation with the request metadata needed by the
-// dashboard's recent-tool table.
 type ToolCallRow struct {
 	RequestID   string
-	StartedAt   string
+	Source      string
+	StartedAt   time.Time
 	Provider    string
 	Client      string
 	Model       string
@@ -120,99 +174,50 @@ type ToolCallRow struct {
 	Description string
 }
 
-// ToolCallOptions controls a tool-call query. Since is inclusive and Until is
-// exclusive, matching the usage-reporting date range semantics.
 type ToolCallOptions struct {
 	Since time.Time
 	Until time.Time
 	Limit int
 }
 
-// Summary returns usage totals for the selected interval.
+// Summary returns live usage totals for the selected interval.
 func (r *Reporter) Summary(ctx context.Context, opts SummaryOptions) ([]SummaryRow, error) {
 	groupBy := opts.GroupBy
 	if groupBy == "" {
 		groupBy = "model"
 	}
-
 	selectGroup, groupExpr, orderBy, err := summaryGrouping(groupBy)
 	if err != nil {
 		return nil, err
 	}
-
-	var (
-		args  []any
-		where []string
-	)
-	if !opts.Since.IsZero() {
-		where = append(where, "started_at >= ?")
-		args = append(args, formatTime(opts.Since))
-	}
-	if !opts.Until.IsZero() {
-		where = append(where, "started_at < ?")
-		args = append(args, formatTime(opts.Until))
-	}
-
-	whereSQL := ""
-	if len(where) > 0 {
-		whereSQL = "WHERE " + strings.Join(where, " AND ")
-	}
-
-	query := buildSummaryQuery(selectGroup, whereSQL, groupExpr, orderBy)
-
-	return r.scanSummary(ctx, query, args...)
+	where, args := timeRange("started_at", opts.Since, opts.Until)
+	return r.scanSummary(ctx, buildSummaryQuery(selectGroup, where, groupExpr, orderBy), args...)
 }
 
-// HistoricalByModel returns all-time per-model usage totals from the
-// materialized usage_model_histogram table, refreshed periodically by the
-// daemon's aggregate scheduler. Unlike Summary it never scans requests, so it
-// stays cheap as history grows; the tradeoff is that results are only as fresh
-// as the last store.RefreshUsageAggregates run. Day is always empty.
+// HistoricalByModel computes all-time model totals directly from requests.
 func (r *Reporter) HistoricalByModel(ctx context.Context) ([]SummaryRow, error) {
-	const query = `
-SELECT
-  '' AS day, provider, client, model,
-  request_count, error_count,
-  input_tokens, cached_input_tokens, cache_write_tokens,
-  output_tokens, reasoning_tokens, total_tokens
-FROM usage_model_histogram
-ORDER BY total_tokens DESC, provider, client, model`
-	return r.scanSummary(ctx, query)
+	selectGroup, groupExpr, _, _ := summaryGrouping("model")
+	return r.scanSummary(ctx, buildSummaryQuery(selectGroup, "", groupExpr, "total_tokens DESC, provider, client, model"))
 }
 
-// HistoricalByDay returns all-time per-day, per-model usage totals from the
-// materialized usage_daily_model table, newest day first. See HistoricalByModel
-// for freshness semantics.
+// HistoricalByDay computes all-time daily totals directly from requests.
 func (r *Reporter) HistoricalByDay(ctx context.Context) ([]SummaryRow, error) {
-	const query = `
-SELECT
-  day, provider, client, model,
-  request_count, error_count,
-  input_tokens, cached_input_tokens, cache_write_tokens,
-  output_tokens, reasoning_tokens, total_tokens
-FROM usage_daily_model
-ORDER BY day DESC, total_tokens DESC, provider, client, model`
-	return r.scanSummary(ctx, query)
+	selectGroup, groupExpr, _, _ := summaryGrouping("day")
+	return r.scanSummary(ctx, buildSummaryQuery(selectGroup, "", groupExpr, "day DESC, total_tokens DESC, provider, client, model"))
 }
 
-// scanSummary runs a query whose columns match SummaryRow's field order and
-// collects the rows. Shared by Summary and the historical aggregate readers.
 func (r *Reporter) scanSummary(ctx context.Context, query string, args ...any) ([]SummaryRow, error) {
 	rows, err := r.store.DB().QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("query summary: %w", err)
 	}
 	defer rows.Close()
-
 	var out []SummaryRow
 	for rows.Next() {
 		var row SummaryRow
-		if err := rows.Scan(
-			&row.Day, &row.Provider, &row.Client, &row.Model,
-			&row.Requests, &row.Errors,
-			&row.Input, &row.Cached, &row.CacheWrite,
-			&row.Output, &row.Reasoning, &row.Total,
-		); err != nil {
+		if err := rows.Scan(&row.Day, &row.Provider, &row.Client, &row.Model, &row.Source,
+			&row.Requests, &row.Errors, &row.Input, &row.FreshInput, &row.Cached, &row.CacheWrite,
+			&row.Output, &row.Reasoning, &row.Total); err != nil {
 			return nil, fmt.Errorf("scan summary: %w", err)
 		}
 		out = append(out, row)
@@ -223,17 +228,9 @@ func (r *Reporter) scanSummary(ctx context.Context, query string, args ...any) (
 	return out, nil
 }
 
-// DefaultInspectLimit bounds how many matching rows Inspect returns when the
-// caller has no preference.
 const DefaultInspectLimit = 20
-
-// DefaultRecentToolCallLimit bounds the dashboard's recent tool-call query.
 const DefaultRecentToolCallLimit = 50
 
-// Inspect returns matching request details by internal request id or upstream
-// response id, newest first, capped at limit. A limit of zero or less falls
-// back to DefaultInspectLimit. Callers that need to know whether the result was
-// truncated should ask for limit+1 and check the length.
 func (r *Reporter) Inspect(ctx context.Context, id string, limit int) ([]InspectRow, error) {
 	if limit <= 0 {
 		limit = DefaultInspectLimit
@@ -241,112 +238,162 @@ func (r *Reporter) Inspect(ctx context.Context, id string, limit int) ([]Inspect
 	return r.queryInspectRows(ctx, "WHERE id = ? OR response_id = ?", "started_at DESC", limit, id, id)
 }
 
-// RecentErrors returns the most recent requests that recorded an error,
-// newest first.
 func (r *Reporter) RecentErrors(ctx context.Context, limit int) ([]InspectRow, error) {
 	return r.queryInspectRows(ctx, "WHERE error_type IS NOT NULL", "started_at DESC", limit)
 }
 
-// RecentErrorsWithin returns the most recent requests that recorded an error
-// within the requested interval, newest first.
 func (r *Reporter) RecentErrorsWithin(ctx context.Context, since, until time.Time, limit int) ([]InspectRow, error) {
-	where := []string{"error_type IS NOT NULL"}
-	var args []any
-	if !since.IsZero() {
-		where = append(where, "started_at >= ?")
-		args = append(args, formatTime(since))
+	where, args := timeRange("started_at", since, until)
+	if where == "" {
+		where = "WHERE error_type IS NOT NULL"
+	} else {
+		where += " AND error_type IS NOT NULL"
 	}
-	if !until.IsZero() {
-		where = append(where, "started_at < ?")
-		args = append(args, formatTime(until))
-	}
-	return r.queryInspectRows(ctx, "WHERE "+strings.Join(where, " AND "), "started_at DESC", limit, args...)
+	return r.queryInspectRows(ctx, where, "started_at DESC", limit, args...)
 }
 
-// RecentToolCalls returns the newest emitted tool calls, with their request
-// metadata, newest request first and call order preserved within a request.
 func (r *Reporter) RecentToolCalls(ctx context.Context, limit int) ([]ToolCallRow, error) {
 	return r.ToolCalls(ctx, ToolCallOptions{Limit: limit})
 }
 
-// ToolCalls returns tool invocations within the requested interval, newest
-// request first and call order preserved within a request.
+// ToolCalls reports the most recent tool calls across requests. It deliberately
+// avoids a SQL JOIN between requests and tool_calls: a Quack-attached remote
+// catalog rejects queries that stream-scan two tables at once ("Multiple
+// streaming scans... not currently supported"), which a JOIN across those
+// tables triggers. Instead it fetches candidate requests and their tool calls
+// as two independent single-table scans and joins/orders/limits in Go,
+// expanding the request window until enough tool calls are gathered or the
+// requests are exhausted.
 func (r *Reporter) ToolCalls(ctx context.Context, opts ToolCallOptions) ([]ToolCallRow, error) {
 	limit := opts.Limit
 	if limit <= 0 {
 		limit = DefaultRecentToolCallLimit
 	}
-	providerExpr := providerSQL("r.path")
-	clientExpr := clientSQL()
-	var (
-		args  []any
-		where []string
-	)
-	if !opts.Since.IsZero() {
-		where = append(where, "r.started_at >= ?")
-		args = append(args, formatTime(opts.Since))
+	where, args := timeRange("started_at", opts.Since, opts.Until)
+
+	const maxRequestWindow = 1 << 16
+	requestWindow := limit
+	var requests []toolCallRequest
+	for {
+		var err error
+		requests, err = r.candidateRequestsForToolCalls(ctx, where, args, requestWindow)
+		if err != nil {
+			return nil, err
+		}
+		out, err := r.joinRequestsToToolCalls(ctx, requests, limit)
+		if err != nil {
+			return nil, err
+		}
+		if len(out) >= limit || len(requests) < requestWindow || requestWindow >= maxRequestWindow {
+			return out, nil
+		}
+		requestWindow *= 2
 	}
-	if !opts.Until.IsZero() {
-		where = append(where, "r.started_at < ?")
-		args = append(args, formatTime(opts.Until))
-	}
-	whereSQL := ""
-	if len(where) > 0 {
-		whereSQL = "WHERE " + strings.Join(where, " AND ")
-	}
-	args = append(args, limit)
+}
+
+type toolCallRequest struct {
+	ID        string
+	Source    string
+	StartedAt time.Time
+	Provider  string
+	Client    string
+	Model     string
+}
+
+func (r *Reporter) candidateRequestsForToolCalls(ctx context.Context, where string, whereArgs []any, limit int) ([]toolCallRequest, error) {
+	args := append(slices.Clone(whereArgs), limit)
 	rows, err := r.store.DB().QueryContext(ctx, `
-SELECT
-  tc.request_id, r.started_at, `+providerExpr+`, `+clientExpr+`,
-  COALESCE(r.model_reported, r.model_requested, 'unknown'),
-  tc.ordinal, COALESCE(tc.tool_call_id, ''), tc.name,
-  COALESCE(tc.command, ''), COALESCE(tc.description, '')
-FROM tool_calls AS tc
-JOIN requests AS r ON r.id = tc.request_id
-`+whereSQL+`
-ORDER BY r.started_at DESC, tc.ordinal ASC
-LIMIT ?`, args...)
+SELECT id, COALESCE(source, 'unknown'), started_at, `+providerSQL("path")+`, `+clientSQL()+`,
+  COALESCE(model_reported, model_requested, 'unknown')
+FROM requests
+`+where+`
+ORDER BY started_at DESC LIMIT ?`, args...)
 	if err != nil {
-		return nil, fmt.Errorf("query recent tool calls: %w", err)
+		return nil, fmt.Errorf("query candidate requests for tool calls: %w", err)
 	}
 	defer rows.Close()
-
-	var out []ToolCallRow
+	out := make([]toolCallRequest, 0, limit)
 	for rows.Next() {
-		var row ToolCallRow
-		if err := rows.Scan(
-			&row.RequestID, &row.StartedAt, &row.Provider, &row.Client, &row.Model,
-			&row.Ordinal, &row.ID, &row.Name, &row.Command, &row.Description,
-		); err != nil {
-			return nil, fmt.Errorf("scan recent tool call: %w", err)
+		var req toolCallRequest
+		if err := rows.Scan(&req.ID, &req.Source, &req.StartedAt, &req.Provider, &req.Client, &req.Model); err != nil {
+			return nil, fmt.Errorf("scan candidate request for tool calls: %w", err)
 		}
-		out = append(out, row)
+		out = append(out, req)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate recent tool calls: %w", err)
+		return nil, fmt.Errorf("iterate candidate requests for tool calls: %w", err)
+	}
+	return out, nil
+}
+
+func (r *Reporter) joinRequestsToToolCalls(ctx context.Context, requests []toolCallRequest, limit int) ([]ToolCallRow, error) {
+	if len(requests) == 0 {
+		return nil, nil
+	}
+	byID := make(map[string]toolCallRequest, len(requests))
+	ids := make([]any, len(requests))
+	placeholders := make([]string, len(requests))
+	for i, req := range requests {
+		byID[req.ID] = req
+		ids[i] = req.ID
+		placeholders[i] = "?"
+	}
+	rows, err := r.store.DB().QueryContext(ctx, `
+SELECT request_id, ordinal, COALESCE(tool_call_id, ''), name, COALESCE(command, ''), COALESCE(description, '')
+FROM tool_calls WHERE request_id IN (`+strings.Join(placeholders, ", ")+`)`, ids...)
+	if err != nil {
+		return nil, fmt.Errorf("query tool calls for candidate requests: %w", err)
+	}
+	defer rows.Close()
+	byRequest := make(map[string][]ToolCallRow, len(requests))
+	for rows.Next() {
+		var (
+			requestID string
+			row       ToolCallRow
+		)
+		if err := rows.Scan(&requestID, &row.Ordinal, &row.ID, &row.Name, &row.Command, &row.Description); err != nil {
+			return nil, fmt.Errorf("scan tool call for candidate requests: %w", err)
+		}
+		req := byID[requestID]
+		row.RequestID = requestID
+		row.Source = req.Source
+		row.StartedAt = req.StartedAt
+		row.Provider = req.Provider
+		row.Client = req.Client
+		row.Model = req.Model
+		byRequest[requestID] = append(byRequest[requestID], row)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate tool calls for candidate requests: %w", err)
+	}
+
+	out := make([]ToolCallRow, 0, limit)
+	for _, req := range requests {
+		calls := byRequest[req.ID]
+		sort.Slice(calls, func(i, j int) bool { return calls[i].Ordinal < calls[j].Ordinal })
+		out = append(out, calls...)
+	}
+	if len(out) > limit {
+		out = out[:limit]
 	}
 	return out, nil
 }
 
 func (r *Reporter) queryInspectRows(ctx context.Context, whereClause, orderBy string, limit int, args ...any) ([]InspectRow, error) {
-	query := buildInspectQuery(whereClause, orderBy)
-
-	rows, err := r.store.DB().QueryContext(ctx, query, append(args, limit)...)
+	rows, err := r.store.DB().QueryContext(ctx, buildInspectQuery(whereClause, orderBy), append(args, limit)...)
 	if err != nil {
 		return nil, fmt.Errorf("query inspect: %w", err)
 	}
 	defer rows.Close()
-
 	var out []InspectRow
 	for rows.Next() {
 		var row InspectRow
 		if err := rows.Scan(
-			&row.ID, &row.ResponseID, &row.StartedAt, &row.CompletedAt,
+			&row.ID, &row.ResponseID, &row.Source, &row.Host, &row.StartedAt, &row.CompletedAt,
 			&row.DurationMS, &row.Method, &row.Path, &row.Provider, &row.UpstreamURL,
 			&row.ModelRequested, &row.ModelReported, &row.Stream, &row.HTTPStatus,
 			&row.UpstreamRequestID, &row.UserAgent, &row.Originator, &row.Client, &row.CodexSessionID,
-			&row.ErrorType, &row.ErrorMessage,
-			&row.Input, &row.Cached, &row.CacheWrite,
+			&row.ErrorType, &row.ErrorMessage, &row.Input, &row.Cached, &row.CacheWrite,
 			&row.Output, &row.Reasoning, &row.Total, &row.UsageJSON,
 		); err != nil {
 			return nil, fmt.Errorf("scan inspect: %w", err)
@@ -370,17 +417,13 @@ func (r *Reporter) queryInspectRows(ctx context.Context, whereClause, orderBy st
 }
 
 func (r *Reporter) toolCalls(ctx context.Context, requestID string) ([]ToolCall, error) {
-	rows, err := r.store.DB().QueryContext(ctx, `
-SELECT ordinal, COALESCE(tool_call_id, ''), name,
-  COALESCE(command, ''), COALESCE(description, ''), COALESCE(arguments_json, '')
-FROM tool_calls
-WHERE request_id = ?
-ORDER BY ordinal`, requestID)
+	rows, err := r.store.DB().QueryContext(ctx, `SELECT ordinal, COALESCE(tool_call_id, ''), name,
+ COALESCE(command, ''), COALESCE(description, ''), COALESCE(arguments_json, '')
+FROM tool_calls WHERE request_id = ? ORDER BY ordinal`, requestID)
 	if err != nil {
 		return nil, fmt.Errorf("query tool calls for request %s: %w", requestID, err)
 	}
 	defer rows.Close()
-
 	var out []ToolCall
 	for rows.Next() {
 		var call ToolCall
@@ -389,157 +432,101 @@ ORDER BY ordinal`, requestID)
 		}
 		out = append(out, call)
 	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate tool calls for request %s: %w", requestID, err)
-	}
-	return out, nil
+	return out, rows.Err()
 }
 
 func summaryGrouping(groupBy string) (selectGroup, groupExpr, orderBy string, err error) {
-	const (
-		dayExpr   = "substr(started_at, 1, 10)"
-		modelExpr = "COALESCE(model_reported, model_requested, 'unknown')"
-	)
+	dayExpr := "CAST(CAST(date_trunc('day', started_at) AS DATE) AS VARCHAR)"
+	modelExpr := "COALESCE(model_reported, model_requested, 'unknown')"
 	providerExpr := providerSQL("path")
 	clientExpr := clientSQL()
-
 	switch groupBy {
 	case "model":
-		return summarySelect(providerExpr, clientExpr, modelExpr),
-			joinSQLExprs(providerExpr, clientExpr, modelExpr),
-			"provider, client, model", nil
+		return groupSelect("''", providerExpr, clientExpr, modelExpr, "''"),
+			joinSQLExprs(providerExpr, clientExpr, modelExpr), "provider, client, model", nil
 	case "provider":
-		return summarySelect(providerExpr, "", ""),
-			providerExpr,
-			"provider", nil
+		return groupSelect("''", providerExpr, "''", "''", "''"), providerExpr, "provider", nil
 	case "day":
-		return summarySelect(dayExpr, providerExpr, clientExpr, modelExpr),
-			joinSQLExprs(dayExpr, providerExpr, clientExpr, modelExpr),
-			"day, provider, client, model", nil
+		return groupSelect(dayExpr, providerExpr, clientExpr, modelExpr, "''"),
+			joinSQLExprs(dayExpr, providerExpr, clientExpr, modelExpr), "day, provider, client, model", nil
+	case "source":
+		sourceExpr := "COALESCE(source, 'unknown')"
+		return groupSelect("''", "''", "''", "''", sourceExpr), sourceExpr, "source", nil
 	default:
-		return "", "", "", fmt.Errorf("unsupported group-by %q (want model, provider, or day)", groupBy)
+		return "", "", "", fmt.Errorf("unsupported group-by %q (want model, provider, day, or source)", groupBy)
 	}
 }
 
 func buildSummaryQuery(selectGroup, whereSQL, groupExpr, orderBy string) string {
-	var b strings.Builder
-	b.Grow(len(selectGroup) + len(whereSQL) + len(groupExpr) + len(orderBy) + 520)
-	b.WriteString("\nSELECT\n  ")
-	b.WriteString(selectGroup)
-	b.WriteString(`,
-  COUNT(*) AS requests,
-  SUM(CASE WHEN error_type IS NULL THEN 0 ELSE 1 END) AS errors,
-  SUM(COALESCE(input_tokens, 0)) AS input_tokens,
-  SUM(COALESCE(cached_input_tokens, 0)) AS cached_input_tokens,
-  SUM(COALESCE(cache_write_tokens, 0)) AS cache_write_tokens,
-  SUM(COALESCE(output_tokens, 0)) AS output_tokens,
-  SUM(COALESCE(reasoning_tokens, 0)) AS reasoning_tokens,
-  SUM(COALESCE(total_tokens, 0)) AS total_tokens
+	return `SELECT ` + selectGroup + `,
+ COUNT(*) AS requests,
+ SUM(CASE WHEN error_type IS NULL THEN 0 ELSE 1 END) AS errors,
+	SUM(COALESCE(input_tokens, 0)) AS input_tokens,
+ SUM(GREATEST(
+   COALESCE(input_tokens, 0) - COALESCE(cached_input_tokens, 0) -
+   CASE WHEN ` + providerSQL("path") + ` = 'anthropic' THEN COALESCE(cache_write_tokens, 0) ELSE 0 END,
+   0
+ )) AS fresh_input_tokens,
+ SUM(COALESCE(cached_input_tokens, 0)) AS cached_input_tokens,
+ SUM(COALESCE(cache_write_tokens, 0)) AS cache_write_tokens,
+ SUM(COALESCE(output_tokens, 0)) AS output_tokens,
+ SUM(COALESCE(reasoning_tokens, 0)) AS reasoning_tokens,
+ SUM(COALESCE(total_tokens, 0)) AS total_tokens
 FROM requests
-`)
-	b.WriteString(whereSQL)
-	b.WriteString("\nGROUP BY ")
-	b.WriteString(groupExpr)
-	b.WriteString("\nORDER BY ")
-	b.WriteString(orderBy)
-	return b.String()
+` + whereSQL + `
+GROUP BY ` + groupExpr + `
+ORDER BY ` + orderBy
 }
 
 func buildInspectQuery(whereClause, orderBy string) string {
-	providerExpr := providerSQL("path")
-	clientExpr := clientSQL()
-
-	var b strings.Builder
-	b.Grow(len(providerExpr) + len(clientExpr) + len(whereClause) + len(orderBy) + 620)
-	b.WriteString(`
-SELECT
-  id, COALESCE(response_id, ''), started_at, COALESCE(completed_at, ''),
-  duration_ms, method, path, `)
-	b.WriteString(providerExpr)
-	b.WriteString(`, upstream_url,
-  COALESCE(model_requested, ''), COALESCE(model_reported, ''),
-  stream, http_status, COALESCE(upstream_request_id, ''),
-  COALESCE(user_agent, ''), COALESCE(originator, ''), `)
-	b.WriteString(clientExpr)
-	b.WriteString(`,
-  COALESCE(codex_session_id, ''),
-  COALESCE(error_type, ''), COALESCE(error_message, ''),
-  input_tokens, cached_input_tokens, cache_write_tokens,
-  output_tokens, reasoning_tokens, total_tokens,
-  COALESCE(usage_json, '')
+	return `SELECT id, COALESCE(response_id, ''), COALESCE(source, 'unknown'), COALESCE(host, ''),
+ started_at, completed_at, duration_ms, method, path, ` + providerSQL("path") + `, upstream_url,
+ COALESCE(model_requested, ''), COALESCE(model_reported, ''), stream, http_status,
+ COALESCE(upstream_request_id, ''), COALESCE(user_agent, ''), COALESCE(originator, ''), ` + clientSQL() + `,
+ COALESCE(codex_session_id, ''), COALESCE(error_type, ''), COALESCE(error_message, ''),
+ input_tokens, cached_input_tokens, cache_write_tokens, output_tokens, reasoning_tokens, total_tokens,
+ COALESCE(usage_json, '')
 FROM requests
-`)
-	b.WriteString(whereClause)
-	b.WriteString("\nORDER BY ")
-	b.WriteString(orderBy)
-	b.WriteString("\nLIMIT ?")
-	return b.String()
+` + whereClause + `
+ORDER BY ` + orderBy + ` LIMIT ?`
 }
 
-func summarySelect(parts ...string) string {
-	switch len(parts) {
-	case 3:
-		var b strings.Builder
-		b.Grow(len(parts[0]) + len(parts[1]) + len(parts[2]) + 50)
-		b.WriteString("'' AS day, ")
-		b.WriteString(parts[0])
-		b.WriteString(" AS provider, ")
-		if parts[1] == "" {
-			b.WriteString("'' AS client")
-		} else {
-			b.WriteString(parts[1])
-			b.WriteString(" AS client")
-		}
-		b.WriteString(", ")
-		if parts[2] == "" {
-			b.WriteString("'' AS model")
-		} else {
-			b.WriteString(parts[2])
-			b.WriteString(" AS model")
-		}
-		return b.String()
-	case 4:
-		var b strings.Builder
-		b.Grow(len(parts[0]) + len(parts[1]) + len(parts[2]) + len(parts[3]) + 55)
-		b.WriteString(parts[0])
-		b.WriteString(" AS day, ")
-		b.WriteString(parts[1])
-		b.WriteString(" AS provider, ")
-		b.WriteString(parts[2])
-		b.WriteString(" AS client, ")
-		b.WriteString(parts[3])
-		b.WriteString(" AS model")
-		return b.String()
-	default:
-		return ""
+func groupSelect(day, provider, client, model, source string) string {
+	return day + " AS day, " + provider + " AS provider, " + client + " AS client, " +
+		model + " AS model, " + source + " AS source"
+}
+
+func joinSQLExprs(exprs ...string) string { return strings.Join(exprs, ", ") }
+
+func timeRange(column string, since, until time.Time) (string, []any) {
+	var where []string
+	var args []any
+	if !since.IsZero() {
+		where = append(where, column+" >= ?")
+		args = append(args, since)
 	}
-}
-
-func joinSQLExprs(exprs ...string) string {
-	var size int
-	for _, expr := range exprs {
-		size += len(expr)
+	if !until.IsZero() {
+		where = append(where, column+" < ?")
+		args = append(args, until)
 	}
-	size += 2 * (len(exprs) - 1)
-
-	var b strings.Builder
-	b.Grow(size)
-	for i, expr := range exprs {
-		if i > 0 {
-			b.WriteString(", ")
-		}
-		b.WriteString(expr)
+	if len(where) == 0 {
+		return "", args
 	}
-	return b.String()
+	return "WHERE " + strings.Join(where, " AND "), args
 }
 
-func formatTime(t time.Time) string {
-	return t.Format("2006-01-02T15:04:05.000Z07:00")
+func quackReachable(address string) bool {
+	hostPort := strings.TrimPrefix(strings.TrimPrefix(strings.TrimSpace(address), "quack://"), "quack:")
+	if !strings.Contains(hostPort, ":") {
+		hostPort += ":9494"
+	}
+	conn, err := net.DialTimeout("tcp", hostPort, 250*time.Millisecond)
+	if err != nil {
+		return false
+	}
+	_ = conn.Close()
+	return true
 }
 
-// providerSQL and clientSQL delegate to the store package, the single source of
-// truth for provider/client classification, so live reporting and the
-// materialized aggregate refresh classify identically.
 func providerSQL(column string) string { return store.ProviderSQL(column) }
-
-func clientSQL() string { return store.ClientSQL() }
+func clientSQL() string                { return store.ClientSQL() }

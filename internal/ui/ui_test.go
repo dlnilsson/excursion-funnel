@@ -37,11 +37,13 @@ func TestHandleIndex_ServesDashboardHTML(t *testing.T) {
 		`id="history-stacked-chart"`,
 		`id="model-activity-table"`,
 		`data-table-key="summary"`,
+		`data-table-key="sources"`,
 		`data-table-key="model-activity"`,
 		`data-table-key="errors"`,
 		`data-table-key="tools"`,
 		`excursion-funnel-table-state`,
 		`fetch("/ui/api/history/models")`,
+		`fetch("/ui/api/sources")`,
 		`id="tools-table"`,
 		`fetch("/ui/api/tools")`,
 		`https://cdn.jsdelivr.net/npm/highlight.js@11.11.1/lib/common.min.js`,
@@ -57,6 +59,24 @@ func TestHandleIndex_ServesDashboardHTML(t *testing.T) {
 		if !strings.Contains(rec.Body.String(), marker) {
 			t.Fatalf("body missing chart marker %q: %s", marker, rec.Body.String())
 		}
+	}
+}
+
+func TestHandleSources_ReturnsTodaysSources(t *testing.T) {
+	h := newTestHandler(t)
+	rec := doRequest(t, h, http.MethodGet, "/ui/api/sources")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	var rows []report.SummaryRow
+	if err := json.Unmarshal(rec.Body.Bytes(), &rows); err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 2 || rows[0].Source != "alice" || rows[1].Source != "bob" {
+		t.Fatalf("source rows = %+v", rows)
+	}
+	if rows[0].Requests != 1 || rows[1].Errors != 1 {
+		t.Fatalf("source totals = %+v", rows)
 	}
 }
 
@@ -82,7 +102,7 @@ func TestHandleToolCalls_ReturnsTodaysCalls(t *testing.T) {
 }
 
 func TestHandleToolCalls_ExcludesEarlierCalls(t *testing.T) {
-	dbPath := filepath.Join(t.TempDir(), "usage.sqlite")
+	dbPath := filepath.Join(t.TempDir(), "usage.duckdb")
 	st, err := store.Open(dbPath)
 	if err != nil {
 		t.Fatalf("store.Open() error = %v", err)
@@ -184,7 +204,7 @@ func TestHandleErrors_ReturnsOnlyErrorRows(t *testing.T) {
 	}
 }
 
-func TestHandleHistory_ReturnsMaterializedAggregates(t *testing.T) {
+func TestHandleHistory_ReturnsLiveAggregates(t *testing.T) {
 	h := newTestHandler(t)
 
 	rec := doRequest(t, h, http.MethodGet, "/ui/api/history")
@@ -218,7 +238,7 @@ func TestHandleHistory_ReturnsMaterializedAggregates(t *testing.T) {
 	}
 }
 
-func TestHandleModelHistory_ReturnsMaterializedAggregates(t *testing.T) {
+func TestHandleModelHistory_ReturnsLiveAggregates(t *testing.T) {
 	h := newTestHandler(t)
 
 	rec := doRequest(t, h, http.MethodGet, "/ui/api/history/models")
@@ -274,7 +294,7 @@ func doRequest(t *testing.T, h http.Handler, method, path string) *httptest.Resp
 func newTestHandler(t *testing.T) http.Handler {
 	t.Helper()
 
-	dbPath := filepath.Join(t.TempDir(), "usage.sqlite")
+	dbPath := filepath.Join(t.TempDir(), "usage.duckdb")
 	st, err := store.Open(dbPath)
 	if err != nil {
 		t.Fatalf("store.Open() error = %v", err)
@@ -286,6 +306,7 @@ func newTestHandler(t *testing.T) http.Handler {
 	events := []queue.UsageEvent{
 		{
 			RequestID:     "req-ok-1",
+			Source:        "alice",
 			StartedAt:     now,
 			CompletedAt:   now.Add(time.Second),
 			Method:        "POST",
@@ -307,6 +328,7 @@ func newTestHandler(t *testing.T) http.Handler {
 		},
 		{
 			RequestID:    "req-error-1",
+			Source:       "bob",
 			StartedAt:    now.Add(time.Minute),
 			CompletedAt:  now.Add(time.Minute + time.Second),
 			Method:       "POST",
@@ -322,10 +344,6 @@ func newTestHandler(t *testing.T) http.Handler {
 	if err := st.InsertBatch(t.Context(), events); err != nil {
 		t.Fatalf("InsertBatch() error = %v", err)
 	}
-	if err := st.RefreshUsageAggregates(t.Context()); err != nil {
-		t.Fatalf("RefreshUsageAggregates() error = %v", err)
-	}
-
 	rep := report.New(st)
 	return New(rep, slog.New(slog.DiscardHandler))
 }

@@ -1,0 +1,41 @@
+[Unit]
+Description=Excursion Funnel hub (shared usage ledger + dashboard)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=excursion-funnel
+Group=excursion-funnel
+EnvironmentFile=/etc/excursion-funnel/hub.env
+ExecStart=/usr/local/bin/ef hub
+Restart=on-failure
+RestartSec=5s
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=excursion-funnel-hub
+
+# State (DuckDB ledger) lives under /var/lib/excursion-funnel, owned by the
+# service user and created automatically on start.
+StateDirectory=excursion-funnel
+UMask=0077
+
+# excursion-funnel has no home directory (--no-create-home), but DuckDB needs
+# one to cache the Quack extension it downloads on first use. Point it at the
+# state directory, which is already writable by this user.
+Environment=HOME=/var/lib/excursion-funnel
+
+# Hardening — the hub has no need to touch the rest of the filesystem.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target

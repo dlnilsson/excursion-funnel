@@ -1,6 +1,6 @@
 // Package queue provides a bounded in-memory usage-event queue backed by a
 // single writer goroutine, so concurrent proxy requests never write to
-// SQLite directly and a slow/contended database never blocks a proxied
+// the durable writer directly and a slow/contended database never blocks a proxied
 // response.
 package queue
 
@@ -14,7 +14,7 @@ import (
 )
 
 // Usage holds token counts extracted from a provider response. Fields are
-// pointers so an absent field round-trips as NULL in SQLite instead of a
+// pointers so an absent field round-trips as SQL NULL instead of a
 // misleading zero. Provider-specific parsers (internal/openai,
 // internal/anthropic) each produce a Usage value; this type is the common
 // shape the write queue and store deal in, independent of provider.
@@ -92,7 +92,7 @@ func commandText(raw json.RawMessage) string {
 }
 
 // SumTokens adds token counters, treating a nil pointer as zero. It returns nil
-// when every argument is nil, so an all-absent sum round-trips as NULL in SQLite
+// when every argument is nil, so an all-absent sum round-trips as SQL NULL
 // rather than a misleading zero — the same absent-vs-zero distinction the
 // pointer fields themselves preserve. Provider parsers use it to derive totals
 // the wire omits.
@@ -118,6 +118,8 @@ func SumTokens(vals ...*int64) *int64 {
 type UsageEvent struct {
 	RequestID  string
 	ResponseID string
+	Source     string
+	Host       string
 
 	StartedAt   time.Time
 	CompletedAt time.Time

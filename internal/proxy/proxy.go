@@ -93,12 +93,16 @@ type Proxy struct {
 	sink             EventSink
 	log              *slog.Logger
 	idleWriteTimeout time.Duration
+	source           string
+	host             string
 }
 
 // Options tunes proxy-side timeouts. Zero durations disable that timeout.
 type Options struct {
 	RequestTimeout   time.Duration
 	IdleWriteTimeout time.Duration
+	Source           string
+	Host             string
 }
 
 // New builds a Proxy from the two upstream roots (e.g. https://api.openai.com
@@ -151,6 +155,8 @@ func NewWithOptions(openaiUpstream, anthropicUpstream string, sink EventSink, lo
 		sink:             sink,
 		log:              log,
 		idleWriteTimeout: opts.IdleWriteTimeout,
+		source:           opts.Source,
+		host:             opts.Host,
 	}, nil
 }
 
@@ -342,6 +348,8 @@ func (p *Proxy) handleProxy(w http.ResponseWriter, r *http.Request) {
 
 	ev := queue.UsageEvent{
 		RequestID:         reqID,
+		Source:            p.source,
+		Host:              p.host,
 		StartedAt:         start,
 		CompletedAt:       completedAt,
 		Method:            r.Method,
@@ -719,7 +727,7 @@ func flushingCopy(w http.ResponseWriter, src io.Reader, capture bodyCapture, idl
 func copyHeaders(dst, src http.Header) {
 	drop := map[string]bool{}
 	for _, field := range src["Connection"] {
-		for _, tok := range strings.Split(field, ",") {
+		for tok := range strings.SplitSeq(field, ",") {
 			if t := strings.TrimSpace(tok); t != "" {
 				drop[http.CanonicalHeaderKey(t)] = true
 			}
@@ -745,7 +753,7 @@ func clientAcceptsGzip(h http.Header) bool {
 	if ae == "" {
 		return false
 	}
-	for _, part := range strings.Split(ae, ",") {
+	for part := range strings.SplitSeq(ae, ",") {
 		token := strings.TrimSpace(part)
 		if token == "" {
 			continue
@@ -765,7 +773,7 @@ func clientAcceptsGzip(h http.Header) bool {
 // qValue extracts the q-value from Accept-Encoding parameters (the text after
 // the first ";"). It defaults to 1.0 when no parsable q parameter is present.
 func qValue(params string) float64 {
-	for _, p := range strings.Split(params, ";") {
+	for p := range strings.SplitSeq(params, ";") {
 		p = strings.TrimSpace(p)
 		if v, ok := strings.CutPrefix(p, "q="); ok {
 			if q, err := strconv.ParseFloat(strings.TrimSpace(v), 64); err == nil {

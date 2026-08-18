@@ -12,7 +12,7 @@ import (
 func BenchmarkInsertBatch(b *testing.B) {
 	for _, size := range []int{1, 10, 50, 250} {
 		b.Run(fmt.Sprintf("size_%d", size), func(b *testing.B) {
-			dbPath := filepath.Join(b.TempDir(), "usage.sqlite")
+			dbPath := filepath.Join(b.TempDir(), "usage.duckdb")
 			s, err := Open(dbPath)
 			if err != nil {
 				b.Fatalf("Open() error = %v", err)

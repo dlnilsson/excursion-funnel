@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -20,7 +21,7 @@ import (
 	"time"
 
 	"github.com/dlnilsson/excursion-funnel/internal/config"
-	"github.com/dlnilsson/excursion-funnel/internal/jobs"
+	"github.com/dlnilsson/excursion-funnel/internal/forward"
 	"github.com/dlnilsson/excursion-funnel/internal/proxy"
 	"github.com/dlnilsson/excursion-funnel/internal/queue"
 	"github.com/dlnilsson/excursion-funnel/internal/report"
@@ -38,6 +39,16 @@ func main() {
 	case "serve":
 		if err := runServe(os.Args[2:]); err != nil {
 			slog.Error("serve failed", "err", err)
+			os.Exit(1)
+		}
+	case "hub":
+		if err := runHub(os.Args[2:]); err != nil {
+			slog.Error("hub failed", "err", err)
+			os.Exit(1)
+		}
+	case "migrate":
+		if err := runMigrate(os.Args[2:]); err != nil {
+			fmt.Fprintf(os.Stderr, "migrate: %v\n", err)
 			os.Exit(1)
 		}
 	case "usage":
@@ -88,10 +99,10 @@ func runUsageTo(args []string, out io.Writer) error {
 	)
 	fs := flag.NewFlagSet("usage", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
-	fs.StringVar(&dbPath, "db", dbPath, "sqlite database path")
+	fs.StringVar(&dbPath, "db", dbPath, "DuckDB ledger path")
 	fs.StringVar(&sinceS, "since", "", "start date, inclusive (YYYY-MM-DD)")
 	fs.StringVar(&untilS, "until", "", "end date, inclusive (YYYY-MM-DD)")
-	fs.StringVar(&groupBy, "group-by", "model", "grouping: model, provider, or day")
+	fs.StringVar(&groupBy, "group-by", "model", "grouping: model, provider, day, or source")
 	fs.BoolVar(&jsonOut, "json", false, "print the summary as JSON")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -126,7 +137,7 @@ func runUsageTo(args []string, out io.Writer) error {
 		}
 	}
 
-	r, err := report.Open(dbPath)
+	r, err := report.Open(dbPath, defaultReportDBPath())
 	if err != nil {
 		return fmt.Errorf("open database: %w", err)
 	}
@@ -175,7 +186,7 @@ func runToolsTo(args []string, out io.Writer) error {
 	)
 	fs := flag.NewFlagSet("tools", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
-	fs.StringVar(&dbPath, "db", dbPath, "sqlite database path")
+	fs.StringVar(&dbPath, "db", dbPath, "DuckDB ledger path")
 	fs.IntVar(&limit, "limit", limit, "maximum tool calls to print")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -189,7 +200,7 @@ func runToolsTo(args []string, out io.Writer) error {
 
 	now := time.Now()
 	since := beginningOfDay(now)
-	r, err := report.Open(dbPath)
+	r, err := report.Open(dbPath, defaultReportDBPath())
 	if err != nil {
 		return fmt.Errorf("open database: %w", err)
 	}
@@ -214,7 +225,7 @@ func runInspect(args []string) error {
 	)
 	fs := flag.NewFlagSet("inspect", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
-	fs.StringVar(&dbPath, "db", dbPath, "sqlite database path")
+	fs.StringVar(&dbPath, "db", dbPath, "DuckDB ledger path")
 	fs.IntVar(&limit, "limit", report.DefaultInspectLimit, "maximum matching requests to print")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -226,7 +237,7 @@ func runInspect(args []string) error {
 		return fmt.Errorf("--limit must be positive, got %d", limit)
 	}
 
-	r, err := report.Open(dbPath)
+	r, err := report.Open(dbPath, defaultReportDBPath())
 	if err != nil {
 		return fmt.Errorf("open database: %w", err)
 	}
@@ -259,39 +270,61 @@ func runServe(args []string) error {
 	if err != nil {
 		return err
 	}
-
 	log := newLogger(os.Stdout)
 
-	st, err := store.Open(cfg.DBPath)
-	if err != nil {
-		return fmt.Errorf("open usage store: %w", err)
-	}
-
-	defer func() {
-		if err := st.Close(); err != nil {
-			log.Error("close usage store", "err", err)
-		}
-	}()
-
-	if cfg.RetentionDays > 0 {
-		cleanupCtx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
-		cutoff := time.Now().AddDate(0, 0, -cfg.RetentionDays)
-		deleted, err := st.DeleteRequestsStartedBefore(cleanupCtx, cutoff)
-		cancel()
+	var (
+		writer    queue.Writer
+		dashboard http.Handler
+		mode      string
+	)
+	if cfg.HubAddr != "" {
+		mode = "distributed"
+		outbox, err := store.OpenOutbox(cfg.OutboxPath)
 		if err != nil {
-			return fmt.Errorf("retention cleanup: %w", err)
+			return fmt.Errorf("open usage outbox: %w", err)
 		}
-		log.Info("retention cleanup complete", "retention_days", cfg.RetentionDays, "deleted", deleted)
+		defer func() {
+			if err := outbox.Close(); err != nil {
+				log.Error("close usage outbox", "err", err)
+			}
+		}()
+		forwarder := forward.New(outbox, forward.Config{
+			Address: cfg.HubAddr, Token: cfg.HubToken,
+			Insecure: cfg.HubInsecure, PollInterval: cfg.ForwardInterval,
+		}, log)
+		forwarder.Start()
+		defer forwarder.Stop()
+		writer = outbox
+		if cfg.UIEnabled {
+			dashboard = remoteDashboard(cfg, log)
+		}
+	} else {
+		mode = "standalone"
+		st, err := store.Open(cfg.DBPath)
+		if err != nil {
+			return fmt.Errorf("open usage store: %w", err)
+		}
+		defer func() {
+			if err := st.Close(); err != nil {
+				log.Error("close usage store", "err", err)
+			}
+		}()
+		if err := runRetention(st, cfg, log); err != nil {
+			return err
+		}
+		server, err := st.StartQuack(context.Background(), cfg.QuackAddr, store.LocalQuackToken, false)
+		if err != nil {
+			return err
+		}
+		log.Info("local Quack endpoint ready", "uri", server.URI, "url", server.URL)
+		writer = st
+		if cfg.UIEnabled {
+			dashboard = ui.New(report.New(st), log)
+		}
 	}
 
-	aggregates := jobs.NewAggregateScheduler(st, cfg.AggregateRefreshInterval, cfg.ShutdownTimeout, log)
-	aggregates.Start()
-	defer aggregates.Stop()
-
-	q := queue.New(cfg.Queue, st, log)
+	q := queue.New(cfg.Queue, writer, log)
 	q.Start()
-	// Drain before closing the store. Deferred after st.Close so it runs
-	// first (LIFO), guaranteeing no write lands on an already-closed store.
 	defer func() {
 		if err := q.Close(cfg.QueueDrainTimeout); err != nil {
 			log.Warn("usage queue drain timed out", "err", err, "dropped_total", q.Dropped())
@@ -301,57 +334,124 @@ func runServe(args []string) error {
 	p, err := proxy.NewWithOptions(cfg.OpenAIUpstream, cfg.AnthropicUpstream, q, log, proxy.Options{
 		RequestTimeout:   cfg.RequestTimeout,
 		IdleWriteTimeout: cfg.IdleTimeout,
+		Source:           cfg.Source,
+		Host:             cfg.Host,
 	})
 	if err != nil {
 		return err
 	}
 
 	handler := p.Handler()
-	if cfg.UIEnabled {
-		// rep shares st's connection and must not be closed independently;
-		// st's deferred close above already covers it.
-		rep := report.New(st)
+	if dashboard != nil {
 		mux := http.NewServeMux()
-		mux.Handle("/ui/", ui.New(rep, log))
+		mux.Handle("/ui/", dashboard)
 		mux.Handle("/", p.Handler())
 		handler = mux
 	}
+	log.Info("excursion-funnel configured", "mode", mode, "source", cfg.Source,
+		"openai_upstream", cfg.OpenAIUpstream, "anthropic_upstream", cfg.AnthropicUpstream,
+		"request_timeout", cfg.RequestTimeout, "idle_timeout", cfg.IdleTimeout, "ui_enabled", cfg.UIEnabled)
+	return runHTTPServer(cfg.Addr, handler, cfg.ShutdownTimeout, log, "excursion-funnel serving")
+}
 
-	srv := &http.Server{
-		Addr:              cfg.Addr,
-		Handler:           handler,
-		ReadHeaderTimeout: 15 * time.Second,
-		// WriteTimeout is intentionally 0: it would abort long SSE streams
-		// mid-response. Idle streams are bounded per-request instead, via
-		// cfg.IdleTimeout in the proxy's copy loop.
+func runHub(args []string) error {
+	cfg, err := config.Load(args)
+	if err != nil {
+		return err
 	}
+	if cfg.HubAddr == "" {
+		return errors.New("hub-addr is required (for example --hub-addr 0.0.0.0:9494)")
+	}
+	log := newLogger(os.Stdout)
+	st, err := store.Open(cfg.DBPath)
+	if err != nil {
+		return fmt.Errorf("open hub ledger: %w", err)
+	}
+	defer st.Close()
+	if err := runRetention(st, cfg, log); err != nil {
+		return err
+	}
+	server, err := st.StartQuack(context.Background(), cfg.HubAddr, cfg.HubToken, true)
+	if err != nil {
+		return err
+	}
+	log.Info("hub Quack endpoint ready", "uri", server.URI, "url", server.URL)
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })
+	if cfg.UIEnabled {
+		mux.Handle("/ui/", ui.New(report.New(st), log))
+	}
+	return runHTTPServer(cfg.Addr, mux, cfg.ShutdownTimeout, log, "excursion-funnel hub serving")
+}
 
+func runMigrate(args []string) error {
+	dbPath := defaultReportDBPath()
+	from := filepath.Join(filepath.Dir(dbPath), "usage.sqlite")
+	fs := flag.NewFlagSet("migrate", flag.ContinueOnError)
+	fs.StringVar(&dbPath, "db", dbPath, "destination DuckDB ledger path")
+	fs.StringVar(&from, "from", from, "legacy SQLite ledger path")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 0 {
+		return fmt.Errorf("unexpected argument %q", fs.Arg(0))
+	}
+	if _, err := os.Stat(from); err != nil {
+		return fmt.Errorf("legacy ledger %s: %w", from, err)
+	}
+	if err := store.MigrateSQLite(context.Background(), dbPath, from); err != nil {
+		return err
+	}
+	fmt.Fprintf(os.Stdout, "migrated %s to %s\n", from, dbPath)
+	return nil
+}
+
+func runRetention(st *store.Store, cfg config.Config, log *slog.Logger) error {
+	if cfg.RetentionDays <= 0 {
+		return nil
+	}
+	cleanupCtx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
+	defer cancel()
+	cutoff := time.Now().AddDate(0, 0, -cfg.RetentionDays)
+	deleted, err := st.DeleteRequestsStartedBefore(cleanupCtx, cutoff)
+	if err != nil {
+		return fmt.Errorf("retention cleanup: %w", err)
+	}
+	log.Info("retention cleanup complete", "retention_days", cfg.RetentionDays, "deleted", deleted)
+	return nil
+}
+
+func remoteDashboard(cfg config.Config, log *slog.Logger) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rep, err := report.OpenRemote(cfg.HubAddr, cfg.HubToken, cfg.HubInsecure)
+		if err != nil {
+			log.Warn("hub dashboard unavailable", "err", err)
+			http.Error(w, "hub unavailable; usage is still being spooled", http.StatusServiceUnavailable)
+			return
+		}
+		defer rep.Close()
+		ui.New(rep, log).ServeHTTP(w, r)
+	})
+}
+
+func runHTTPServer(addr string, handler http.Handler, shutdownTimeout time.Duration, log *slog.Logger, message string) error {
+	srv := &http.Server{Addr: addr, Handler: handler, ReadHeaderTimeout: 15 * time.Second}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-
 	errCh := make(chan error, 1)
 	go func() {
-		log.Info("excursion-funnel serving",
-			"addr", cfg.Addr,
-			"openai_upstream", cfg.OpenAIUpstream,
-			"anthropic_upstream", cfg.AnthropicUpstream,
-			"request_timeout", cfg.RequestTimeout,
-			"idle_timeout", cfg.IdleTimeout,
-			"aggregate_refresh_interval", cfg.AggregateRefreshInterval,
-			"ui_enabled", cfg.UIEnabled)
+		log.Info(message, "addr", addr)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errCh <- err
 		}
 	}()
-
 	select {
 	case err := <-errCh:
 		return err
 	case <-ctx.Done():
 		log.Info("shutdown signal received, draining")
 	}
-
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
 	return srv.Shutdown(shutdownCtx)
 }
@@ -361,13 +461,16 @@ func usage() {
 
 Usage:
   ef serve [--addr host:port] [--openai-upstream url] [--anthropic-upstream url] [--db path] [--ui-enabled]
-	  ef usage today [--db path] [--group-by model|provider|day] [--json]
-	  ef usage --since YYYY-MM-DD [--until YYYY-MM-DD] [--group-by model|provider|day] [--db path] [--json]
-	  ef tools today [--db path] [--limit n]
-	  ef inspect [--db path] [--limit n] request_or_response_id
+  ef hub --hub-addr host:port --hub-token token [--addr dashboard-host:port] [--db path]
+  ef migrate [--from usage.sqlite] [--db usage.duckdb]
+  ef usage today [--db path] [--group-by model|provider|day|source] [--json]
+  ef usage --since YYYY-MM-DD [--until YYYY-MM-DD] [--group-by model|provider|day|source] [--db path] [--json]
+  ef tools today [--db path] [--limit n]
+  ef inspect [--db path] [--limit n] request_or_response_id
 
-The usage, tools, and inspect commands read an existing ledger and fail if none is
-there; only serve creates one. --since/--until are inclusive dates, local time.
+The usage, tools, and inspect commands query a configured hub or running local
+daemon through Quack, then fall back to a read-only DuckDB file when possible.
+--since/--until are inclusive dates, local time.
 
 Point clients at the daemon:
   Codex:        base_url = "http://127.0.0.1:8787/v1"   (wire_api = "responses")
@@ -376,11 +479,13 @@ Point clients at the daemon:
 Dashboard: http://<addr>/ui/ (read-only usage view; enabled by default, disable with --ui-enabled=false)
 
 Env overrides: EF_ADDR, EF_OPENAI_UPSTREAM,
-               EF_ANTHROPIC_UPSTREAM, EF_DB,
+               EF_ANTHROPIC_UPSTREAM, EF_DB, EF_OUTBOX,
+               EF_QUACK_ADDR, EF_HUB_ADDR, EF_HUB_TOKEN,
+               EF_HUB_INSECURE, EF_SOURCE,
                EF_REQUEST_TIMEOUT, EF_IDLE_TIMEOUT,
                EF_SHUTDOWN_TIMEOUT,
                EF_QUEUE_DRAIN_TIMEOUT,
-               EF_AGGREGATE_REFRESH_INTERVAL,
+               EF_FORWARD_INTERVAL,
                EF_RETENTION_DAYS,
                EF_UI_ENABLED
 `)
@@ -464,19 +569,25 @@ func printUsageRows(out io.Writer, rows []report.SummaryRow, groupBy string) {
 		fmt.Fprintln(w, "DAY\tPROVIDER\tCLIENT\tMODEL\tREQ\tERR\tINPUT\tCACHED\tCACHE_WRITE\tOUTPUT\tREASONING\tTOTAL")
 		for _, r := range rows {
 			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\n",
-				r.Day, r.Provider, r.Client, r.Model, r.Requests, r.Errors, freshInput(r.Provider, r.Input, r.Cached, r.CacheWrite), r.Cached, r.CacheWrite, r.Output, r.Reasoning, r.Total)
+				r.Day, r.Provider, r.Client, r.Model, r.Requests, r.Errors, r.FreshInput, r.Cached, r.CacheWrite, r.Output, r.Reasoning, r.Total)
 		}
 	} else if groupBy == "provider" {
 		fmt.Fprintln(w, "PROVIDER\tREQ\tERR\tINPUT\tCACHED\tCACHE_WRITE\tOUTPUT\tREASONING\tTOTAL")
 		for _, r := range rows {
 			fmt.Fprintf(w, "%s\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\n",
-				r.Provider, r.Requests, r.Errors, freshInput(r.Provider, r.Input, r.Cached, r.CacheWrite), r.Cached, r.CacheWrite, r.Output, r.Reasoning, r.Total)
+				r.Provider, r.Requests, r.Errors, r.FreshInput, r.Cached, r.CacheWrite, r.Output, r.Reasoning, r.Total)
+		}
+	} else if groupBy == "source" {
+		fmt.Fprintln(w, "SOURCE\tREQ\tERR\tINPUT\tCACHED\tCACHE_WRITE\tOUTPUT\tREASONING\tTOTAL")
+		for _, r := range rows {
+			fmt.Fprintf(w, "%s\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\n",
+				r.Source, r.Requests, r.Errors, r.FreshInput, r.Cached, r.CacheWrite, r.Output, r.Reasoning, r.Total)
 		}
 	} else {
 		fmt.Fprintln(w, "PROVIDER\tCLIENT\tMODEL\tREQ\tERR\tINPUT\tCACHED\tCACHE_WRITE\tOUTPUT\tREASONING\tTOTAL")
 		for _, r := range rows {
 			fmt.Fprintf(w, "%s\t%s\t%s\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\n",
-				r.Provider, r.Client, r.Model, r.Requests, r.Errors, freshInput(r.Provider, r.Input, r.Cached, r.CacheWrite), r.Cached, r.CacheWrite, r.Output, r.Reasoning, r.Total)
+				r.Provider, r.Client, r.Model, r.Requests, r.Errors, r.FreshInput, r.Cached, r.CacheWrite, r.Output, r.Reasoning, r.Total)
 		}
 	}
 	_ = w.Flush()
@@ -513,9 +624,13 @@ func printInspectRows(rows []report.InspectRow) {
 		if r.ResponseID != "" {
 			fmt.Fprintf(os.Stdout, "response_id: %s\n", r.ResponseID)
 		}
+		fmt.Fprintf(os.Stdout, "source: %s\n", r.Source)
+		if r.Host != "" {
+			fmt.Fprintf(os.Stdout, "host: %s\n", r.Host)
+		}
 		fmt.Fprintf(os.Stdout, "started_at: %s\n", localTimestamp(r.StartedAt))
-		if r.CompletedAt != "" {
-			fmt.Fprintf(os.Stdout, "completed_at: %s\n", localTimestamp(r.CompletedAt))
+		if r.CompletedAt.Valid {
+			fmt.Fprintf(os.Stdout, "completed_at: %s\n", localTimestamp(r.CompletedAt.Time))
 		}
 		if r.DurationMS.Valid {
 			fmt.Fprintf(os.Stdout, "duration_ms: %d\n", r.DurationMS.Int64)
@@ -568,12 +683,8 @@ func printInspectRows(rows []report.InspectRow) {
 	}
 }
 
-func localTimestamp(value string) string {
-	t, err := time.Parse(time.RFC3339Nano, value)
-	if err != nil {
-		return value
-	}
-	return t.Local().Format("2006-01-02T15:04:05.000Z07:00")
+func localTimestamp(value time.Time) string {
+	return value.Local().Format("2006-01-02T15:04:05.000Z07:00")
 }
 
 func emptyAsDash(s string) string {
