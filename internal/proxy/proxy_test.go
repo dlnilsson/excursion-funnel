@@ -398,6 +398,8 @@ func TestClientName(t *testing.T) {
 		{name: "zed originator", userAgent: "codex-tui/0.146.0", originator: "zed", want: "Zed"},
 		{name: "codex generic", userAgent: "codex-acp/1.0", want: "Codex"},
 		{name: "claude code", userAgent: "claude-cli/2.1.218", want: "Claude Code"},
+		{name: "claude sdk", userAgent: "claude-cli/2.1.232 (external, sdk-ts, agent-sdk/0.3.232)", want: "ACP/sdk"},
+		{name: "claude sdk version", userAgent: "claude-cli/2.1.232 sdk-ts agent-sdk/1.2.3", want: "ACP/sdk"},
 		{name: "originator fallback", originator: "custom-editor", want: "custom-editor"},
 		{name: "user-agent fallback", userAgent: "curl/8.21.0", want: "curl/8.21.0"},
 		{name: "unknown", want: "Unknown"},

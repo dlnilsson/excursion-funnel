@@ -28,6 +28,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -37,6 +38,8 @@ import (
 	"github.com/dlnilsson/excursion-funnel/internal/openai"
 	"github.com/dlnilsson/excursion-funnel/internal/queue"
 )
+
+var claudeSDKUserAgent = regexp.MustCompile(`\bsdk-ts\b.*\bagent-sdk/\d+(?:\.\d+)*\b`)
 
 // maxCaptureBytes bounds how much of a non-streaming response body is
 // buffered for usage parsing. Responses API / Messages API JSON bodies are
@@ -811,6 +814,8 @@ func clientName(h http.Header) string {
 		return "Codex CLI"
 	case strings.Contains(lowerUA, "codex") || strings.Contains(lowerOriginator, "codex"):
 		return "Codex"
+	case claudeSDKUserAgent.MatchString(lowerUA):
+		return "ACP/sdk"
 	case strings.Contains(lowerUA, "claude-cli"):
 		return "Claude Code"
 	case originator != "":
