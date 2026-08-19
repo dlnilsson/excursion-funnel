@@ -98,6 +98,8 @@ type SummaryOptions struct {
 	Since              time.Time
 	Until              time.Time
 	GroupBy            string
+	Directory          string
+	Branch             string
 	KnownProvidersOnly bool
 }
 
@@ -108,6 +110,8 @@ type SummaryRow struct {
 	Client     string
 	Model      string
 	Source     string
+	Directory  string
+	GitBranch  string
 	Requests   int64
 	Errors     int64
 	Input      int64
@@ -141,6 +145,8 @@ type InspectRow struct {
 	Originator        string
 	Client            string
 	CodexSessionID    string
+	Directory         string
+	GitBranch         string
 	ErrorType         string
 	ErrorMessage      string
 	Input             sql.NullInt64
@@ -227,13 +233,17 @@ func (r *Reporter) Summary(ctx context.Context, opts SummaryOptions) ([]SummaryR
 		return nil, err
 	}
 	where, args := timeRange("started_at", opts.Since, opts.Until)
+	if opts.Directory != "" {
+		where = appendWherePredicate(where, "directory = ?")
+		args = append(args, opts.Directory)
+	}
+	if opts.Branch != "" {
+		where = appendWherePredicate(where, "git_branch = ?")
+		args = append(args, opts.Branch)
+	}
 	if opts.KnownProvidersOnly {
 		predicate := providerSQL("path") + " != 'unknown'"
-		if where == "" {
-			where = "WHERE " + predicate
-		} else {
-			where += " AND " + predicate
-		}
+		where = appendWherePredicate(where, predicate)
 	}
 	return r.scanSummary(ctx, buildSummaryQuery(selectGroup, where, groupExpr, orderBy), args...)
 }
@@ -259,7 +269,7 @@ func (r *Reporter) scanSummary(ctx context.Context, query string, args ...any) (
 	var out []SummaryRow
 	for rows.Next() {
 		var row SummaryRow
-		if err := rows.Scan(&row.Day, &row.Provider, &row.Client, &row.Model, &row.Source,
+		if err := rows.Scan(&row.Day, &row.Provider, &row.Client, &row.Model, &row.Source, &row.Directory, &row.GitBranch,
 			&row.Requests, &row.Errors, &row.Input, &row.FreshInput, &row.Cached, &row.CacheWrite,
 			&row.Output, &row.Reasoning, &row.Total); err != nil {
 			return nil, fmt.Errorf("scan summary: %w", err)
@@ -522,6 +532,7 @@ func (r *Reporter) queryInspectRows(ctx context.Context, whereClause, orderBy st
 			&row.DurationMS, &row.Method, &row.Path, &row.Provider, &row.UpstreamURL,
 			&row.ModelRequested, &row.ModelReported, &row.Stream, &row.HTTPStatus,
 			&row.UpstreamRequestID, &row.UserAgent, &row.Originator, &row.Client, &row.CodexSessionID,
+			&row.Directory, &row.GitBranch,
 			&row.ErrorType, &row.ErrorMessage, &row.Input, &row.Cached, &row.CacheWrite,
 			&row.Output, &row.Reasoning, &row.Total, &row.UsageJSON,
 		); err != nil {
@@ -606,18 +617,24 @@ func summaryGrouping(groupBy string) (selectGroup, groupExpr, orderBy string, er
 	clientExpr := clientSQL()
 	switch groupBy {
 	case "model":
-		return groupSelect("''", providerExpr, clientExpr, modelExpr, "''"),
+		return groupSelect("''", providerExpr, clientExpr, modelExpr, "''", "''", "''"),
 			joinSQLExprs(providerExpr, clientExpr, modelExpr), "provider, client, model", nil
 	case "provider":
-		return groupSelect("''", providerExpr, "''", "''", "''"), providerExpr, "provider", nil
+		return groupSelect("''", providerExpr, "''", "''", "''", "''", "''"), providerExpr, "provider", nil
 	case "day":
-		return groupSelect(dayExpr, providerExpr, clientExpr, modelExpr, "''"),
+		return groupSelect(dayExpr, providerExpr, clientExpr, modelExpr, "''", "''", "''"),
 			joinSQLExprs(dayExpr, providerExpr, clientExpr, modelExpr), "day, provider, client, model", nil
 	case "source":
 		sourceExpr := "COALESCE(source, 'unknown')"
-		return groupSelect("''", "''", "''", "''", sourceExpr), sourceExpr, "source", nil
+		return groupSelect("''", "''", "''", "''", sourceExpr, "''", "''"), sourceExpr, "source", nil
+	case "directory":
+		directoryExpr := "COALESCE(directory, 'unknown')"
+		return groupSelect("''", "''", "''", "''", "''", directoryExpr, "''"), directoryExpr, "directory", nil
+	case "git_branch":
+		branchExpr := "COALESCE(git_branch, 'unknown')"
+		return groupSelect("''", "''", "''", "''", "''", "''", branchExpr), branchExpr, "git_branch", nil
 	default:
-		return "", "", "", fmt.Errorf("unsupported group-by %q (want model, provider, day, or source)", groupBy)
+		return "", "", "", fmt.Errorf("unsupported group-by %q (want model, provider, day, source, directory, or git_branch)", groupBy)
 	}
 }
 
@@ -647,7 +664,8 @@ func buildInspectQuery(whereClause, orderBy string) string {
  started_at, completed_at, duration_ms, method, path, ` + providerSQL("path") + `, upstream_url,
  COALESCE(model_requested, ''), COALESCE(model_reported, ''), stream, http_status,
  COALESCE(upstream_request_id, ''), COALESCE(user_agent, ''), COALESCE(originator, ''), ` + clientSQL() + `,
- COALESCE(codex_session_id, ''), COALESCE(error_type, ''), COALESCE(error_message, ''),
+ COALESCE(codex_session_id, ''), COALESCE(directory, ''), COALESCE(git_branch, ''),
+ COALESCE(error_type, ''), COALESCE(error_message, ''),
  input_tokens, cached_input_tokens, cache_write_tokens, output_tokens, reasoning_tokens, total_tokens,
  COALESCE(usage_json, '')
 FROM requests
@@ -655,9 +673,10 @@ FROM requests
 ORDER BY ` + orderBy + ` LIMIT ?`
 }
 
-func groupSelect(day, provider, client, model, source string) string {
+func groupSelect(day, provider, client, model, source, directory, gitBranch string) string {
 	return day + " AS day, " + provider + " AS provider, " + client + " AS client, " +
-		model + " AS model, " + source + " AS source"
+		model + " AS model, " + source + " AS source, " + directory + " AS directory, " +
+		gitBranch + " AS git_branch"
 }
 
 func joinSQLExprs(exprs ...string) string { return strings.Join(exprs, ", ") }
@@ -677,6 +696,13 @@ func timeRange(column string, since, until time.Time) (string, []any) {
 		return "", args
 	}
 	return "WHERE " + strings.Join(where, " AND "), args
+}
+
+func appendWherePredicate(where, predicate string) string {
+	if where == "" {
+		return "WHERE " + predicate
+	}
+	return where + " AND " + predicate
 }
 
 func quackReachable(address string) bool {

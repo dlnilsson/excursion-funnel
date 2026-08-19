@@ -91,18 +91,22 @@ func runUsageTo(args []string, out io.Writer) error {
 	}
 
 	var (
-		dbPath  = defaultReportDBPath()
-		sinceS  string
-		untilS  string
-		groupBy string
-		jsonOut bool
+		dbPath    = defaultReportDBPath()
+		sinceS    string
+		untilS    string
+		groupBy   string
+		directory string
+		branch    string
+		jsonOut   bool
 	)
 	fs := flag.NewFlagSet("usage", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 	fs.StringVar(&dbPath, "db", dbPath, "DuckDB ledger path")
 	fs.StringVar(&sinceS, "since", "", "start date, inclusive (YYYY-MM-DD)")
 	fs.StringVar(&untilS, "until", "", "end date, inclusive (YYYY-MM-DD)")
-	fs.StringVar(&groupBy, "group-by", "model", "grouping: model, provider, day, or source")
+	fs.StringVar(&groupBy, "group-by", "model", "grouping: model, provider, day, source, directory, or git_branch")
+	fs.StringVar(&directory, "directory", "", "only requests from this working directory")
+	fs.StringVar(&branch, "branch", "", "only requests from this git branch")
 	fs.BoolVar(&jsonOut, "json", false, "print the summary as JSON")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -144,9 +148,11 @@ func runUsageTo(args []string, out io.Writer) error {
 	defer r.Close()
 
 	rows, err := r.Summary(context.Background(), report.SummaryOptions{
-		Since:   since,
-		Until:   until,
-		GroupBy: groupBy,
+		Since:     since,
+		Until:     until,
+		GroupBy:   groupBy,
+		Directory: directory,
+		Branch:    branch,
 	})
 	if err != nil {
 		return err
@@ -477,8 +483,8 @@ Usage:
   ef serve [--addr host:port] [--openai-upstream url] [--anthropic-upstream url] [--db path] [--ui-enabled]
   ef hub --hub-addr host:port --hub-token token [--addr dashboard-host:port] [--db path]
   ef migrate [--from usage.sqlite] [--db usage.duckdb]
-  ef usage today [--db path] [--group-by model|provider|day|source] [--json]
-  ef usage --since YYYY-MM-DD [--until YYYY-MM-DD] [--group-by model|provider|day|source] [--db path] [--json]
+  ef usage today [--db path] [--group-by model|provider|day|source|directory|git_branch] [--directory path] [--branch name] [--json]
+  ef usage --since YYYY-MM-DD [--until YYYY-MM-DD] [--group-by model|provider|day|source|directory|git_branch] [--directory path] [--branch name] [--db path] [--json]
   ef tools today [--db path] [--limit n] [--json]
   ef inspect [--db path] [--limit n] request_or_response_id
 
@@ -597,6 +603,18 @@ func printUsageRows(out io.Writer, rows []report.SummaryRow, groupBy string) {
 			fmt.Fprintf(w, "%s\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\n",
 				r.Source, r.Requests, r.Errors, r.FreshInput, r.Cached, r.CacheWrite, r.Output, r.Reasoning, r.Total)
 		}
+	} else if groupBy == "directory" {
+		fmt.Fprintln(w, "DIRECTORY\tREQ\tERR\tINPUT\tCACHED\tCACHE_WRITE\tOUTPUT\tREASONING\tTOTAL")
+		for _, r := range rows {
+			fmt.Fprintf(w, "%s\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\n",
+				r.Directory, r.Requests, r.Errors, r.FreshInput, r.Cached, r.CacheWrite, r.Output, r.Reasoning, r.Total)
+		}
+	} else if groupBy == "git_branch" {
+		fmt.Fprintln(w, "GIT_BRANCH\tREQ\tERR\tINPUT\tCACHED\tCACHE_WRITE\tOUTPUT\tREASONING\tTOTAL")
+		for _, r := range rows {
+			fmt.Fprintf(w, "%s\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\n",
+				r.GitBranch, r.Requests, r.Errors, r.FreshInput, r.Cached, r.CacheWrite, r.Output, r.Reasoning, r.Total)
+		}
 	} else {
 		fmt.Fprintln(w, "PROVIDER\tCLIENT\tMODEL\tREQ\tERR\tINPUT\tCACHED\tCACHE_WRITE\tOUTPUT\tREASONING\tTOTAL")
 		for _, r := range rows {
@@ -649,6 +667,8 @@ func printInspectRows(rows []report.InspectRow) {
 		if r.Host != "" {
 			fmt.Fprintf(os.Stdout, "host: %s\n", r.Host)
 		}
+		fmt.Fprintf(os.Stdout, "directory: %s\n", emptyAsDash(r.Directory))
+		fmt.Fprintf(os.Stdout, "git_branch: %s\n", emptyAsDash(r.GitBranch))
 		fmt.Fprintf(os.Stdout, "started_at: %s\n", localTimestamp(r.StartedAt))
 		if r.CompletedAt.Valid {
 			fmt.Fprintf(os.Stdout, "completed_at: %s\n", localTimestamp(r.CompletedAt.Time))

@@ -38,12 +38,16 @@ func TestHandleIndex_ServesDashboardHTML(t *testing.T) {
 		`id="model-activity-table"`,
 		`data-table-key="summary"`,
 		`data-table-key="sources"`,
+		`data-table-key="directories"`,
+		`data-table-key="branches"`,
 		`data-table-key="model-activity"`,
 		`data-table-key="errors"`,
 		`data-table-key="tools"`,
 		`excursion-funnel-table-state`,
 		`fetch("/ui/api/history/models")`,
 		`fetch("/ui/api/sources")`,
+		`fetch("/ui/api/directories")`,
+		`fetch("/ui/api/branches")`,
 		`id="tools-table"`,
 		`fetch("/ui/api/tools")`,
 		`data-table-key="web-requests"`,
@@ -61,6 +65,36 @@ func TestHandleIndex_ServesDashboardHTML(t *testing.T) {
 	} {
 		if !strings.Contains(rec.Body.String(), marker) {
 			t.Fatalf("body missing chart marker %q: %s", marker, rec.Body.String())
+		}
+	}
+}
+
+func TestHandleProjectContext_ReturnsTodaysGroups(t *testing.T) {
+	h := newTestHandler(t)
+	tests := []struct {
+		path  string
+		field func(report.SummaryRow) string
+		want  map[string]bool
+	}{
+		{"/ui/api/directories", func(row report.SummaryRow) string { return row.Directory }, map[string]bool{"/work/api": true, "/work/web": true}},
+		{"/ui/api/branches", func(row report.SummaryRow) string { return row.GitBranch }, map[string]bool{"main": true, "feature-x": true}},
+	}
+	for _, test := range tests {
+		rec := doRequest(t, h, http.MethodGet, test.path)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s status = %d: %s", test.path, rec.Code, rec.Body.String())
+		}
+		var rows []report.SummaryRow
+		if err := json.Unmarshal(rec.Body.Bytes(), &rows); err != nil {
+			t.Fatal(err)
+		}
+		if len(rows) != len(test.want) {
+			t.Fatalf("%s rows = %+v", test.path, rows)
+		}
+		for _, row := range rows {
+			if !test.want[test.field(row)] {
+				t.Fatalf("%s unexpected row = %+v", test.path, row)
+			}
 		}
 	}
 }
@@ -338,6 +372,8 @@ func newTestHandler(t *testing.T) http.Handler {
 		{
 			RequestID:     "req-ok-1",
 			Source:        "alice",
+			Directory:     "/work/api",
+			GitBranch:     "main",
 			StartedAt:     now,
 			CompletedAt:   now.Add(time.Second),
 			Method:        "POST",
@@ -360,6 +396,8 @@ func newTestHandler(t *testing.T) http.Handler {
 		{
 			RequestID:    "req-error-1",
 			Source:       "bob",
+			Directory:    "/work/web",
+			GitBranch:    "feature-x",
 			StartedAt:    now.Add(time.Minute),
 			CompletedAt:  now.Add(time.Minute + time.Second),
 			Method:       "POST",

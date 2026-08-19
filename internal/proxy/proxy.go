@@ -39,7 +39,12 @@ import (
 	"github.com/dlnilsson/excursion-funnel/internal/queue"
 )
 
-var claudeSDKUserAgent = regexp.MustCompile(`\bsdk-ts\b.*\bagent-sdk/\d+(?:\.\d+)*\b`)
+var (
+	claudeSDKUserAgent = regexp.MustCompile(`\bsdk-ts\b.*\bagent-sdk/\d+(?:\.\d+)*\b`)
+	workingDirectoryRE = regexp.MustCompile(`(?mi)^[ \t]*(?:-[ \t]*)?Working directory:[ \t]*([^\r\n]+?)[ \t]*$`)
+	currentBranchRE    = regexp.MustCompile(`(?mi)^[ \t]*(?:-[ \t]*)?Current branch:[ \t]*([^\r\n]+?)[ \t]*$`)
+	codexCwdRE         = regexp.MustCompile(`(?is)<cwd>[ \t\r\n]*(.*?)[ \t\r\n]*</cwd>`)
+)
 
 // maxCaptureBytes bounds how much of a non-streaming response body is
 // buffered for usage parsing. Responses API / Messages API JSON bodies are
@@ -271,6 +276,7 @@ func (p *Proxy) handleProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	model, stream := peekModelStream(body)
+	directory, gitBranch := peekClientContext(body)
 
 	// Bind the upstream request to the client context so a Codex/Claude Code
 	// disconnect cancels the upstream call instead of leaking a stream. Keep
@@ -418,6 +424,8 @@ func (p *Proxy) handleProxy(w http.ResponseWriter, r *http.Request) {
 		Originator:        r.Header.Get("Originator"),
 		ClientName:        clientName(r.Header),
 		CodexSessionID:    r.Header.Get("session_id"),
+		Directory:         firstNonEmpty(r.Header.Get("X-EF-Cwd"), directory),
+		GitBranch:         firstNonEmpty(r.Header.Get("X-EF-Git-Branch"), gitBranch),
 	}
 	switch {
 	case !parseable:
@@ -961,6 +969,75 @@ func peekModelStream(body []byte) (model string, stream bool) {
 	return peek.Model, peek.Stream
 }
 
+// peekClientContext best-effort extracts the project context embedded by
+// Claude Code (the top-level Messages API "system" field) and Codex (content
+// blocks in the top-level Responses API "input" field). Only these known
+// fields are inspected — never walked generically — so a request is not
+// misattributed to text that happens to appear elsewhere in the JSON body.
+// Blocks are scanned in document order and a later match overrides an
+// earlier one, so the most recent occurrence wins; for Codex, whose "input"
+// doubles as conversation history, pasted text matching these markers is a
+// known residual source of false positives. Parse failures are ignored and
+// never affect the forwarded body.
+func peekClientContext(body []byte) (directory, branch string) {
+	var req struct {
+		System json.RawMessage `json:"system"`
+		Input  []struct {
+			Content json.RawMessage `json:"content"`
+		} `json:"input"`
+	}
+	_ = json.Unmarshal(body, &req)
+	for _, text := range clientContextBlocks(req.System) {
+		directory, branch = scanClientContext(text, directory, branch)
+	}
+	for _, item := range req.Input {
+		for _, text := range clientContextBlocks(item.Content) {
+			directory, branch = scanClientContext(text, directory, branch)
+		}
+	}
+	return directory, branch
+}
+
+// clientContextBlocks extracts the text of a Messages/Responses API content
+// field, which is either a plain string or an ordered array of {"text": "..."}
+// blocks. Order is preserved so callers can let later blocks take precedence.
+func clientContextBlocks(raw json.RawMessage) []string {
+	if len(raw) == 0 {
+		return nil
+	}
+	var text string
+	if err := json.Unmarshal(raw, &text); err == nil {
+		return []string{text}
+	}
+	var blocks []struct {
+		Text string `json:"text"`
+	}
+	if err := json.Unmarshal(raw, &blocks); err != nil {
+		return nil
+	}
+	texts := make([]string, 0, len(blocks))
+	for _, b := range blocks {
+		if b.Text != "" {
+			texts = append(texts, b.Text)
+		}
+	}
+	return texts
+}
+
+// scanClientContext applies the working-directory/branch markers to a single
+// text block, keeping the previous value unless this block has a fresh match.
+func scanClientContext(text, directory, branch string) (string, string) {
+	if match := workingDirectoryRE.FindStringSubmatch(text); len(match) > 1 {
+		directory = strings.TrimSpace(match[1])
+	} else if match := codexCwdRE.FindStringSubmatch(text); len(match) > 1 {
+		directory = strings.TrimSpace(match[1])
+	}
+	if match := currentBranchRE.FindStringSubmatch(text); len(match) > 1 {
+		branch = strings.TrimSpace(match[1])
+	}
+	return directory, branch
+}
+
 // clientName returns a stable, display-ready client label from safe request
 // headers. Raw details stay in user_agent/originator for inspect output.
 func clientName(h http.Header) string {
@@ -995,6 +1072,15 @@ func firstNonEmptyHeader(h http.Header, keys ...string) string {
 	for _, k := range keys {
 		if v := h.Get(k); v != "" {
 			return v
+		}
+	}
+	return ""
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
 		}
 	}
 	return ""

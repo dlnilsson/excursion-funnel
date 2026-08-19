@@ -23,7 +23,7 @@ func TestOpenCreatesLiveDuckDBSchema(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"started_at", "source", "host", "total_tokens"} {
+	for _, name := range []string{"started_at", "source", "host", "directory", "git_branch", "total_tokens"} {
 		if !cols[name] {
 			t.Fatalf("requests missing %q", name)
 		}
@@ -88,6 +88,7 @@ func TestInsertBatchIsIdempotentAndPreservesTypes(t *testing.T) {
 	input := int64(100)
 	event := queue.UsageEvent{
 		RequestID: "req-1", ResponseID: "resp-1", Source: "daniel", Host: "workstation",
+		Directory: `C:\work\excursion-funnel`, GitBranch: "feature/project-context",
 		StartedAt: started, CompletedAt: started.Add(500 * time.Millisecond),
 		Method: "POST", Path: "/v1/responses", UpstreamURL: "https://example.test/v1/responses",
 		HTTPStatus: 200, Usage: queue.Usage{InputTokens: &input},
@@ -102,9 +103,9 @@ func TestInsertBatchIsIdempotentAndPreservesTypes(t *testing.T) {
 	}
 	var count, toolCount, webCount, duration int64
 	var gotStarted time.Time
-	var source, host string
-	if err := st.db.QueryRow(`SELECT COUNT(*), min(started_at), min(source), min(host), min(duration_ms) FROM requests`).
-		Scan(&count, &gotStarted, &source, &host, &duration); err != nil {
+	var source, host, directory, gitBranch string
+	if err := st.db.QueryRow(`SELECT COUNT(*), min(started_at), min(source), min(host), min(directory), min(git_branch), min(duration_ms) FROM requests`).
+		Scan(&count, &gotStarted, &source, &host, &directory, &gitBranch, &duration); err != nil {
 		t.Fatal(err)
 	}
 	if err := st.db.QueryRow(`SELECT COUNT(*) FROM tool_calls`).Scan(&toolCount); err != nil {
@@ -113,8 +114,56 @@ func TestInsertBatchIsIdempotentAndPreservesTypes(t *testing.T) {
 	if err := st.db.QueryRow(`SELECT COUNT(*) FROM web_requests`).Scan(&webCount); err != nil {
 		t.Fatal(err)
 	}
-	if count != 1 || toolCount != 1 || webCount != 1 || duration != 500 || source != "daniel" || host != "workstation" || !gotStarted.Equal(started) {
-		t.Fatalf("round trip count=%d tools=%d web=%d duration=%d source=%q host=%q started=%v", count, toolCount, webCount, duration, source, host, gotStarted)
+	if count != 1 || toolCount != 1 || webCount != 1 || duration != 500 || source != "daniel" || host != "workstation" || directory != `C:\work\excursion-funnel` || gitBranch != "feature/project-context" || !gotStarted.Equal(started) {
+		t.Fatalf("round trip count=%d tools=%d web=%d duration=%d source=%q host=%q directory=%q git_branch=%q started=%v", count, toolCount, webCount, duration, source, host, directory, gitBranch, gotStarted)
+	}
+}
+
+func TestOpenUpgradesProjectContextColumns(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "usage.duckdb")
+	st, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	db, err := openDuckDB(path, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, query := range []string{
+		"DROP VIEW usage_by_day_model",
+		"DROP INDEX idx_requests_started_at",
+		"DROP INDEX idx_requests_model_requested",
+		"DROP INDEX idx_requests_response_id",
+		"DROP INDEX idx_requests_source",
+		"DROP INDEX idx_requests_directory",
+		"DROP INDEX idx_requests_git_branch",
+		"ALTER TABLE requests DROP COLUMN directory",
+		"ALTER TABLE requests DROP COLUMN git_branch",
+	} {
+		if _, err := db.Exec(query); err != nil {
+			_ = db.Close()
+			t.Fatalf("%s: %v", query, err)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	upgraded, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open() upgrade error = %v", err)
+	}
+	t.Cleanup(func() { _ = upgraded.Close() })
+	cols, err := tableColumns(upgraded.db, "requests")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cols["directory"] || !cols["git_branch"] {
+		t.Fatalf("upgraded columns = %+v", cols)
 	}
 }
 
@@ -152,12 +201,12 @@ func TestOutboxRoundTripAndAcknowledge(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = outbox.Close() })
-	event := queue.UsageEvent{RequestID: "req-1", Source: "daniel", StartedAt: time.Now(), Method: "POST", Path: "/v1/responses", UpstreamURL: "/"}
+	event := queue.UsageEvent{RequestID: "req-1", Source: "daniel", Directory: "/work/api", GitBranch: "main", StartedAt: time.Now(), Method: "POST", Path: "/v1/responses", UpstreamURL: "/"}
 	if err := outbox.InsertBatch(t.Context(), []queue.UsageEvent{event, event}); err != nil {
 		t.Fatal(err)
 	}
 	pending, err := outbox.Pending(t.Context(), 50)
-	if err != nil || len(pending) != 1 || pending[0].Source != "daniel" {
+	if err != nil || len(pending) != 1 || pending[0].Source != "daniel" || pending[0].Directory != "/work/api" || pending[0].GitBranch != "main" {
 		t.Fatalf("pending=%+v err=%v", pending, err)
 	}
 	if err := outbox.Acknowledge(t.Context(), []string{"req-1"}); err != nil {
@@ -257,19 +306,19 @@ INSERT INTO web_requests VALUES ('legacy-1', 0, 'web-1', 'web_search_call', 'Duc
 	}
 	t.Cleanup(func() { _ = st.Close() })
 	var (
-		source                 string
-		started                time.Time
-		originator, clientName sql.NullString
+		source                                       string
+		started                                      time.Time
+		originator, clientName, directory, gitBranch sql.NullString
 	)
-	if err := st.db.QueryRow(`SELECT source, started_at, originator, client_name
-FROM requests WHERE id = 'legacy-1'`).Scan(&source, &started, &originator, &clientName); err != nil {
+	if err := st.db.QueryRow(`SELECT source, started_at, originator, client_name, directory, git_branch
+FROM requests WHERE id = 'legacy-1'`).Scan(&source, &started, &originator, &clientName, &directory, &gitBranch); err != nil {
 		t.Fatal(err)
 	}
 	if source != "legacy" || !started.Equal(time.Date(2026, 8, 17, 10, 34, 56, 0, time.UTC)) {
 		t.Fatalf("source=%q started=%s", source, started)
 	}
-	if originator.Valid || clientName.Valid {
-		t.Fatalf("missing legacy fields should migrate as NULL: originator=%+v client=%+v", originator, clientName)
+	if originator.Valid || clientName.Valid || directory.Valid || gitBranch.Valid {
+		t.Fatalf("missing legacy fields should migrate as NULL: originator=%+v client=%+v directory=%+v git_branch=%+v", originator, clientName, directory, gitBranch)
 	}
 	var requestCount, toolCount, webCount int
 	if err := st.db.QueryRow(`SELECT COUNT(*) FROM requests`).Scan(&requestCount); err != nil {
@@ -327,6 +376,7 @@ func TestQuackRoundTrip(t *testing.T) {
 	t.Cleanup(func() { _ = remote.Close() })
 	event := queue.UsageEvent{
 		RequestID: "remote-1", Source: "integration", StartedAt: time.Now(),
+		Directory: "/work/api", GitBranch: "main",
 		Method: "POST", Path: "/v1/responses", UpstreamURL: "/", ErrorMessage: "it's recoverable",
 		ToolCalls:   []queue.ToolCall{{ID: "call-1", Name: "shell", Command: "echo 'ok'"}},
 		WebRequests: []queue.WebRequest{{ID: "web-1", Name: "web_search_call", Query: "DuckDB Quack"}},
@@ -336,12 +386,12 @@ func TestQuackRoundTrip(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	var source, errorMessage string
-	if err := ledger.db.QueryRow(`SELECT source, error_message FROM requests WHERE id = 'remote-1'`).Scan(&source, &errorMessage); err != nil {
+	var source, directory, gitBranch, errorMessage string
+	if err := ledger.db.QueryRow(`SELECT source, directory, git_branch, error_message FROM requests WHERE id = 'remote-1'`).Scan(&source, &directory, &gitBranch, &errorMessage); err != nil {
 		t.Fatal(err)
 	}
-	if source != "integration" || errorMessage != "it's recoverable" {
-		t.Fatalf("source = %q error_message = %q", source, errorMessage)
+	if source != "integration" || directory != "/work/api" || gitBranch != "main" || errorMessage != "it's recoverable" {
+		t.Fatalf("source=%q directory=%q git_branch=%q error_message=%q", source, directory, gitBranch, errorMessage)
 	}
 	var requestCount, toolCount, webCount int
 	if err := ledger.db.QueryRow(`SELECT COUNT(*) FROM requests WHERE id = 'remote-1'`).Scan(&requestCount); err != nil {

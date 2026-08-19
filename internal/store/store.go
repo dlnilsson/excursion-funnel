@@ -275,6 +275,8 @@ func ensureSchema(db *sql.DB) error {
   originator VARCHAR,
   client_name VARCHAR,
   codex_session_id VARCHAR,
+  directory VARCHAR,
+  git_branch VARCHAR,
   error_type VARCHAR,
   error_message VARCHAR,
   input_tokens BIGINT,
@@ -319,11 +321,16 @@ CREATE INDEX IF NOT EXISTS idx_web_requests_request_id ON web_requests(request_i
 	}
 	for _, col := range []struct{ name, typ string }{
 		{"originator", "VARCHAR"}, {"client_name", "VARCHAR"},
+		{"directory", "VARCHAR"}, {"git_branch", "VARCHAR"},
 		{"source", "VARCHAR DEFAULT 'unknown'"}, {"host", "VARCHAR"},
 	} {
 		if err := addColumnIfMissing(db, "requests", col.name, col.typ); err != nil {
 			return err
 		}
+	}
+	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_requests_directory ON requests(directory);
+CREATE INDEX IF NOT EXISTS idx_requests_git_branch ON requests(git_branch);`); err != nil {
+		return fmt.Errorf("create project context indexes: %w", err)
 	}
 	// Quack 1.5.x cannot reconstruct attached catalogs when a column default
 	// contains a bound expression such as current_timestamp. Supply the value
@@ -355,7 +362,7 @@ func validateSchema(db *sql.DB) error {
 		"id", "response_id", "source", "host", "started_at", "completed_at", "duration_ms",
 		"method", "path", "upstream_url", "model_requested", "model_reported",
 		"stream", "http_status", "upstream_request_id", "user_agent", "originator",
-		"client_name", "codex_session_id", "error_type", "error_message", "input_tokens",
+		"client_name", "codex_session_id", "directory", "git_branch", "error_type", "error_message", "input_tokens",
 		"cached_input_tokens", "cache_write_tokens", "output_tokens", "reasoning_tokens",
 		"total_tokens", "usage_json", "created_at",
 	}
@@ -448,9 +455,9 @@ const insertRequestSQL = `INSERT INTO requests (
   id, response_id, source, host, started_at, completed_at, duration_ms,
   method, path, upstream_url, model_requested, model_reported, stream, http_status,
   upstream_request_id, user_agent, originator, client_name, codex_session_id,
-  error_type, error_message, input_tokens, cached_input_tokens, cache_write_tokens,
+  directory, git_branch, error_type, error_message, input_tokens, cached_input_tokens, cache_write_tokens,
   output_tokens, reasoning_tokens, total_tokens, usage_json, created_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, current_timestamp)
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, current_timestamp)
 ON CONFLICT (id) DO NOTHING`
 
 const insertToolCallSQL = `INSERT INTO tool_calls (
@@ -511,6 +518,7 @@ func (s *Store) InsertBatch(ctx context.Context, events []queue.UsageEvent) erro
 			ev.RequestID, nullableString(ev.ResponseID), source, nullableString(ev.Host), ev.StartedAt, completedAt, durationMS,
 			ev.Method, ev.Path, ev.UpstreamURL, nullableString(ev.ModelRequested), nullableString(ev.ModelReported), ev.Stream, ev.HTTPStatus,
 			nullableString(ev.UpstreamRequestID), nullableString(ev.UserAgent), nullableString(ev.Originator), nullableString(ev.ClientName), nullableString(ev.CodexSessionID),
+			nullableString(ev.Directory), nullableString(ev.GitBranch),
 			nullableString(ev.ErrorType), nullableString(ev.ErrorMessage), ev.Usage.InputTokens, ev.Usage.CachedInputTokens, ev.Usage.CacheWriteTokens,
 			ev.Usage.OutputTokens, ev.Usage.ReasoningTokens, ev.Usage.TotalTokens, usageJSON,
 		); err != nil {
@@ -574,7 +582,8 @@ func (s *Store) insertRemoteBatch(ctx context.Context, events []queue.UsageEvent
 			sqlTime(ev.StartedAt), completedAt, durationMS, sqlString(ev.Method), sqlString(ev.Path), sqlString(ev.UpstreamURL),
 			sqlNullableString(ev.ModelRequested), sqlNullableString(ev.ModelReported), strconv.FormatBool(ev.Stream), strconv.Itoa(ev.HTTPStatus),
 			sqlNullableString(ev.UpstreamRequestID), sqlNullableString(ev.UserAgent), sqlNullableString(ev.Originator), sqlNullableString(ev.ClientName),
-			sqlNullableString(ev.CodexSessionID), sqlNullableString(ev.ErrorType), sqlNullableString(ev.ErrorMessage),
+			sqlNullableString(ev.CodexSessionID), sqlNullableString(ev.Directory), sqlNullableString(ev.GitBranch),
+			sqlNullableString(ev.ErrorType), sqlNullableString(ev.ErrorMessage),
 			sqlNullableInt64(ev.Usage.InputTokens), sqlNullableInt64(ev.Usage.CachedInputTokens), sqlNullableInt64(ev.Usage.CacheWriteTokens),
 			sqlNullableInt64(ev.Usage.OutputTokens), sqlNullableInt64(ev.Usage.ReasoningTokens), sqlNullableInt64(ev.Usage.TotalTokens),
 			sqlNullableString(string(ev.UsageJSON)), "current_timestamp",
@@ -602,7 +611,7 @@ func (s *Store) insertRemoteBatch(ctx context.Context, events []queue.UsageEvent
   id, response_id, source, host, started_at, completed_at, duration_ms,
   method, path, upstream_url, model_requested, model_reported, stream, http_status,
   upstream_request_id, user_agent, originator, client_name, codex_session_id,
-  error_type, error_message, input_tokens, cached_input_tokens, cache_write_tokens,
+  directory, git_branch, error_type, error_message, input_tokens, cached_input_tokens, cache_write_tokens,
   output_tokens, reasoning_tokens, total_tokens, usage_json, created_at
 ) VALUES ` + strings.Join(requestRows, ", ") + ` ON CONFLICT (id) DO NOTHING`
 	if err := s.execRemoteQuery(ctx, requestQuery); err != nil {
@@ -686,7 +695,8 @@ func MigrateSQLite(ctx context.Context, duckPath, sqlitePath string) error {
 		"method", "path", "upstream_url", legacyColumn(requestCols, "model_requested", "NULL"), legacyColumn(requestCols, "model_reported", "NULL"),
 		stream, legacyColumn(requestCols, "http_status", "NULL"), legacyColumn(requestCols, "upstream_request_id", "NULL"),
 		legacyColumn(requestCols, "user_agent", "NULL"), legacyColumn(requestCols, "originator", "NULL"), legacyColumn(requestCols, "client_name", "NULL"),
-		legacyColumn(requestCols, "codex_session_id", "NULL"), legacyColumn(requestCols, "error_type", "NULL"), legacyColumn(requestCols, "error_message", "NULL"),
+		legacyColumn(requestCols, "codex_session_id", "NULL"), legacyColumn(requestCols, "directory", "NULL"), legacyColumn(requestCols, "git_branch", "NULL"),
+		legacyColumn(requestCols, "error_type", "NULL"), legacyColumn(requestCols, "error_message", "NULL"),
 		legacyColumn(requestCols, "input_tokens", "NULL"), legacyColumn(requestCols, "cached_input_tokens", "NULL"), legacyColumn(requestCols, "cache_write_tokens", "NULL"),
 		legacyColumn(requestCols, "output_tokens", "NULL"), legacyColumn(requestCols, "reasoning_tokens", "NULL"), legacyColumn(requestCols, "total_tokens", "NULL"),
 		legacyColumn(requestCols, "usage_json", "NULL"), createdAt,
@@ -708,7 +718,7 @@ func MigrateSQLite(ctx context.Context, duckPath, sqlitePath string) error {
  id, response_id, source, host, started_at, completed_at, duration_ms,
  method, path, upstream_url, model_requested, model_reported, stream, http_status,
  upstream_request_id, user_agent, originator, client_name, codex_session_id,
- error_type, error_message, input_tokens, cached_input_tokens, cache_write_tokens,
+ directory, git_branch, error_type, error_message, input_tokens, cached_input_tokens, cache_write_tokens,
  output_tokens, reasoning_tokens, total_tokens, usage_json, created_at)
 SELECT `+strings.Join(requestSelect, ", ")+`
 FROM old.requests ON CONFLICT (id) DO NOTHING`); err != nil {

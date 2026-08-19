@@ -258,6 +258,8 @@ type UsageEvent struct {
 	Originator        string
 	ClientName        string
 	CodexSessionID    string
+	Directory         string
+	GitBranch         string
 
 	ErrorType    string
 	ErrorMessage string

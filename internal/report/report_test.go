@@ -12,6 +12,16 @@ import (
 	"github.com/dlnilsson/excursion-funnel/internal/store"
 )
 
+// TestMain clears hub/quack env vars so a developer's shell (e.g. one already
+// configured to point `ef` at a live team hub) can't redirect Open() calls in
+// this package's tests away from the temp databases they set up.
+func TestMain(m *testing.M) {
+	for _, key := range []string{"EF_HUB_ADDR", "EF_HUB_TOKEN", "EF_HUB_INSECURE", "EF_QUACK_ADDR"} {
+		_ = os.Unsetenv(key)
+	}
+	os.Exit(m.Run())
+}
+
 func TestSummary_GroupsByProviderAndModel(t *testing.T) {
 	dbPath := seedReportDB(t)
 
@@ -71,6 +81,68 @@ func TestSummary_GroupsBySourceWithMixedProviderInput(t *testing.T) {
 	// OpenAI: (10 - 5) + 20; Anthropic: 7 - 3 cache-write.
 	if rows[0].Input != 37 || rows[0].FreshInput != 29 {
 		t.Fatalf("source input totals = %+v, want raw=37 fresh=29", rows[0])
+	}
+}
+
+func TestSummary_GroupsAndFiltersByProjectContext(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "usage.duckdb")
+	st, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	started := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+	totals := []int64{10, 20, 30, 40}
+	events := []queue.UsageEvent{
+		{RequestID: "main", Directory: "/work/api", GitBranch: "main", StartedAt: started, Method: "POST", Path: "/v1/responses", UpstreamURL: "/", Usage: queue.Usage{TotalTokens: &totals[0]}},
+		{RequestID: "feature-api", Directory: "/work/api", GitBranch: "feature-x", StartedAt: started, Method: "POST", Path: "/v1/responses", UpstreamURL: "/", Usage: queue.Usage{TotalTokens: &totals[1]}},
+		{RequestID: "feature-web", Directory: "/work/web", GitBranch: "feature-x", StartedAt: started, Method: "POST", Path: "/v1/responses", UpstreamURL: "/", Usage: queue.Usage{TotalTokens: &totals[2]}},
+		{RequestID: "unknown", StartedAt: started, Method: "POST", Path: "/v1/responses", UpstreamURL: "/", Usage: queue.Usage{TotalTokens: &totals[3]}},
+	}
+	if err := st.InsertBatch(t.Context(), events); err != nil {
+		t.Fatal(err)
+	}
+	rep := New(st)
+
+	directories, err := rep.Summary(t.Context(), SummaryOptions{GroupBy: "directory", Branch: "feature-x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotDirectories := make(map[string]int64)
+	for _, row := range directories {
+		gotDirectories[row.Directory] = row.Total
+	}
+	if gotDirectories["/work/api"] != 20 || gotDirectories["/work/web"] != 30 || len(gotDirectories) != 2 {
+		t.Fatalf("directory rows = %+v", directories)
+	}
+
+	branches, err := rep.Summary(t.Context(), SummaryOptions{GroupBy: "git_branch", Directory: "/work/api"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotBranches := make(map[string]int64)
+	for _, row := range branches {
+		gotBranches[row.GitBranch] = row.Total
+	}
+	if gotBranches["main"] != 10 || gotBranches["feature-x"] != 20 || len(gotBranches) != 2 {
+		t.Fatalf("git branch rows = %+v", branches)
+	}
+
+	rows, err := rep.Inspect(t.Context(), "feature-api", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0].Directory != "/work/api" || rows[0].GitBranch != "feature-x" {
+		t.Fatalf("inspect rows = %+v", rows)
+	}
+}
+
+func TestSummaryGroupingAcceptsProjectContext(t *testing.T) {
+	for _, groupBy := range []string{"directory", "git_branch"} {
+		selectGroup, groupExpr, orderBy, err := summaryGrouping(groupBy)
+		if err != nil || selectGroup == "" || groupExpr == "" || orderBy == "" {
+			t.Fatalf("summaryGrouping(%q) = (%q, %q, %q, %v)", groupBy, selectGroup, groupExpr, orderBy, err)
+		}
 	}
 }
 

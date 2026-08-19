@@ -602,6 +602,22 @@
   </table>
 </details>
 
+<details class="table-section" data-table-key="directories" open>
+  <summary>Requests by directory</summary>
+  <table id="directories-table">
+    <thead><tr><th>Directory</th><th>Requests</th><th>Errors</th><th>Total tokens</th></tr></thead>
+    <tbody></tbody>
+  </table>
+</details>
+
+<details class="table-section" data-table-key="branches" open>
+  <summary>Requests by git branch</summary>
+  <table id="branches-table">
+    <thead><tr><th>Git branch</th><th>Requests</th><th>Errors</th><th>Total tokens</th></tr></thead>
+    <tbody></tbody>
+  </table>
+</details>
+
 <h2>Model activity</h2>
 <div class="history-layout">
   <div class="history-actions">
@@ -628,7 +644,7 @@
 <details class="table-section" data-table-key="errors" open>
   <summary>Recent errors</summary>
   <table id="errors-table">
-    <thead><tr><th>Started</th><th>Client</th><th>Model</th><th>Status</th><th>Error</th></tr></thead>
+    <thead><tr><th>Started</th><th>Client</th><th>Directory</th><th>Git branch</th><th>Model</th><th>Status</th><th>Error</th></tr></thead>
     <tbody></tbody>
   </table>
 </details>
@@ -836,9 +852,11 @@ function setHistoryMetric(metric) {
 }
 
 async function load() {
-  const [summary, sources, history, modelHistory, errors, tools, webRequests] = await Promise.all([
+  const [summary, sources, directories, branches, history, modelHistory, errors, tools, webRequests] = await Promise.all([
     fetch("/ui/api/summary").then(r => r.json()),
     fetch("/ui/api/sources").then(r => r.json()),
+    fetch("/ui/api/directories").then(r => r.json()),
+    fetch("/ui/api/branches").then(r => r.json()),
     fetch("/ui/api/history").then(r => r.json()),
     fetch("/ui/api/history/models").then(r => r.json()),
     fetch("/ui/api/errors").then(r => r.json()),
@@ -848,6 +866,8 @@ async function load() {
   renderStats(summary);
   renderSummary(summary);
   renderSources(sources);
+  renderProjectContext("directories", directories, "Directory", "directory activity");
+  renderProjectContext("branches", branches, "GitBranch", "git branch activity");
   renderHistoryCharts(history, modelHistory);
   renderErrors(errors);
   renderTools(tools);
@@ -861,6 +881,15 @@ function renderSources(rows) {
     return;
   }
   tbody.innerHTML = rows.map(r => `<tr><td>${escapeHTML(r.Source)}</td><td>${r.Requests}</td><td>${r.Errors}</td>${tokenCell(r.Total)}</tr>`).join("");
+}
+
+function renderProjectContext(table, rows, field, emptyLabel) {
+  const tbody = document.querySelector(`#${table}-table tbody`);
+  if (rows.length === 0) {
+    tbody.innerHTML = `<tr><td colspan="4" class="empty">No ${emptyLabel} today</td></tr>`;
+    return;
+  }
+  tbody.innerHTML = rows.map(r => `<tr><td>${escapeHTML(r[field])}</td><td>${r.Requests}</td><td>${r.Errors}</td>${tokenCell(r.Total)}</tr>`).join("");
 }
 
 const providerLabels = { anthropic: "Anthropic", openai: "Codex" };
@@ -1098,11 +1127,12 @@ function chartColor(name, alpha) {
 function renderErrors(rows) {
   const tbody = document.querySelector("#errors-table tbody");
   if (rows.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="5" class="empty">No recent errors</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="7" class="empty">No recent errors</td></tr>';
     return;
   }
   tbody.innerHTML = rows.map(r => `<tr>
-    <td>${escapeHTML(localTimestamp(r.StartedAt))}</td><td>${escapeHTML(clientLabel(r))}</td><td>${escapeHTML(r.ModelRequested || r.ModelReported)}</td>
+    <td>${escapeHTML(localTimestamp(r.StartedAt))}</td><td>${escapeHTML(clientLabel(r))}</td>
+    <td>${escapeHTML(r.Directory || "-")}</td><td>${escapeHTML(r.GitBranch || "-")}</td><td>${escapeHTML(r.ModelRequested || r.ModelReported)}</td>
     <td>${nullInt(r.HTTPStatus)}</td><td>${escapeHTML(r.ErrorType)}: ${escapeHTML(r.ErrorMessage)}</td>
   </tr>`).join("");
 }

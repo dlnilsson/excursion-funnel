@@ -95,6 +95,31 @@ data: {"type":"response.completed","response":{"id":"resp_stream","model":"gpt-5
 	}
 }
 
+func TestProxy_ProjectContextHeadersOverrideBody(t *testing.T) {
+	body := `event: response.completed
+data: {"type":"response.completed","response":{"id":"resp_context","model":"gpt-5.6-sol","status":"completed","usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}
+
+`
+	upstream := streamingUpstream(t, "/responses", body)
+	defer upstream.Close()
+
+	sink := &recordingSink{}
+	p := newTestProxy(t, upstream.URL, upstream.URL, sink)
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewBufferString(
+		`{"model":"gpt-5.6-sol","stream":true,"input":"<environment_context><cwd>/body/path</cwd></environment_context>"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-EF-Cwd", "/header/path")
+	req.Header.Set("X-EF-Git-Branch", "feature/header")
+	rec := httptest.NewRecorder()
+	p.Handler().ServeHTTP(rec, req)
+	_ = rec.Result().Body.Close()
+
+	ev := sink.one(t)
+	if ev.Directory != "/header/path" || ev.GitBranch != "feature/header" {
+		t.Fatalf("project context = (%q, %q), want header values", ev.Directory, ev.GitBranch)
+	}
+}
+
 // The ChatGPT Codex backend streams SSE with no Content-Type header. The proxy
 // must still classify a 2xx response to a stream=true request as SSE and parse
 // usage from the frames, rather than json-parsing "event: ..." as a JSON body.
@@ -862,6 +887,36 @@ data: {"type":"response.completed","response":{"id":"resp_disc","model":"gpt-5.6
 	checkUsagePtr(t, "InputTokens", ev.Usage.InputTokens, 11)
 	checkUsagePtr(t, "OutputTokens", ev.Usage.OutputTokens, 7)
 	checkUsagePtr(t, "TotalTokens", ev.Usage.TotalTokens, 18)
+}
+
+func TestPeekClientContext(t *testing.T) {
+	tests := []struct {
+		name      string
+		body      string
+		directory string
+		gitBranch string
+	}{
+		{
+			name:      "claude code environment block",
+			body:      `{"system":[{"type":"text","text":"Environment:\n- Working directory: C:\\Users\\Daniel\\dev\\excursion-funnel\n- Current branch: feature/project-context\n- Platform: win32"}]}`,
+			directory: `C:\Users\Daniel\dev\excursion-funnel`,
+			gitBranch: "feature/project-context",
+		},
+		{
+			name:      "codex environment context",
+			body:      `{"input":[{"role":"user","content":[{"type":"input_text","text":"<environment_context>\n  <cwd>C:\\Users\\Daniel\\dev\\excursion-funnel</cwd>\n  <shell>powershell</shell>\n</environment_context>"}]}]}`,
+			directory: `C:\Users\Daniel\dev\excursion-funnel`,
+		},
+		{name: "missing", body: `{"model":"gpt-5.6-sol"}`},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			directory, branch := peekClientContext([]byte(test.body))
+			if directory != test.directory || branch != test.gitBranch {
+				t.Fatalf("peekClientContext() = (%q, %q), want (%q, %q)", directory, branch, test.directory, test.gitBranch)
+			}
+		})
+	}
 }
 
 func waitForEvent(t *testing.T, sink *recordingSink) queue.UsageEvent {
