@@ -31,6 +31,7 @@ import (
 	"github.com/dlnilsson/excursion-funnel/internal/report"
 	"github.com/dlnilsson/excursion-funnel/internal/store"
 	"github.com/dlnilsson/excursion-funnel/internal/ui"
+	proxyproto "github.com/pires/go-proxyproto"
 )
 
 func main() {
@@ -392,6 +393,9 @@ func runHub(args []string) error {
 	if cfg.HubAddr == "" {
 		return errors.New("hub-addr is required (for example --hub-addr 127.0.0.1:9494 behind a TLS proxy)")
 	}
+	if err := requireLoopbackAddr(cfg.HubAddr); err != nil {
+		return fmt.Errorf("hub-addr: %w", err)
+	}
 	if cfg.HubAuthorizedKeys == "" {
 		return errors.New("hub-authorized-keys is required")
 	}
@@ -468,10 +472,11 @@ func runHubServers(dashboardAddr string, dashboard http.Handler, gatewayAddr str
 		return err
 	}
 	defer dashboardListener.Close()
-	gatewayListener, err := net.Listen("tcp", gatewayAddr)
+	rawGatewayListener, err := net.Listen("tcp", gatewayAddr)
 	if err != nil {
 		return err
 	}
+	gatewayListener := newGatewayListener(rawGatewayListener)
 	defer gatewayListener.Close()
 	dashboardServer := &http.Server{Handler: dashboard, ReadHeaderTimeout: 15 * time.Second}
 	gatewayServer := &http.Server{Handler: gateway, ReadHeaderTimeout: 15 * time.Second}
@@ -483,7 +488,7 @@ func runHubServers(dashboardAddr string, dashboard http.Handler, gatewayAddr str
 		}
 	}()
 	go func() {
-		log.Info("excursion-funnel hub gateway serving", "addr", gatewayListener.Addr())
+		log.Info("excursion-funnel hub gateway serving", "addr", gatewayListener.Addr(), "proxy_protocol", "required")
 		if err := gatewayServer.Serve(gatewayListener); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errCh <- err
 		}
@@ -501,6 +506,17 @@ func runHubServers(dashboardAddr string, dashboard http.Handler, gatewayAddr str
 	err1 := dashboardServer.Shutdown(shutdownCtx)
 	err2 := gatewayServer.Shutdown(shutdownCtx)
 	return errors.Join(err1, err2)
+}
+
+func newGatewayListener(listener net.Listener) net.Listener {
+	return &proxyproto.Listener{
+		Listener: listener,
+		ConnPolicy: proxyproto.TrustProxyHeaderFrom(
+			net.IPv4(127, 0, 0, 1),
+			net.IPv6loopback,
+		),
+		ReadHeaderTimeout: 5 * time.Second,
+	}
 }
 
 func runMigrate(args []string) error {

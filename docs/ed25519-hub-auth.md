@@ -154,12 +154,16 @@ failure.
   - The loopback Quack listener.
   - The EF authentication/proxy gateway on `EF_HUB_ADDR`.
   - The existing dashboard/health listener on `EF_ADDR`.
+- Require the gateway's loopback TLS terminator or reverse proxy to send
+  PROXY protocol so the hub retains client addresses for logging and rate
+  limiting. Reject direct and headerless gateway connections.
 - Coordinate startup failure and graceful shutdown across all listeners.
 - Note: today `EF_HUB_ADDR` is the raw Quack listener itself
   (`cmd/ef/main.go` `runHub`, `allow_other_hostname=true`), with TLS
   typically terminated externally (e.g. Tailscale). This change makes
   `EF_HUB_ADDR` an EF-owned gateway instead — any external TLS termination
-  or reverse proxy must be repointed at the gateway, not the old Quack port.
+  or reverse proxy must be repointed at the gateway, not the old Quack port,
+  and must send PROXY protocol.
 - Update the forwarder to obtain a session before `store.OpenRemote` and pass
   the temporary session as Quack's `TOKEN`.
 - Apply the same authenticated connection flow to remote `usage`, `tools`,

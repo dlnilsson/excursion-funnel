@@ -127,6 +127,20 @@ ef hub \
   --addr 127.0.0.1:8788
 ```
 
+Expose the gateway through a loopback TLS terminator that sends PROXY
+protocol. For Tailscale Serve:
+
+```sh
+sudo tailscale serve \
+  --bg \
+  --tls-terminated-tcp=9494 \
+  --proxy-protocol=2 \
+  tcp://127.0.0.1:9494
+```
+
+The hub requires PROXY protocol from a loopback peer so authentication logs
+and rate limits use each client's source address.
+
 The team dashboard is now at `http://<server-address>:8788/ui/`.
 
 **On each person's machine**, set a few environment variables before starting
@@ -155,11 +169,11 @@ the background once it's reachable again. Nothing gets lost or duplicated.
 > The hub's token grants full database access, so connections to it are
 > encrypted (TLS) by default. The client above will refuse to connect until
 > the hub is actually reachable over TLS (e.g. behind a reverse proxy, or
-> using something like `tailscale serve --tls-terminated-tcp`). Only skip
-> that requirement on a network you already trust completely (e.g. a
-> WireGuard/Tailscale-only link) by explicitly opting out on every client:
-> `--insecure` or `EF_HUB_INSECURE=true`. Never expose the hub's port
-> directly to the public internet without TLS.
+> using a loopback proxy that sends PROXY protocol, such as the Tailscale
+> Serve command above). `--insecure` or `EF_HUB_INSECURE=true` only disables
+> client-side TLS; the connection must still pass through a loopback proxy
+> that sends PROXY protocol. Never expose the hub's port directly to the
+> public internet.
 
 ## 4. Running it permanently (as a background service)
 
