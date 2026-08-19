@@ -176,18 +176,20 @@ func runTools(args []string) error {
 
 func runToolsTo(args []string, out io.Writer) error {
 	if len(args) == 0 || args[0] != "today" {
-		return fmt.Errorf("usage: ef tools today [--db path] [--limit n]")
+		return fmt.Errorf("usage: ef tools today [--db path] [--limit n] [--json]")
 	}
 	args = args[1:]
 
 	var (
-		dbPath = defaultReportDBPath()
-		limit  = report.DefaultRecentToolCallLimit
+		dbPath  = defaultReportDBPath()
+		limit   = report.DefaultRecentToolCallLimit
+		jsonOut bool
 	)
 	fs := flag.NewFlagSet("tools", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 	fs.StringVar(&dbPath, "db", dbPath, "DuckDB ledger path")
 	fs.IntVar(&limit, "limit", limit, "maximum tool calls to print")
+	fs.BoolVar(&jsonOut, "json", false, "print tool calls as JSON")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -213,6 +215,9 @@ func runToolsTo(args []string, out io.Writer) error {
 	})
 	if err != nil {
 		return err
+	}
+	if jsonOut {
+		return printToolJSON(out, rows)
 	}
 	printToolRows(out, rows)
 	return nil
@@ -465,7 +470,7 @@ Usage:
   ef migrate [--from usage.sqlite] [--db usage.duckdb]
   ef usage today [--db path] [--group-by model|provider|day|source] [--json]
   ef usage --since YYYY-MM-DD [--until YYYY-MM-DD] [--group-by model|provider|day|source] [--db path] [--json]
-  ef tools today [--db path] [--limit n]
+  ef tools today [--db path] [--limit n] [--json]
   ef inspect [--db path] [--limit n] request_or_response_id
 
 The usage, tools, and inspect commands query a configured hub or running local
@@ -607,6 +612,13 @@ func printToolRows(out io.Writer, rows []report.ToolCallRow) {
 			emptyAsDash(row.Name), emptyAsDash(compactToolValue(row.Description)), emptyAsDash(compactToolValue(row.Command)))
 	}
 	_ = w.Flush()
+}
+
+func printToolJSON(out io.Writer, rows []report.ToolCallRow) error {
+	if rows == nil {
+		rows = []report.ToolCallRow{}
+	}
+	return json.NewEncoder(out).Encode(rows)
 }
 
 func compactToolValue(value string) string {

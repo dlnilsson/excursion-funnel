@@ -165,6 +165,50 @@ func TestRunTools_Today(t *testing.T) {
 	}
 }
 
+func TestRunTools_TodayJSON(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "usage.duckdb")
+	st, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	now := time.Now()
+	if err := st.InsertBatch(t.Context(), []queue.UsageEvent{{
+		RequestID:   "req-tool-today-json",
+		StartedAt:   now,
+		CompletedAt: now.Add(time.Second),
+		Method:      "POST",
+		Path:        "/v1/messages",
+		UpstreamURL: "https://api.anthropic.com/v1/messages",
+		ToolCalls: []queue.ToolCall{{
+			Name:        "Bash",
+			Description: "Run tests",
+			Command:     "go test ./...",
+		}},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	if err := runToolsTo([]string{"today", "--json", "--db", dbPath}, &out); err != nil {
+		t.Fatalf("runToolsTo() error = %v", err)
+	}
+
+	var rows []report.ToolCallRow
+	if err := json.Unmarshal(out.Bytes(), &rows); err != nil {
+		t.Fatalf("JSON output is invalid: %v: %s", err, out.String())
+	}
+	if len(rows) != 1 {
+		t.Fatalf("rows len = %d, want 1: %+v", len(rows), rows)
+	}
+	if got := rows[0]; got.Name != "Bash" || got.Description != "Run tests" || got.Command != "go test ./..." {
+		t.Fatalf("row = %+v, want Bash/Run tests/go test ./...", got)
+	}
+}
+
 func TestRunTools_RequiresToday(t *testing.T) {
 	if err := runTools([]string{"yesterday"}); err == nil {
 		t.Fatal("runTools() error = nil, want usage error")
@@ -175,6 +219,16 @@ func TestPrintUsageJSON_EmptyRowsIsArray(t *testing.T) {
 	var out bytes.Buffer
 	if err := printUsageJSON(&out, nil); err != nil {
 		t.Fatalf("printUsageJSON() error = %v", err)
+	}
+	if got := out.String(); got != "[]\n" {
+		t.Fatalf("JSON output = %q, want empty array", got)
+	}
+}
+
+func TestPrintToolJSON_EmptyRowsIsArray(t *testing.T) {
+	var out bytes.Buffer
+	if err := printToolJSON(&out, nil); err != nil {
+		t.Fatalf("printToolJSON() error = %v", err)
 	}
 	if got := out.String(); got != "[]\n" {
 		t.Fatalf("JSON output = %q, want empty array", got)
