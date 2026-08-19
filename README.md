@@ -251,6 +251,8 @@ This is safe to run more than once — it won't create duplicate entries.
 You can configure things with either a command-line flag or an environment
 variable (flags win if both are set).
 
+<details>
+
 | Environment variable | Flag | Default | What it does |
 | --- | --- | --- | --- |
 | `EF_ADDR` | `-addr` | `127.0.0.1:8787` | Address the proxy/dashboard listens on. |
@@ -272,6 +274,10 @@ variable (flags win if both are set).
 | `EF_UI_ENABLED` | `-ui-enabled` | `true` | Turns the web dashboard on or off. |
 
 Time values use plain Go-style durations: `500ms`, `5s`, `2m`, etc.
+
+
+</details>
+
 
 ![excursion-funnel](./assets/ef.png)
 
