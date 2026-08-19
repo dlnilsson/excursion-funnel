@@ -53,6 +53,34 @@ func TestQuackURI(t *testing.T) {
 	}
 }
 
+func TestQuackSessionAuthenticator(t *testing.T) {
+	if os.Getenv("EF_TEST_QUACK") == "" {
+		t.Skip("set EF_TEST_QUACK=1 to run the extension integration test")
+	}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	address := listener.Addr().String()
+	_ = listener.Close()
+	ledger, err := Open(filepath.Join(t.TempDir(), "usage.duckdb"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ledger.Close() })
+	if _, err := ledger.StartQuackAuthenticated(t.Context(), address, "internal-token", func(token string) bool { return token == "session-token" }); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := OpenRemote(t.Context(), address, "internal-token", false); err == nil {
+		t.Fatal("internal token authenticated remotely")
+	}
+	remote, err := OpenRemote(t.Context(), address, "session-token", false)
+	if err != nil {
+		t.Fatalf("session token rejected: %v", err)
+	}
+	_ = remote.Close()
+}
+
 func TestOpenExistingReadOnly(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "usage.duckdb")
 	if _, err := OpenExisting(path); err == nil {

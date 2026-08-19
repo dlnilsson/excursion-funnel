@@ -280,6 +280,15 @@ func TestRunInspect_RejectsNonPositiveLimit(t *testing.T) {
 	}
 }
 
+func TestRequireLoopbackAddr(t *testing.T) {
+	if err := requireLoopbackAddr("127.0.0.1:9495"); err != nil {
+		t.Fatalf("loopback rejected: %v", err)
+	}
+	if err := requireLoopbackAddr("0.0.0.0:9495"); err == nil {
+		t.Fatal("public bind accepted")
+	}
+}
+
 type errString string
 
 func (e errString) Error() string {

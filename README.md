@@ -115,11 +115,14 @@ If several people want to see combined usage in one dashboard, one person (or
 a shared server) runs the **hub**, and everyone else's `ef serve` reports to
 it.
 
-**On the shared server**, start the hub with a password (token) you make up:
+**On the shared server**, create an OpenSSH `authorized_keys` file containing
+the team members' `ssh-ed25519` public keys, then start the hub. The hub token
+is internal to Quack; never give it to clients:
 
 ```sh
 ef hub \
-  --hub-addr 0.0.0.0:9494 \
+  --hub-addr 127.0.0.1:9494 \
+  --hub-authorized-keys /etc/excursion-funnel/authorized_keys \
   --hub-token 'replace-with-a-long-random-token' \
   --addr 127.0.0.1:8788
 ```
@@ -131,10 +134,15 @@ The team dashboard is now at `http://<server-address>:8788/ui/`.
 
 ```sh
 export EF_HUB_ADDR=hub.example.test:9494
-export EF_HUB_TOKEN='replace-with-a-long-random-token'
 export EF_SOURCE='daniel@workstation'
 ef serve
 ```
+
+Clients use an allowed Ed25519 SSH key. Unix-like clients look for
+unencrypted Ed25519 keys in `~/.ssh` and can use `SSH_AUTH_SOCK`; set
+`EF_HUB_KEY=/path/to/key` (or `--hub-key`) to prioritize a particular key.
+Windows clients must set `EF_HUB_KEY` to an unencrypted OpenSSH or PKCS#8
+Ed25519 private key.
 
 `EF_SOURCE` is just a label (e.g. your name or machine) so usage can be
 grouped by person in the dashboard.
@@ -233,6 +241,13 @@ ef usage --since 2026-08-01 --group-by day
 # Usage broken down by person/machine (team mode).
 ef usage --since 2026-08-01 --group-by source
 
+# Usage broken down by working directory or git branch.
+ef usage today --group-by directory
+ef usage --since 2026-08-01 --group-by git_branch --branch feature-x
+
+# Filters can be combined with any grouping.
+ef usage today --directory /work/backend --branch feature-x
+
 # Tool-call stats for today.
 ef tools today
 
@@ -240,6 +255,11 @@ ef tools today
 ef inspect resp_abc123
 ef inspect --limit 50 req_abc123
 ```
+
+Working directory and git branch are captured automatically from the client
+context sent by Claude Code or Codex. They remain unknown when the client does
+not send that context; `X-EF-Cwd` and `X-EF-Git-Branch` request headers can be
+used as explicit overrides.
 
 If you've set `EF_HUB_ADDR` (team mode), these commands always read from the
 shared hub, so you always see live, up-to-date numbers rather than a
@@ -273,7 +293,10 @@ variable (flags win if both are set).
 | `EF_OUTBOX` | `-outbox` | next to the database, `outbox.sqlite` | Local backup file used in team mode so nothing's lost if the hub is down. |
 | `EF_QUACK_ADDR` | `-quack-addr` | `127.0.0.1:9494` | Internal address used for reading the local database. |
 | `EF_HUB_ADDR` | `-hub-addr` | (none) | Address of the shared hub. Setting this turns on team mode. |
-| `EF_HUB_TOKEN` | `-hub-token` | (none) | Password used to talk to the hub. |
+| `EF_HUB_TOKEN` | `-hub-token` | (none) | Hub-only internal Quack token; never configure it on clients. |
+| `EF_HUB_AUTHORIZED_KEYS` | `-hub-authorized-keys` | (none) | Hub-only OpenSSH `authorized_keys` file containing allowed Ed25519 keys. |
+| `EF_HUB_QUACK_ADDR` | `-hub-quack-addr` | `127.0.0.1:9495` | Hub-only loopback address for the private Quack listener. |
+| `EF_HUB_KEY` | `-hub-key` | (none) | Preferred client Ed25519 private key for hub authentication. |
 | `EF_HUB_INSECURE` | `-insecure` | `false` | TLS to the hub is required by default; set `true` only on a network you already trust (e.g. Tailscale/WireGuard) to allow an unencrypted connection. |
 | `EF_SOURCE` | `-source` | `user@host` | Label used to identify you in team-mode reports. |
 | `EF_FORWARD_INTERVAL` | `-forward-interval` | `1s` | How often team mode tries to forward saved data to the hub. |

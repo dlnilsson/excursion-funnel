@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/dlnilsson/excursion-funnel/internal/hubauth"
 	"github.com/dlnilsson/excursion-funnel/internal/queue"
 	"github.com/dlnilsson/excursion-funnel/internal/store"
 )
@@ -36,6 +37,11 @@ type Reporter struct {
 // (whichever daemon's) ledger instead, with no indication their flag was
 // ignored.
 func Open(path, defaultPath string) (*Reporter, error) {
+	return OpenWithHubKey(path, defaultPath, os.Getenv("EF_HUB_KEY"))
+}
+
+// OpenWithHubKey is Open with an optional explicit hub key for CLI callers.
+func OpenWithHubKey(path, defaultPath, hubKey string) (*Reporter, error) {
 	if hub := os.Getenv("EF_HUB_ADDR"); hub != "" {
 		insecure := false
 		if raw := os.Getenv("EF_HUB_INSECURE"); raw != "" {
@@ -45,7 +51,7 @@ func Open(path, defaultPath string) (*Reporter, error) {
 			}
 			insecure = parsed
 		}
-		return OpenRemote(hub, os.Getenv("EF_HUB_TOKEN"), insecure)
+		return OpenHubRemote(hub, hubKey, insecure)
 	}
 	var remoteErr error
 	if path == defaultPath {
@@ -78,6 +84,35 @@ func OpenRemote(address, token string, insecure bool) (*Reporter, error) {
 	st, err := store.OpenRemote(ctx, address, token, insecure)
 	if err != nil {
 		return nil, err
+	}
+	return &Reporter{store: st, owned: true}, nil
+}
+
+// OpenHubRemote authenticates to a remote EF gateway and attaches Quack using
+// its short-lived session credential. Hub tokens are deliberately not accepted
+// as client credentials.
+func OpenHubRemote(address, keyPath string, insecure bool) (*Reporter, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	auth := hubauth.NewClient(hubauth.ClientConfig{Address: address, KeyPath: keyPath, Insecure: insecure})
+	token, err := auth.Credential(ctx)
+	if err != nil {
+		return nil, err
+	}
+	st, err := store.OpenRemote(ctx, address, token, insecure)
+	if err == nil {
+		return &Reporter{store: st, owned: true}, nil
+	}
+	// A restarted hub forgets all in-memory sessions. Discard a cached
+	// credential and retry the challenge-response flow once.
+	auth.Invalidate()
+	token, loginErr := auth.Credential(ctx)
+	if loginErr != nil {
+		return nil, err
+	}
+	st, retryErr := store.OpenRemote(ctx, address, token, insecure)
+	if retryErr != nil {
+		return nil, retryErr
 	}
 	return &Reporter{store: st, owned: true}, nil
 }

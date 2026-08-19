@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/dlnilsson/excursion-funnel/internal/hubauth"
 	"github.com/dlnilsson/excursion-funnel/internal/store"
 )
 
@@ -14,7 +15,7 @@ const batchSize = 50
 // Config identifies the remote hub and retry cadence.
 type Config struct {
 	Address      string
-	Token        string
+	KeyPath      string
 	Insecure     bool
 	PollInterval time.Duration
 }
@@ -26,6 +27,7 @@ type Forwarder struct {
 	log    *slog.Logger
 	cancel context.CancelFunc
 	done   chan struct{}
+	auth   *hubauth.Client
 }
 
 // New creates a stopped forwarder.
@@ -33,7 +35,7 @@ func New(outbox *store.Outbox, cfg Config, log *slog.Logger) *Forwarder {
 	if cfg.PollInterval <= 0 {
 		cfg.PollInterval = time.Second
 	}
-	return &Forwarder{outbox: outbox, cfg: cfg, log: log, done: make(chan struct{})}
+	return &Forwarder{outbox: outbox, cfg: cfg, log: log, done: make(chan struct{}), auth: hubauth.NewClient(hubauth.ClientConfig{Address: cfg.Address, KeyPath: cfg.KeyPath, Insecure: cfg.Insecure})}
 }
 
 // Start launches the forwarding loop.
@@ -71,7 +73,11 @@ func (f *Forwarder) run(ctx context.Context) {
 			continue
 		}
 		if err == nil && remote == nil {
-			remote, err = store.OpenRemote(ctx, f.cfg.Address, f.cfg.Token, f.cfg.Insecure)
+			var token string
+			token, err = f.auth.Credential(ctx)
+			if err == nil {
+				remote, err = store.OpenRemote(ctx, f.cfg.Address, token, f.cfg.Insecure)
+			}
 		}
 		if err == nil {
 			err = remote.InsertBatch(ctx, events)
@@ -92,6 +98,7 @@ func (f *Forwarder) run(ctx context.Context) {
 				_ = remote.Close()
 				remote = nil
 			}
+			f.auth.Invalidate()
 			if !wait(ctx, backoff) {
 				return
 			}

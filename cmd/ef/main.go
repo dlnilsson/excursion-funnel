@@ -10,7 +10,10 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
+	"net/http/httputil"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -22,6 +25,7 @@ import (
 
 	"github.com/dlnilsson/excursion-funnel/internal/config"
 	"github.com/dlnilsson/excursion-funnel/internal/forward"
+	"github.com/dlnilsson/excursion-funnel/internal/hubauth"
 	"github.com/dlnilsson/excursion-funnel/internal/proxy"
 	"github.com/dlnilsson/excursion-funnel/internal/queue"
 	"github.com/dlnilsson/excursion-funnel/internal/report"
@@ -97,6 +101,7 @@ func runUsageTo(args []string, out io.Writer) error {
 		groupBy   string
 		directory string
 		branch    string
+		hubKey    string
 		jsonOut   bool
 	)
 	fs := flag.NewFlagSet("usage", flag.ContinueOnError)
@@ -107,6 +112,7 @@ func runUsageTo(args []string, out io.Writer) error {
 	fs.StringVar(&groupBy, "group-by", "model", "grouping: model, provider, day, source, directory, or git_branch")
 	fs.StringVar(&directory, "directory", "", "only requests from this working directory")
 	fs.StringVar(&branch, "branch", "", "only requests from this git branch")
+	fs.StringVar(&hubKey, "hub-key", os.Getenv("EF_HUB_KEY"), "Ed25519 private key for remote hub authentication")
 	fs.BoolVar(&jsonOut, "json", false, "print the summary as JSON")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -141,7 +147,7 @@ func runUsageTo(args []string, out io.Writer) error {
 		}
 	}
 
-	r, err := report.Open(dbPath, defaultReportDBPath())
+	r, err := report.OpenWithHubKey(dbPath, defaultReportDBPath(), hubKey)
 	if err != nil {
 		return fmt.Errorf("open database: %w", err)
 	}
@@ -189,12 +195,14 @@ func runToolsTo(args []string, out io.Writer) error {
 	var (
 		dbPath  = defaultReportDBPath()
 		limit   = report.DefaultRecentToolCallLimit
+		hubKey  string
 		jsonOut bool
 	)
 	fs := flag.NewFlagSet("tools", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 	fs.StringVar(&dbPath, "db", dbPath, "DuckDB ledger path")
 	fs.IntVar(&limit, "limit", limit, "maximum tool calls to print")
+	fs.StringVar(&hubKey, "hub-key", os.Getenv("EF_HUB_KEY"), "Ed25519 private key for remote hub authentication")
 	fs.BoolVar(&jsonOut, "json", false, "print tool calls as JSON")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -208,7 +216,7 @@ func runToolsTo(args []string, out io.Writer) error {
 
 	now := time.Now()
 	since := beginningOfDay(now)
-	r, err := report.Open(dbPath, defaultReportDBPath())
+	r, err := report.OpenWithHubKey(dbPath, defaultReportDBPath(), hubKey)
 	if err != nil {
 		return fmt.Errorf("open database: %w", err)
 	}
@@ -233,11 +241,13 @@ func runInspect(args []string) error {
 	var (
 		dbPath = defaultReportDBPath()
 		limit  int
+		hubKey string
 	)
 	fs := flag.NewFlagSet("inspect", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 	fs.StringVar(&dbPath, "db", dbPath, "DuckDB ledger path")
 	fs.IntVar(&limit, "limit", report.DefaultInspectLimit, "maximum matching requests to print")
+	fs.StringVar(&hubKey, "hub-key", os.Getenv("EF_HUB_KEY"), "Ed25519 private key for remote hub authentication")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -248,7 +258,7 @@ func runInspect(args []string) error {
 		return fmt.Errorf("--limit must be positive, got %d", limit)
 	}
 
-	r, err := report.Open(dbPath, defaultReportDBPath())
+	r, err := report.OpenWithHubKey(dbPath, defaultReportDBPath(), hubKey)
 	if err != nil {
 		return fmt.Errorf("open database: %w", err)
 	}
@@ -300,7 +310,7 @@ func runServe(args []string) error {
 			}
 		}()
 		forwarder := forward.New(outbox, forward.Config{
-			Address: cfg.HubAddr, Token: cfg.HubToken,
+			Address: cfg.HubAddr, KeyPath: cfg.HubKey,
 			Insecure: cfg.HubInsecure, PollInterval: cfg.ForwardInterval,
 		}, log)
 		forwarder.Start()
@@ -380,9 +390,24 @@ func runHub(args []string) error {
 		return err
 	}
 	if cfg.HubAddr == "" {
-		return errors.New("hub-addr is required (for example --hub-addr 0.0.0.0:9494)")
+		return errors.New("hub-addr is required (for example --hub-addr 127.0.0.1:9494 behind a TLS proxy)")
+	}
+	if cfg.HubAuthorizedKeys == "" {
+		return errors.New("hub-authorized-keys is required")
+	}
+	if len(cfg.HubToken) < 4 {
+		return errors.New("hub-token must contain at least 4 characters")
+	}
+	if err := requireLoopbackAddr(cfg.HubQuackAddr); err != nil {
+		return fmt.Errorf("hub-quack-addr: %w", err)
 	}
 	log := newLogger(os.Stdout)
+	allowed, err := hubauth.LoadAuthorizedKeys(cfg.HubAuthorizedKeys)
+	if err != nil {
+		return err
+	}
+	auth := hubauth.NewHubWithLogger(allowed, log)
+	defer auth.Close()
 	st, err := store.Open(cfg.DBPath)
 	if err != nil {
 		return fmt.Errorf("open hub ledger: %w", err)
@@ -391,17 +416,91 @@ func runHub(args []string) error {
 	if err := runRetention(st, cfg, log); err != nil {
 		return err
 	}
-	server, err := st.StartQuack(context.Background(), cfg.HubAddr, cfg.HubToken, true)
+	server, err := st.StartQuackAuthenticated(context.Background(), cfg.HubQuackAddr, cfg.HubToken, auth.ValidateSession)
 	if err != nil {
 		return err
 	}
-	log.Info("hub Quack endpoint ready", "uri", server.URI, "url", server.URL)
+	log.Info("hub internal Quack endpoint ready", "uri", server.URI, "url", server.URL)
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })
 	if cfg.UIEnabled {
 		mux.Handle("/ui/", ui.New(report.New(st), log))
 	}
-	return runHTTPServer(cfg.Addr, mux, cfg.ShutdownTimeout, log, "excursion-funnel hub serving")
+	upstream, err := url.Parse("http://" + cfg.HubQuackAddr)
+	if err != nil {
+		return fmt.Errorf("parse hub Quack address: %w", err)
+	}
+	quackProxy := httputil.NewSingleHostReverseProxy(upstream)
+	authHandler := auth.Handler()
+	gateway := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if (r.Method == http.MethodGet && r.URL.Path == "/api/v1/auth/challenge") || (r.Method == http.MethodPost && r.URL.Path == "/api/v1/auth") {
+			authHandler.ServeHTTP(w, r)
+			return
+		}
+		quackProxy.ServeHTTP(w, r)
+	})
+	return runHubServers(cfg.Addr, mux, cfg.HubAddr, gateway, cfg.ShutdownTimeout, log)
+}
+
+func requireLoopbackAddr(address string) error {
+	host, _, err := net.SplitHostPort(address)
+	if err != nil {
+		return fmt.Errorf("must be host:port: %w", err)
+	}
+	addrs, err := net.LookupIP(host)
+	if err != nil {
+		return fmt.Errorf("resolve address: %w", err)
+	}
+	if len(addrs) == 0 {
+		return errors.New("does not resolve")
+	}
+	for _, ip := range addrs {
+		if !ip.IsLoopback() {
+			return errors.New("must resolve only to loopback")
+		}
+	}
+	return nil
+}
+
+func runHubServers(dashboardAddr string, dashboard http.Handler, gatewayAddr string, gateway http.Handler, timeout time.Duration, log *slog.Logger) error {
+	dashboardListener, err := net.Listen("tcp", dashboardAddr)
+	if err != nil {
+		return err
+	}
+	defer dashboardListener.Close()
+	gatewayListener, err := net.Listen("tcp", gatewayAddr)
+	if err != nil {
+		return err
+	}
+	defer gatewayListener.Close()
+	dashboardServer := &http.Server{Handler: dashboard, ReadHeaderTimeout: 15 * time.Second}
+	gatewayServer := &http.Server{Handler: gateway, ReadHeaderTimeout: 15 * time.Second}
+	errCh := make(chan error, 2)
+	go func() {
+		log.Info("excursion-funnel hub dashboard serving", "addr", dashboardListener.Addr())
+		if err := dashboardServer.Serve(dashboardListener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			errCh <- err
+		}
+	}()
+	go func() {
+		log.Info("excursion-funnel hub gateway serving", "addr", gatewayListener.Addr())
+		if err := gatewayServer.Serve(gatewayListener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			errCh <- err
+		}
+	}()
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	select {
+	case err := <-errCh:
+		return err
+	case <-ctx.Done():
+		log.Info("shutdown signal received, draining")
+	}
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	err1 := dashboardServer.Shutdown(shutdownCtx)
+	err2 := gatewayServer.Shutdown(shutdownCtx)
+	return errors.Join(err1, err2)
 }
 
 func runMigrate(args []string) error {
@@ -443,7 +542,7 @@ func runRetention(st *store.Store, cfg config.Config, log *slog.Logger) error {
 
 func remoteDashboard(cfg config.Config, log *slog.Logger) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		rep, err := report.OpenRemote(cfg.HubAddr, cfg.HubToken, cfg.HubInsecure)
+		rep, err := report.OpenHubRemote(cfg.HubAddr, cfg.HubKey, cfg.HubInsecure)
 		if err != nil {
 			log.Warn("hub dashboard unavailable", "err", err)
 			http.Error(w, "hub unavailable; usage is still being spooled", http.StatusServiceUnavailable)
@@ -481,7 +580,7 @@ func usage() {
 
 Usage:
   ef serve [--addr host:port] [--openai-upstream url] [--anthropic-upstream url] [--db path] [--ui-enabled]
-  ef hub --hub-addr host:port --hub-token token [--addr dashboard-host:port] [--db path]
+  ef hub --hub-addr host:port --hub-authorized-keys path --hub-token token [--hub-quack-addr 127.0.0.1:9495] [--addr dashboard-host:port] [--db path]
   ef migrate [--from usage.sqlite] [--db usage.duckdb]
   ef usage today [--db path] [--group-by model|provider|day|source|directory|git_branch] [--directory path] [--branch name] [--json]
   ef usage --since YYYY-MM-DD [--until YYYY-MM-DD] [--group-by model|provider|day|source|directory|git_branch] [--directory path] [--branch name] [--db path] [--json]
@@ -500,7 +599,8 @@ Dashboard: http://<addr>/ui/ (read-only usage view; enabled by default, disable 
 
 Env overrides: EF_ADDR, EF_OPENAI_UPSTREAM,
                EF_ANTHROPIC_UPSTREAM, EF_DB, EF_OUTBOX,
-               EF_QUACK_ADDR, EF_HUB_ADDR, EF_HUB_TOKEN,
+               EF_QUACK_ADDR, EF_HUB_ADDR, EF_HUB_KEY,
+               EF_HUB_TOKEN, EF_HUB_AUTHORIZED_KEYS, EF_HUB_QUACK_ADDR,
                EF_HUB_INSECURE, EF_SOURCE,
                EF_REQUEST_TIMEOUT, EF_IDLE_TIMEOUT,
                EF_SHUTDOWN_TIMEOUT,

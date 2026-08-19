@@ -29,20 +29,23 @@ type Config struct {
 	OpenAIUpstream    string // root for Codex / Responses API, e.g. https://chatgpt.com/backend-api/codex
 	AnthropicUpstream string // root for Claude Code / Messages API, e.g. https://api.anthropic.com
 
-	DBPath          string
-	OutboxPath      string
-	QuackAddr       string
-	HubAddr         string
-	HubToken        string
-	HubInsecure     bool
-	Source          string
-	Host            string
-	ShutdownTimeout time.Duration
-	RequestTimeout  time.Duration
-	IdleTimeout     time.Duration
-	RetentionDays   int
-	UIEnabled       bool
-	WebProxyEnabled bool
+	DBPath            string
+	OutboxPath        string
+	QuackAddr         string
+	HubAddr           string
+	HubToken          string
+	HubAuthorizedKeys string
+	HubQuackAddr      string
+	HubKey            string
+	HubInsecure       bool
+	Source            string
+	Host              string
+	ShutdownTimeout   time.Duration
+	RequestTimeout    time.Duration
+	IdleTimeout       time.Duration
+	RetentionDays     int
+	UIEnabled         bool
+	WebProxyEnabled   bool
 
 	Queue             queue.Config
 	QueueDrainTimeout time.Duration
@@ -70,6 +73,7 @@ func Default() Config {
 		DBPath:            defaultDBPath(),
 		OutboxPath:        defaultOutboxPath(),
 		QuackAddr:         "127.0.0.1:9494",
+		HubQuackAddr:      "127.0.0.1:9495",
 		HubInsecure:       false,
 		Source:            defaultSource(),
 		Host:              defaultHost(),
@@ -114,6 +118,15 @@ func Load(args []string) (Config, error) {
 	}
 	if v := os.Getenv("EF_HUB_TOKEN"); v != "" {
 		cfg.HubToken = v
+	}
+	if v := os.Getenv("EF_HUB_AUTHORIZED_KEYS"); v != "" {
+		cfg.HubAuthorizedKeys = v
+	}
+	if v := os.Getenv("EF_HUB_QUACK_ADDR"); v != "" {
+		cfg.HubQuackAddr = v
+	}
+	if v := os.Getenv("EF_HUB_KEY"); v != "" {
+		cfg.HubKey = v
 	}
 	if v := os.Getenv("EF_HUB_INSECURE"); v != "" {
 		insecure, err := strconv.ParseBool(v)
@@ -191,8 +204,11 @@ func Load(args []string) (Config, error) {
 	fs.StringVar(&cfg.DBPath, "db", cfg.DBPath, "DuckDB ledger path")
 	fs.StringVar(&cfg.OutboxPath, "outbox", cfg.OutboxPath, "distributed-mode SQLite outbox path")
 	fs.StringVar(&cfg.QuackAddr, "quack-addr", cfg.QuackAddr, "standalone Quack listen address (host:port)")
-	fs.StringVar(&cfg.HubAddr, "hub-addr", cfg.HubAddr, "hub Quack address (enables distributed mode for serve)")
-	fs.StringVar(&cfg.HubToken, "hub-token", cfg.HubToken, "hub Quack authentication token")
+	fs.StringVar(&cfg.HubAddr, "hub-addr", cfg.HubAddr, "hub gateway address (enables distributed mode for serve)")
+	fs.StringVar(&cfg.HubToken, "hub-token", cfg.HubToken, "hub-internal Quack token (hub only)")
+	fs.StringVar(&cfg.HubAuthorizedKeys, "hub-authorized-keys", cfg.HubAuthorizedKeys, "OpenSSH authorized_keys file for remote hub clients (hub only)")
+	fs.StringVar(&cfg.HubQuackAddr, "hub-quack-addr", cfg.HubQuackAddr, "loopback Quack listener for the hub (hub only)")
+	fs.StringVar(&cfg.HubKey, "hub-key", cfg.HubKey, "preferred Ed25519 private key for hub authentication")
 	fs.BoolVar(&cfg.HubInsecure, "insecure", cfg.HubInsecure, "allow an unencrypted connection to the hub; TLS is required unless this is set")
 	fs.StringVar(&cfg.Source, "source", cfg.Source, "developer or machine identity stamped on usage")
 	fs.DurationVar(&cfg.ShutdownTimeout, "shutdown-timeout", cfg.ShutdownTimeout, "graceful HTTP shutdown timeout")
@@ -212,9 +228,6 @@ func Load(args []string) (Config, error) {
 	}
 	if cfg.ShutdownTimeout < 0 || cfg.RequestTimeout < 0 || cfg.IdleTimeout < 0 || cfg.QueueDrainTimeout < 0 || cfg.ForwardInterval < 0 {
 		return Config{}, fmt.Errorf("timeouts must be >= 0")
-	}
-	if cfg.HubAddr != "" && len(cfg.HubToken) < 4 {
-		return Config{}, fmt.Errorf("hub-token must contain at least 4 characters when hub-addr is set")
 	}
 	if cfg.Source == "" {
 		return Config{}, fmt.Errorf("source must not be empty")

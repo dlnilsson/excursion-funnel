@@ -2,14 +2,25 @@ package forward
 
 import (
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
+	"encoding/pem"
 	"io"
 	"log/slog"
 	"net"
+	"net/http"
+	"net/http/httptest"
+	"net/http/httputil"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
+	"golang.org/x/crypto/ssh"
+
+	"github.com/dlnilsson/excursion-funnel/internal/hubauth"
 	"github.com/dlnilsson/excursion-funnel/internal/queue"
 	"github.com/dlnilsson/excursion-funnel/internal/store"
 )
@@ -22,7 +33,7 @@ func TestForwarderDrainsOutboxToQuackHub(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	address := listener.Addr().String()
+	internalAddress := listener.Addr().String()
 	_ = listener.Close()
 
 	hub, err := store.Open(filepath.Join(t.TempDir(), "hub.duckdb"))
@@ -30,7 +41,39 @@ func TestForwarderDrainsOutboxToQuackHub(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = hub.Close() })
-	if _, err := hub.StartQuack(t.Context(), address, "test-token", false); err != nil {
+	pub, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sshPub, err := ssh.NewPublicKey(pub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	auth := hubauth.NewHub(map[string]string{strings.TrimSpace(string(ssh.MarshalAuthorizedKey(sshPub))): ssh.FingerprintSHA256(sshPub)})
+	t.Cleanup(auth.Close)
+	if _, err := hub.StartQuackAuthenticated(t.Context(), internalAddress, "internal-token", auth.ValidateSession); err != nil {
+		t.Fatal(err)
+	}
+	upstream, err := url.Parse("http://" + internalAddress)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxy := httputil.NewSingleHostReverseProxy(upstream)
+	authHandler := auth.Handler()
+	gateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if (r.Method == http.MethodGet && r.URL.Path == "/api/v1/auth/challenge") || (r.Method == http.MethodPost && r.URL.Path == "/api/v1/auth") {
+			authHandler.ServeHTTP(w, r)
+			return
+		}
+		proxy.ServeHTTP(w, r)
+	}))
+	t.Cleanup(gateway.Close)
+	block, err := ssh.MarshalPrivateKey(private, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyPath := filepath.Join(t.TempDir(), "id_ed25519")
+	if err := os.WriteFile(keyPath, pem.EncodeToMemory(block), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	outbox, err := store.OpenOutbox(filepath.Join(t.TempDir(), "outbox.sqlite"))
@@ -47,7 +90,7 @@ func TestForwarderDrainsOutboxToQuackHub(t *testing.T) {
 		t.Fatal(err)
 	}
 	forwarder := New(outbox, Config{
-		Address: address, Token: "test-token", PollInterval: 10 * time.Millisecond,
+		Address: strings.TrimPrefix(gateway.URL, "http://"), KeyPath: keyPath, Insecure: true, PollInterval: 10 * time.Millisecond,
 	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	forwarder.Start()
 	t.Cleanup(forwarder.Stop)

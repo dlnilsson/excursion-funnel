@@ -155,6 +155,17 @@ func configuredTimeZone() string {
 // StartQuack starts a server in this DuckDB instance. The connection remains
 // reserved until StopQuack or Close so the serving session stays alive.
 func (s *Store) StartQuack(ctx context.Context, address, token string, allowOtherHostname bool) (QuackServer, error) {
+	return s.startQuack(ctx, address, token, allowOtherHostname, nil)
+}
+
+// StartQuackAuthenticated installs a session-only Quack authentication macro
+// before starting the listener. serverToken remains a server configuration
+// value, but is intentionally ignored by the callback.
+func (s *Store) StartQuackAuthenticated(ctx context.Context, address, serverToken string, validate func(string) bool) (QuackServer, error) {
+	return s.startQuack(ctx, address, serverToken, false, validate)
+}
+
+func (s *Store) startQuack(ctx context.Context, address, token string, allowOtherHostname bool, validate func(string) bool) (QuackServer, error) {
 	if s.quackConn != nil {
 		return QuackServer{}, errors.New("Quack server already started")
 	}
@@ -169,6 +180,19 @@ func (s *Store) StartQuack(ctx context.Context, address, token string, allowOthe
 	for _, query := range []string{"INSTALL quack", "LOAD quack"} {
 		if _, err := conn.ExecContext(ctx, query); err != nil {
 			return closeOnError(fmt.Errorf("%s: %w (first use requires network access)", strings.ToLower(query), err))
+		}
+	}
+	if validate != nil {
+		if err := duckdb.RegisterScalarUDF(conn, "ef_hub_validate_session", &sessionValidator{validate: validate}); err != nil {
+			return closeOnError(fmt.Errorf("register hub session validator: %w", err))
+		}
+		for _, query := range []string{
+			"CREATE OR REPLACE MACRO ef_hub_authenticate(server_token, client_token, client_info) AS ef_hub_validate_session(client_token)",
+			"SET quack_authentication_function = 'ef_hub_authenticate'",
+		} {
+			if _, err := conn.ExecContext(ctx, query); err != nil {
+				return closeOnError(fmt.Errorf("configure hub Quack authentication: %w", err))
+			}
 		}
 	}
 	uri := QuackURI(address)
@@ -194,6 +218,23 @@ func (s *Store) StartQuack(ctx context.Context, address, token string, allowOthe
 	s.quackConn = conn
 	s.quackURI = uri
 	return server, nil
+}
+
+type sessionValidator struct{ validate func(string) bool }
+
+func (*sessionValidator) Config() duckdb.ScalarFuncConfig {
+	input, _ := duckdb.NewTypeInfo(duckdb.TYPE_VARCHAR)
+	result, _ := duckdb.NewTypeInfo(duckdb.TYPE_BOOLEAN)
+	return duckdb.ScalarFuncConfig{InputTypeInfos: []duckdb.TypeInfo{input}, ResultTypeInfo: result, Volatile: true}
+}
+func (v *sessionValidator) Executor() duckdb.ScalarFuncExecutor {
+	return duckdb.ScalarFuncExecutor{RowExecutor: func(values []driver.Value) (any, error) {
+		if len(values) != 1 {
+			return false, nil
+		}
+		token, _ := values[0].(string)
+		return v.validate(token), nil
+	}}
 }
 
 // StopQuack stops the listener, if one is running.

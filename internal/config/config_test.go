@@ -105,6 +105,19 @@ func TestLoad_HubInsecureEnvAndFlagPrecedence(t *testing.T) {
 	}
 }
 
+func TestLoad_HubKeySettings(t *testing.T) {
+	t.Setenv("EF_HUB_AUTHORIZED_KEYS", "C:/keys/authorized_keys")
+	t.Setenv("EF_HUB_QUACK_ADDR", "127.0.0.1:9555")
+	t.Setenv("EF_HUB_KEY", "C:/keys/id_ed25519")
+	cfg, err := Load(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.HubAuthorizedKeys != "C:/keys/authorized_keys" || cfg.HubQuackAddr != "127.0.0.1:9555" || cfg.HubKey != "C:/keys/id_ed25519" {
+		t.Fatalf("hub key settings = %+v", cfg)
+	}
+}
+
 func TestLoad_WebProxyDefaultsToFalse(t *testing.T) {
 	cfg, err := Load(nil)
 	if err != nil {
