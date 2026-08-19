@@ -52,7 +52,7 @@ different path.
 ## 2. Run it locally (standalone mode)
 
 This is the normal way to use it on your own computer. One command starts
-everything — the proxy, the database, and the web dashboard:
+everything: the proxy, the database, and the web dashboard:
 
 ```sh
 ef serve
@@ -95,8 +95,19 @@ Edit `$HOME/.claude/settings.json`:
 }
 ```
 
-That's it — Claude Code and Codex will now route through Excursion Funnel, and
+That's it. Claude Code and Codex will now route through Excursion Funnel, and
 every request gets logged.
+
+To ensure the correct client is recorded when using Claude Code (agent client protocol, ACP) through an
+editor such as Zed, set a custom environment variable like this:
+```json
+"claude-acp": {
+  "env": {
+    "ANTHROPIC_CUSTOM_HEADERS": "Originator: zed-acp"
+  },
+  "type": "registry"
+},
+```
 
 ## 3. Run it for a team (remote / hub mode)
 
@@ -129,12 +140,12 @@ ef serve
 grouped by person in the dashboard.
 
 If the hub is temporarily unreachable, your local `ef serve` keeps working
-fine — it saves requests to a local file first and forwards them to the hub in
+fine. It saves requests to a local file first and forwards them to the hub in
 the background once it's reachable again. Nothing gets lost or duplicated.
 
 > [!CAUTION]
 > The hub's token grants full database access, so connections to it are
-> encrypted (TLS) by default — the client above will refuse to connect until
+> encrypted (TLS) by default. The client above will refuse to connect until
 > the hub is actually reachable over TLS (e.g. behind a reverse proxy, or
 > using something like `tailscale serve --tls-terminated-tcp`). Only skip
 > that requirement on a network you already trust completely (e.g. a
@@ -145,7 +156,7 @@ the background once it's reachable again. Nothing gets lost or duplicated.
 ## 4. Running it permanently (as a background service)
 
 `ef serve` (and `ef hub`) are designed to run continuously in the background,
-the same way you'd run a small server — not something you launch by hand each
+the same way you'd run a small server, not something you launch by hand each
 time. Set it up once using your OS's service manager so it survives reboots
 and restarts automatically if it crashes.
 
@@ -199,7 +210,7 @@ Register-ScheduledTask `
   -Force
 ```
 
-After this, `ef serve` will quietly run in the background from now on — you
+After this, `ef serve` will quietly run in the background from now on. You
 don't need to open a terminal for it again. You only need to interact with the
 CLI when you want to *look at* your usage (see below).
 
@@ -244,7 +255,7 @@ keep a backup of your `usage.sqlite` file, then run:
 ef migrate --from /path/to/usage.sqlite --db /path/to/usage.duckdb
 ```
 
-This is safe to run more than once — it won't create duplicate entries.
+This is safe to run more than once, and it won't create duplicate entries.
 
 ## Settings reference
 
