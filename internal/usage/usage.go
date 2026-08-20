@@ -33,10 +33,9 @@ func Run(ctx context.Context, out io.Writer, opts Options) error {
 		return ErrTodayWithRange
 	}
 
-	now := time.Now()
 	var since, until time.Time
-	if opts.Today || (opts.Since == "" && opts.Until == "") {
-		since = reporting.BeginningOfDay(now)
+	if opts.Today {
+		since = reporting.BeginningOfDay(time.Now())
 		until = since.AddDate(0, 0, 1)
 	} else {
 		var err error

@@ -40,6 +40,5 @@ func Run(ctx context.Context, out io.Writer, opts Options) error {
 	if opts.JSON {
 		return printJSON(out, rows)
 	}
-	printRows(out, rows)
-	return nil
+	return printRows(out, rows)
 }

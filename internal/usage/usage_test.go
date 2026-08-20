@@ -79,6 +79,49 @@ func TestTodayJSON(t *testing.T) {
 	}
 }
 
+func TestNoRangeIsAllTime(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "usage.duckdb")
+	st, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	input, total := int64(10), int64(10)
+	today := reporting.BeginningOfDay(time.Now()).Add(time.Hour)
+	if err := st.InsertBatch(t.Context(), []queue.UsageEvent{
+		{RequestID: "today", StartedAt: today, Method: "POST", Path: "/v1/responses", UpstreamURL: "/", ModelReported: "gpt-test", Usage: queue.Usage{InputTokens: &input, TotalTokens: &total}},
+		{RequestID: "yesterday", StartedAt: today.AddDate(0, 0, -1), Method: "POST", Path: "/v1/responses", UpstreamURL: "/", ModelReported: "gpt-test", Usage: queue.Usage{InputTokens: &input, TotalTokens: &total}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	var output bytes.Buffer
+	if err := Run(t.Context(), &output, Options{JSON: true, GroupBy: "model", Connection: connection(t, dbPath)}); err != nil {
+		t.Fatal(err)
+	}
+	var rows []report.SummaryRow
+	if err := json.Unmarshal(output.Bytes(), &rows); err != nil {
+		t.Fatalf("invalid JSON: %v: %s", err, output.String())
+	}
+	if len(rows) != 1 || rows[0].Requests != 2 || rows[0].Total != 20 {
+		t.Fatalf("rows = %+v, want both today's and yesterday's usage", rows)
+	}
+
+	output.Reset()
+	if err := Run(t.Context(), &output, Options{Today: true, JSON: true, GroupBy: "model", Connection: connection(t, dbPath)}); err != nil {
+		t.Fatal(err)
+	}
+	rows = nil
+	if err := json.Unmarshal(output.Bytes(), &rows); err != nil {
+		t.Fatalf("invalid JSON: %v: %s", err, output.String())
+	}
+	if len(rows) != 1 || rows[0].Requests != 1 || rows[0].Total != 10 {
+		t.Fatalf("rows = %+v, want only today's usage", rows)
+	}
+}
+
 func TestProjectContextGroupingAndFilters(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "usage.duckdb")
 	st, err := store.Open(dbPath)

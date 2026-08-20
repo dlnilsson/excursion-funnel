@@ -5,6 +5,7 @@ go 1.25.0
 require (
 	charm.land/fang/v2 v2.0.1
 	charm.land/lipgloss/v2 v2.0.1
+	github.com/charmbracelet/x/term v0.2.2
 	github.com/duckdb/duckdb-go/v2 v2.10505.0
 	github.com/pires/go-proxyproto v0.15.0
 	github.com/spf13/cobra v1.10.2
@@ -19,7 +20,6 @@ require (
 	github.com/charmbracelet/ultraviolet v0.0.0-20260205113103-524a6607adb8 // indirect
 	github.com/charmbracelet/x/ansi v0.11.6 // indirect
 	github.com/charmbracelet/x/exp/charmtone v0.0.0-20250603201427-c31516f43444 // indirect
-	github.com/charmbracelet/x/term v0.2.2 // indirect
 	github.com/charmbracelet/x/termios v0.1.1 // indirect
 	github.com/charmbracelet/x/windows v0.2.2 // indirect
 	github.com/clipperhouse/displaywidth v0.11.0 // indirect
