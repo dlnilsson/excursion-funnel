@@ -121,13 +121,6 @@ type Options struct {
 	WebProxyEnabled bool
 }
 
-// New builds a Proxy from the two upstream roots (e.g. https://api.openai.com
-// and https://api.anthropic.com). sink receives one UsageEvent per completed
-// request.
-func New(openaiUpstream, anthropicUpstream string, sink EventSink, log *slog.Logger) (*Proxy, error) {
-	return NewWithOptions(openaiUpstream, anthropicUpstream, sink, log, Options{})
-}
-
 // NewWithOptions builds a Proxy with explicit timeout settings.
 func NewWithOptions(openaiUpstream, anthropicUpstream string, sink EventSink, log *slog.Logger, opts Options) (*Proxy, error) {
 	oa, err := url.Parse(openaiUpstream)

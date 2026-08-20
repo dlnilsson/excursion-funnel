@@ -49,7 +49,7 @@ func TestForwarderDrainsOutboxToQuackHub(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	auth := hubauth.NewHub(map[string]string{strings.TrimSpace(string(ssh.MarshalAuthorizedKey(sshPub))): ssh.FingerprintSHA256(sshPub)})
+	auth := hubauth.NewHubWithLogger(map[string]string{strings.TrimSpace(string(ssh.MarshalAuthorizedKey(sshPub))): ssh.FingerprintSHA256(sshPub)}, nil)
 	t.Cleanup(auth.Close)
 	if _, err := hub.StartQuackAuthenticated(t.Context(), internalAddress, "internal-token", auth.ValidateSession); err != nil {
 		t.Fatal(err)

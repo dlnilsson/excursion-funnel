@@ -108,11 +108,6 @@ func nextLine(data []byte) ([]byte, []byte) {
 	return data, nil
 }
 
-// NewHub creates a hub authenticator. Close stops its cleanup goroutine.
-func NewHub(allowed map[string]string) *Hub {
-	return NewHubWithLogger(allowed, nil)
-}
-
 // NewHubWithLogger creates a hub authenticator that logs login outcomes.
 func NewHubWithLogger(allowed map[string]string, log *slog.Logger) *Hub {
 	h := &Hub{allowed: allowed, challenges: make(map[string]challengeState), sessions: make(map[[32]byte]sessionState), failures: make(map[string][]time.Time), log: log, stop: make(chan struct{})}

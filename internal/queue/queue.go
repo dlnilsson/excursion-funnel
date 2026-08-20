@@ -83,10 +83,10 @@ func NewWebRequest(id, name string, input []byte) WebRequest {
 // IsWebToolName reports whether name is a provider web-tool call that belongs
 // in the web-request ledger — OpenAI's web_search_call, Claude Code's
 // client-side WebSearch/WebFetch, and Anthropic's server-side web_search/
-// web_fetch — as opposed to generic forward-proxy traffic (GET/POST/…) built
-// by NewHTTPWebRequest. It is the single Go-side gate the store uses to decide
-// what to persist; the anthropic/openai parsers and the report read query
-// mirror the same web-tool name set.
+// web_fetch — as opposed to generic forward-proxy traffic (GET/POST/…). It is
+// the single Go-side gate the store uses to decide what to persist; the
+// anthropic/openai parsers and the report read query mirror the same web-tool
+// name set.
 func IsWebToolName(name string) bool {
 	n := strings.ToLower(name)
 	return strings.Contains(n, "web_search") ||
@@ -94,20 +94,6 @@ func IsWebToolName(name string) bool {
 		strings.Contains(n, "web_fetch") ||
 		strings.Contains(n, "web-fetch") ||
 		strings.Contains(n, "webfetch")
-}
-
-// NewHTTPWebRequest is retained for compatibility with callers that construct
-// generic web activity, but the store intentionally does not persist it: its
-// method-named record is not a web-tool call, so IsWebToolName rejects it.
-func NewHTTPWebRequest(id, method, rawURL, domain string, status int) WebRequest {
-	input, _ := json.Marshal(map[string]any{
-		"source": "http_proxy",
-		"method": method,
-		"url":    rawURL,
-		"domain": domain,
-		"status": status,
-	})
-	return NewWebRequest(id, method, input)
 }
 
 func firstWebString(fields map[string]any, keys ...string) string {

@@ -35,7 +35,7 @@ func TestAuthorizedKeyLoginAndSession(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	hub := NewHub(allowed)
+	hub := NewHubWithLogger(allowed, nil)
 	t.Cleanup(hub.Close)
 	server := httptest.NewServer(hub.Handler())
 	t.Cleanup(server.Close)
@@ -134,7 +134,7 @@ func TestClientUsesExplicitOpenSSHKeyAndCachesCredential(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	hub := NewHub(map[string]string{canonicalKey(sshPub): ssh.FingerprintSHA256(sshPub)})
+	hub := NewHubWithLogger(map[string]string{canonicalKey(sshPub): ssh.FingerprintSHA256(sshPub)}, nil)
 	t.Cleanup(hub.Close)
 	server := httptest.NewServer(hub.Handler())
 	t.Cleanup(server.Close)

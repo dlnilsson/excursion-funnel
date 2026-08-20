@@ -948,9 +948,9 @@ func streamingUpstream(t *testing.T, wantPath, body string) *httptest.Server {
 
 func newTestProxy(t *testing.T, openaiUpstream, anthropicUpstream string, sink EventSink) *Proxy {
 	t.Helper()
-	p, err := New(openaiUpstream, anthropicUpstream, sink, slog.New(slog.DiscardHandler))
+	p, err := NewWithOptions(openaiUpstream, anthropicUpstream, sink, slog.New(slog.DiscardHandler), Options{})
 	if err != nil {
-		t.Fatalf("New() error = %v", err)
+		t.Fatalf("NewWithOptions() error = %v", err)
 	}
 	return p
 }

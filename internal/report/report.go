@@ -19,28 +19,17 @@ import (
 	"github.com/dlnilsson/excursion-funnel/internal/store"
 )
 
-// Reporter owns a Store only when created by Open or OpenRemote.
+// Reporter owns a Store only when created by an Open* function.
 type Reporter struct {
 	store *store.Store
 	owned bool
 }
 
-// Open first tries the configured daemon/hub through Quack, then falls back to
-// a read-only file open when a standalone daemon is not running. A configured
-// hub never falls back to a stale local ledger.
-//
-// Quack is only consulted when path equals defaultPath — the caller's
-// unmodified default ledger location. An explicit --db override naming a
-// different file always reads that file directly, even if some daemon
-// happens to be reachable on the default Quack port: otherwise a user
-// pointing at a specific archived ledger would silently get a different
-// (whichever daemon's) ledger instead, with no indication their flag was
-// ignored.
-func Open(path, defaultPath string) (*Reporter, error) {
-	return OpenWithHubKey(path, defaultPath, os.Getenv("EF_HUB_KEY"))
-}
-
-// OpenWithHubKey is Open with an optional explicit hub key for CLI callers.
+// OpenWithHubKey first tries the configured daemon/hub through Quack, then
+// falls back to a read-only file open when a standalone daemon is not running.
+// A configured hub never falls back to a stale local ledger. Quack is only
+// consulted when path equals defaultPath; an explicit --db override naming a
+// different file always reads that file directly.
 func OpenWithHubKey(path, defaultPath, hubKey string) (*Reporter, error) {
 	if hub := os.Getenv("EF_HUB_ADDR"); hub != "" {
 		insecure := false
@@ -327,10 +316,6 @@ func (r *Reporter) Inspect(ctx context.Context, id string, limit int) ([]Inspect
 	return r.queryInspectRows(ctx, "WHERE id = ? OR response_id = ?", "started_at DESC", limit, id, id)
 }
 
-func (r *Reporter) RecentErrors(ctx context.Context, limit int) ([]InspectRow, error) {
-	return r.queryInspectRows(ctx, "WHERE error_type IS NOT NULL", "started_at DESC", limit)
-}
-
 func (r *Reporter) RecentErrorsWithin(ctx context.Context, since, until time.Time, limit int) ([]InspectRow, error) {
 	where, args := timeRange("started_at", since, until)
 	if where == "" {
@@ -339,10 +324,6 @@ func (r *Reporter) RecentErrorsWithin(ctx context.Context, since, until time.Tim
 		where += " AND error_type IS NOT NULL"
 	}
 	return r.queryInspectRows(ctx, where, "started_at DESC", limit, args...)
-}
-
-func (r *Reporter) RecentToolCalls(ctx context.Context, limit int) ([]ToolCallRow, error) {
-	return r.ToolCalls(ctx, ToolCallOptions{Limit: limit})
 }
 
 // ToolCalls reports the most recent tool calls across requests. It deliberately

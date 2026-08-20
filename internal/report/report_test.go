@@ -13,7 +13,7 @@ import (
 )
 
 // TestMain clears hub/quack env vars so a developer's shell (e.g. one already
-// configured to point `ef` at a live team hub) can't redirect Open() calls in
+// configured to point `ef` at a live team hub) can't redirect reporter opens in
 // this package's tests away from the temp databases they set up.
 func TestMain(m *testing.M) {
 	for _, key := range []string{"EF_HUB_ADDR", "EF_HUB_TOKEN", "EF_HUB_INSECURE", "EF_QUACK_ADDR"} {
@@ -25,9 +25,9 @@ func TestMain(m *testing.M) {
 func TestSummary_GroupsByProviderAndModel(t *testing.T) {
 	dbPath := seedReportDB(t)
 
-	r, err := Open(dbPath, "")
+	r, err := OpenWithHubKey(dbPath, "", "")
 	if err != nil {
-		t.Fatalf("Open() error = %v", err)
+		t.Fatalf("OpenWithHubKey() error = %v", err)
 	}
 	t.Cleanup(func() { _ = r.Close() })
 
@@ -62,7 +62,7 @@ func TestSummary_GroupsByProviderAndModel(t *testing.T) {
 
 func TestSummary_GroupsBySourceWithMixedProviderInput(t *testing.T) {
 	dbPath := seedReportDB(t)
-	r, err := Open(dbPath, "")
+	r, err := OpenWithHubKey(dbPath, "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -190,9 +190,9 @@ func TestHistorical_ReadsLiveDuckDBAggregates(t *testing.T) {
 func TestInspect_FindsByResponseID(t *testing.T) {
 	dbPath := seedReportDB(t)
 
-	r, err := Open(dbPath, "")
+	r, err := OpenWithHubKey(dbPath, "", "")
 	if err != nil {
-		t.Fatalf("Open() error = %v", err)
+		t.Fatalf("OpenWithHubKey() error = %v", err)
 	}
 	t.Cleanup(func() { _ = r.Close() })
 
@@ -243,9 +243,9 @@ func TestInspect_IncludesToolCalls(t *testing.T) {
 		t.Fatalf("Close() error = %v", err)
 	}
 
-	r, err := Open(dbPath, "")
+	r, err := OpenWithHubKey(dbPath, "", "")
 	if err != nil {
-		t.Fatalf("Open() error = %v", err)
+		t.Fatalf("OpenWithHubKey() error = %v", err)
 	}
 	t.Cleanup(func() { _ = r.Close() })
 	rows, err := r.Inspect(t.Context(), "resp-tool", 1)
@@ -306,15 +306,15 @@ func TestToolCalls_OrdersAcrossRequestsAndExpandsWindow(t *testing.T) {
 		t.Fatalf("Close() error = %v", err)
 	}
 
-	r, err := Open(dbPath, "")
+	r, err := OpenWithHubKey(dbPath, "", "")
 	if err != nil {
-		t.Fatalf("Open() error = %v", err)
+		t.Fatalf("OpenWithHubKey() error = %v", err)
 	}
 	t.Cleanup(func() { _ = r.Close() })
 
-	rows, err := r.RecentToolCalls(t.Context(), 3)
+	rows, err := r.ToolCalls(t.Context(), ToolCallOptions{Limit: 3})
 	if err != nil {
-		t.Fatalf("RecentToolCalls() error = %v", err)
+		t.Fatalf("ToolCalls() error = %v", err)
 	}
 	if len(rows) != 3 {
 		t.Fatalf("rows len = %d, want 3: %+v", len(rows), rows)
@@ -358,9 +358,9 @@ func TestInspect_IncludesWebRequests(t *testing.T) {
 		t.Fatalf("Close() error = %v", err)
 	}
 
-	r, err := Open(dbPath, "")
+	r, err := OpenWithHubKey(dbPath, "", "")
 	if err != nil {
-		t.Fatalf("Open() error = %v", err)
+		t.Fatalf("OpenWithHubKey() error = %v", err)
 	}
 	t.Cleanup(func() { _ = r.Close() })
 	rows, err := r.Inspect(t.Context(), "resp-web", 1)
@@ -412,9 +412,9 @@ func TestWebRequests_IncludesBothProviders(t *testing.T) {
 		t.Fatalf("Close() error = %v", err)
 	}
 
-	r, err := Open(dbPath, "")
+	r, err := OpenWithHubKey(dbPath, "", "")
 	if err != nil {
-		t.Fatalf("Open() error = %v", err)
+		t.Fatalf("OpenWithHubKey() error = %v", err)
 	}
 	t.Cleanup(func() { _ = r.Close() })
 	rows, err := r.WebRequests(t.Context(), ToolCallOptions{})
@@ -464,37 +464,37 @@ func TestNew_ReusesExistingStore(t *testing.T) {
 
 // A reporting command must not conjure the ledger it claims to read: a
 // mistyped --db has to surface as an error, not as "no usage rows".
-func TestOpen_MissingDatabaseErrorsWithoutCreatingIt(t *testing.T) {
+func TestOpenWithHubKey_MissingDatabaseErrorsWithoutCreatingIt(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "nested", "usage.duckdb")
 
-	r, err := Open(dbPath, "")
+	r, err := OpenWithHubKey(dbPath, "", "")
 	if err == nil {
 		_ = r.Close()
-		t.Fatal("Open() error = nil, want a missing-database error")
+		t.Fatal("OpenWithHubKey() error = nil, want a missing-database error")
 	}
 	if !strings.Contains(err.Error(), dbPath) {
-		t.Fatalf("Open() error = %v, want it to name the path %s", err, dbPath)
+		t.Fatalf("OpenWithHubKey() error = %v, want it to name the path %s", err, dbPath)
 	}
 	if _, statErr := os.Stat(dbPath); !errors.Is(statErr, os.ErrNotExist) {
-		t.Fatalf("Open() created %s; stat err = %v, want not-exist", dbPath, statErr)
+		t.Fatalf("OpenWithHubKey() created %s; stat err = %v, want not-exist", dbPath, statErr)
 	}
 	if _, statErr := os.Stat(filepath.Dir(dbPath)); !errors.Is(statErr, os.ErrNotExist) {
-		t.Fatalf("Open() created the parent directory of %s", dbPath)
+		t.Fatalf("OpenWithHubKey() created the parent directory of %s", dbPath)
 	}
 }
 
 func TestRecentErrors_FiltersToErrorRows(t *testing.T) {
 	dbPath := seedReportDBWithError(t)
 
-	r, err := Open(dbPath, "")
+	r, err := OpenWithHubKey(dbPath, "", "")
 	if err != nil {
-		t.Fatalf("Open() error = %v", err)
+		t.Fatalf("OpenWithHubKey() error = %v", err)
 	}
 	t.Cleanup(func() { _ = r.Close() })
 
-	rows, err := r.RecentErrors(t.Context(), 20)
+	rows, err := r.RecentErrorsWithin(t.Context(), time.Time{}, time.Time{}, 20)
 	if err != nil {
-		t.Fatalf("RecentErrors() error = %v", err)
+		t.Fatalf("RecentErrorsWithin() error = %v", err)
 	}
 	if len(rows) != 1 {
 		t.Fatalf("rows len = %d, want 1: %+v", len(rows), rows)
