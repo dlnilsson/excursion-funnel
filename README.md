@@ -244,6 +244,10 @@ to start anything extra. Run `ef --help` or `ef <command> --help` for the full
 generated command reference. Shell completion scripts are available through
 `ef completion <bash|fish|powershell|zsh>`.
 
+Use `ef -v` or `ef --version` for the short build version. The detailed
+`ef version` command also reports the DuckDB library and Go driver versions.
+To generate a manpage, run `ef man > ef.1`.
+
 ```sh
 # Today's usage, one row per model (this is the default).
 ef usage today

@@ -3,20 +3,15 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"os"
-	"os/signal"
 	"syscall"
 
+	"github.com/dlnilsson/excursion-funnel/cmd/execute"
 	"github.com/dlnilsson/excursion-funnel/cmd/root"
-	"github.com/dlnilsson/excursion-funnel/internal/safelog"
 )
 
 func main() {
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-	if err := root.New().ExecuteContext(ctx); err != nil {
-		fmt.Fprintf(os.Stderr, "error: %s\n", safelog.Redact(err.Error()))
+	if err := execute.Execute(context.Background(), root.New(), os.Interrupt, syscall.SIGTERM); err != nil {
 		os.Exit(1)
 	}
 }
