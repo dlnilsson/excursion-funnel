@@ -1,7 +1,6 @@
 package store
 
 import (
-	"database/sql"
 	"errors"
 	"net"
 	"os"
@@ -243,123 +242,6 @@ func TestOutboxRoundTripAndAcknowledge(t *testing.T) {
 	count, err := outbox.Count(t.Context())
 	if err != nil || count != 0 {
 		t.Fatalf("count=%d err=%v", count, err)
-	}
-}
-
-func TestMigrateSQLiteLegacySchema(t *testing.T) {
-	dir := t.TempDir()
-	sqlitePath := filepath.Join(dir, "usage.sqlite")
-	duckPath := filepath.Join(dir, "usage.duckdb")
-	legacy, err := sql.Open("sqlite", sqlitePath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, err = legacy.Exec(`CREATE TABLE requests (
-  id TEXT PRIMARY KEY,
-  response_id TEXT,
-  started_at TEXT NOT NULL,
-  completed_at TEXT,
-  duration_ms INTEGER,
-  method TEXT NOT NULL,
-  path TEXT NOT NULL,
-  upstream_url TEXT NOT NULL,
-  model_requested TEXT,
-  model_reported TEXT,
-  stream INTEGER NOT NULL DEFAULT 0,
-  http_status INTEGER,
-  upstream_request_id TEXT,
-  user_agent TEXT,
-  codex_session_id TEXT,
-  error_type TEXT,
-  error_message TEXT,
-  input_tokens INTEGER,
-  cached_input_tokens INTEGER,
-  cache_write_tokens INTEGER,
-  output_tokens INTEGER,
-  reasoning_tokens INTEGER,
-  total_tokens INTEGER,
-  usage_json TEXT,
-  created_at TEXT NOT NULL
-);
-CREATE TABLE tool_calls (
-  request_id TEXT NOT NULL,
-  ordinal INTEGER NOT NULL,
-  tool_call_id TEXT,
-  name TEXT NOT NULL,
-  command TEXT,
-  description TEXT,
-  arguments_json TEXT,
-  PRIMARY KEY (request_id, ordinal)
-);
-CREATE TABLE web_requests (
-  request_id TEXT NOT NULL,
-  ordinal INTEGER NOT NULL,
-  web_request_id TEXT,
-  name TEXT NOT NULL,
-  query TEXT,
-  url TEXT,
-  domain TEXT,
-  arguments_json TEXT,
-  PRIMARY KEY (request_id, ordinal)
-);
-INSERT INTO requests (
-  id, response_id, started_at, completed_at, duration_ms, method, path,
-  upstream_url, model_requested, model_reported, stream, http_status,
-  input_tokens, output_tokens, total_tokens, created_at
-) VALUES (
-  'legacy-1', 'resp-1', '2026-08-17T12:34:56+02:00',
-  '2026-08-17T12:35:00+02:00', 4000, 'POST', '/v1/responses',
-  'https://example.test', 'gpt-5', 'gpt-5', 1, 200, 10, 4, 14,
-  '2026-08-17T12:35:00+02:00'
-);
-INSERT INTO tool_calls VALUES ('legacy-1', 0, 'call-1', 'shell', 'echo ok', NULL, '{}');
-INSERT INTO web_requests VALUES ('legacy-1', 0, 'web-1', 'web_search_call', 'DuckDB migration', NULL, NULL, '{}');`)
-	if err != nil {
-		_ = legacy.Close()
-		t.Fatal(err)
-	}
-	if err := legacy.Close(); err != nil {
-		t.Fatal(err)
-	}
-
-	// A rerun is intentionally harmless so migration can be resumed safely.
-	for range 2 {
-		if err := MigrateSQLite(t.Context(), duckPath, sqlitePath); err != nil {
-			t.Fatal(err)
-		}
-	}
-	st, err := OpenExisting(duckPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = st.Close() })
-	var (
-		source                                       string
-		started                                      time.Time
-		originator, clientName, directory, gitBranch sql.NullString
-	)
-	if err := st.db.QueryRow(`SELECT source, started_at, originator, client_name, directory, git_branch
-FROM requests WHERE id = 'legacy-1'`).Scan(&source, &started, &originator, &clientName, &directory, &gitBranch); err != nil {
-		t.Fatal(err)
-	}
-	if source != "legacy" || !started.Equal(time.Date(2026, 8, 17, 10, 34, 56, 0, time.UTC)) {
-		t.Fatalf("source=%q started=%s", source, started)
-	}
-	if originator.Valid || clientName.Valid || directory.Valid || gitBranch.Valid {
-		t.Fatalf("missing legacy fields should migrate as NULL: originator=%+v client=%+v directory=%+v git_branch=%+v", originator, clientName, directory, gitBranch)
-	}
-	var requestCount, toolCount, webCount int
-	if err := st.db.QueryRow(`SELECT COUNT(*) FROM requests`).Scan(&requestCount); err != nil {
-		t.Fatal(err)
-	}
-	if err := st.db.QueryRow(`SELECT COUNT(*) FROM tool_calls`).Scan(&toolCount); err != nil {
-		t.Fatal(err)
-	}
-	if err := st.db.QueryRow(`SELECT COUNT(*) FROM web_requests`).Scan(&webCount); err != nil {
-		t.Fatal(err)
-	}
-	if requestCount != 1 || toolCount != 1 || webCount != 1 {
-		t.Fatalf("migrated counts: requests=%d tools=%d web=%d", requestCount, toolCount, webCount)
 	}
 }
 

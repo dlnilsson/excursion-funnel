@@ -285,18 +285,6 @@ If you've set `EF_HUB_ADDR` (team mode), these commands always read from the
 shared hub, so you always see live, up-to-date numbers rather than a
 possibly-stale local copy.
 
-## Moving from an older SQLite-based version
-
-If you used an older version of this tool that stored data in SQLite, you can
-import that history into the new DuckDB database. Stop the old process first,
-keep a backup of your `usage.sqlite` file, then run:
-
-```sh
-ef migrate --from /path/to/usage.sqlite --db /path/to/usage.duckdb
-```
-
-This is safe to run more than once, and it won't create duplicate entries.
-
 ## Settings reference
 
 You can configure things with either a command-line flag or an environment

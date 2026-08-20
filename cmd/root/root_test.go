@@ -34,10 +34,13 @@ func TestRoot_RegistersCommandsAndCompletion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"serve", "hub", "version", "migrate", "usage", "tools", "inspect", "completion"} {
+	for _, name := range []string{"serve", "hub", "version", "usage", "tools", "inspect", "completion"} {
 		if !strings.Contains(stdout, name) {
 			t.Fatalf("help missing command %q:\n%s", name, stdout)
 		}
+	}
+	if strings.Contains(stdout, "migrate") {
+		t.Fatalf("help unexpectedly lists removed migrate command:\n%s", stdout)
 	}
 }
 
