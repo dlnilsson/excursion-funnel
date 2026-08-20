@@ -240,7 +240,9 @@ CLI when you want to *look at* your usage (see below).
 
 These are the commands you run day-to-day to actually look at the numbers.
 They talk to whichever `ef serve`/`ef hub` is already running; you don't need
-to start anything extra.
+to start anything extra. Run `ef --help` or `ef <command> --help` for the full
+generated command reference. Shell completion scripts are available through
+`ef completion <bash|fish|powershell|zsh>`.
 
 ```sh
 # Today's usage, one row per model (this is the default).

@@ -6,7 +6,6 @@
 package config
 
 import (
-	"flag"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -89,9 +88,10 @@ func Default() Config {
 	}
 }
 
-// Load resolves configuration from defaults, then environment, then flags.
-// args is everything after the `serve` subcommand (i.e. os.Args[2:]).
-func Load(args []string) (Config, error) {
+// LoadEnvironment resolves configuration from defaults, then environment.
+// Command-line callers should use Flags.Resolve to apply explicitly changed
+// flags on top without exposing environment-provided secrets as help defaults.
+func LoadEnvironment() (Config, error) {
 	cfg := Default()
 
 	// Environment layer.
@@ -195,45 +195,21 @@ func Load(args []string) (Config, error) {
 		cfg.WebProxyEnabled = enabled
 	}
 
-	// Flag layer — seeded from post-env values so a flag only wins when set,
-	// preserving flags > env > defaults.
-	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
-	fs.StringVar(&cfg.Addr, "addr", cfg.Addr, "listen address (host:port)")
-	fs.StringVar(&cfg.OpenAIUpstream, "openai-upstream", cfg.OpenAIUpstream, "OpenAI upstream root (Codex / Responses API)")
-	fs.StringVar(&cfg.AnthropicUpstream, "anthropic-upstream", cfg.AnthropicUpstream, "Anthropic upstream root (Claude Code / Messages API)")
-	fs.StringVar(&cfg.DBPath, "db", cfg.DBPath, "DuckDB ledger path")
-	fs.StringVar(&cfg.OutboxPath, "outbox", cfg.OutboxPath, "distributed-mode SQLite outbox path")
-	fs.StringVar(&cfg.QuackAddr, "quack-addr", cfg.QuackAddr, "standalone Quack listen address (host:port)")
-	fs.StringVar(&cfg.HubAddr, "hub-addr", cfg.HubAddr, "hub gateway address (enables distributed mode for serve)")
-	fs.StringVar(&cfg.HubToken, "hub-token", cfg.HubToken, "hub-internal Quack token (hub only)")
-	fs.StringVar(&cfg.HubAuthorizedKeys, "hub-authorized-keys", cfg.HubAuthorizedKeys, "OpenSSH authorized_keys file for remote hub clients (hub only)")
-	fs.StringVar(&cfg.HubQuackAddr, "hub-quack-addr", cfg.HubQuackAddr, "loopback Quack listener for the hub (hub only)")
-	fs.StringVar(&cfg.HubKey, "hub-key", cfg.HubKey, "preferred Ed25519 private key for hub authentication")
-	fs.BoolVar(&cfg.HubInsecure, "insecure", cfg.HubInsecure, "allow an unencrypted connection to the hub; TLS is required unless this is set")
-	fs.StringVar(&cfg.Source, "source", cfg.Source, "developer or machine identity stamped on usage")
-	fs.DurationVar(&cfg.ShutdownTimeout, "shutdown-timeout", cfg.ShutdownTimeout, "graceful HTTP shutdown timeout")
-	fs.DurationVar(&cfg.RequestTimeout, "request-timeout", cfg.RequestTimeout, "upstream response-header timeout (0 disables)")
-	fs.DurationVar(&cfg.IdleTimeout, "idle-timeout", cfg.IdleTimeout, "idle client-write timeout while proxying responses (0 disables)")
-	fs.DurationVar(&cfg.QueueDrainTimeout, "queue-drain-timeout", cfg.QueueDrainTimeout, "usage queue drain timeout during shutdown")
-	fs.DurationVar(&cfg.ForwardInterval, "forward-interval", cfg.ForwardInterval, "distributed outbox polling interval")
-	fs.IntVar(&cfg.RetentionDays, "retention-days", cfg.RetentionDays, "delete usage rows older than this many days at startup (0 disables)")
-	fs.BoolVar(&cfg.UIEnabled, "ui-enabled", cfg.UIEnabled, "serve the read-only dashboard at /ui/")
-	fs.BoolVar(&cfg.WebProxyEnabled, "web-proxy", cfg.WebProxyEnabled, "act as a forward/CONNECT proxy for non-provider web traffic (opt-in; default off)")
-	if err := fs.Parse(args); err != nil {
-		return Config{}, err
-	}
+	return cfg, nil
+}
 
+// Validate checks configuration shared by the serve and hub commands.
+func Validate(cfg Config) error {
 	if cfg.RetentionDays < 0 {
-		return Config{}, fmt.Errorf("retention-days must be >= 0")
+		return fmt.Errorf("retention-days must be >= 0")
 	}
 	if cfg.ShutdownTimeout < 0 || cfg.RequestTimeout < 0 || cfg.IdleTimeout < 0 || cfg.QueueDrainTimeout < 0 || cfg.ForwardInterval < 0 {
-		return Config{}, fmt.Errorf("timeouts must be >= 0")
+		return fmt.Errorf("timeouts must be >= 0")
 	}
 	if cfg.Source == "" {
-		return Config{}, fmt.Errorf("source must not be empty")
+		return fmt.Errorf("source must not be empty")
 	}
-
-	return cfg, nil
+	return nil
 }
 
 // defaultDBPath mirrors the Windows-first layout from the plan:
