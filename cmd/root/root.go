@@ -4,6 +4,7 @@ package root
 import (
 	"github.com/dlnilsson/excursion-funnel/cmd/hub"
 	"github.com/dlnilsson/excursion-funnel/cmd/inspect"
+	"github.com/dlnilsson/excursion-funnel/cmd/requests"
 	"github.com/dlnilsson/excursion-funnel/cmd/serve"
 	"github.com/dlnilsson/excursion-funnel/cmd/tools"
 	"github.com/dlnilsson/excursion-funnel/cmd/usage"
@@ -30,6 +31,7 @@ daemon through Quack, then fall back to a read-only DuckDB file when possible.`,
 		versioncmd.New(),
 		usage.New(),
 		tools.New(),
+		requests.New(),
 		inspect.New(),
 	)
 	return cmd

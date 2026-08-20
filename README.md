@@ -249,7 +249,10 @@ Use `ef -v` or `ef --version` for the short build version. The detailed
 To generate a manpage, run `ef man > ef.1`.
 
 ```sh
-# Today's usage, one row per model (this is the default).
+# All recorded usage, one row per model (the default grouping).
+ef usage
+
+# Today's usage only.
 ef usage today
 
 # Usage per provider, for a specific date range.
@@ -270,6 +273,13 @@ ef usage today --directory /work/backend --branch feature-x
 
 # Tool-call stats for today.
 ef tools today
+
+# Web requests made by models today (the same records shown in /ui).
+ef requests today
+ef requests today --limit 100 --json
+
+# Historical web requests in an inclusive date range.
+ef requests --since 2026-08-01 --until 2026-08-07
 
 # Look up details of one specific request or response by its ID.
 ef inspect resp_abc123
