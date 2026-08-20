@@ -4,6 +4,7 @@ go 1.25.0
 
 require (
 	charm.land/fang/v2 v2.0.1
+	charm.land/lipgloss/v2 v2.0.1
 	github.com/duckdb/duckdb-go/v2 v2.10505.0
 	github.com/pires/go-proxyproto v0.15.0
 	github.com/spf13/cobra v1.10.2
@@ -13,7 +14,6 @@ require (
 )
 
 require (
-	charm.land/lipgloss/v2 v2.0.1 // indirect
 	github.com/apache/arrow-go/v18 v18.5.1 // indirect
 	github.com/charmbracelet/colorprofile v0.4.2 // indirect
 	github.com/charmbracelet/ultraviolet v0.0.0-20260205113103-524a6607adb8 // indirect

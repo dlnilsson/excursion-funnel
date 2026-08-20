@@ -80,8 +80,7 @@ func Run(ctx context.Context, out io.Writer, opts Options) error {
 	if opts.JSON {
 		return printJSON(out, rows)
 	}
-	printRows(out, rows, opts.GroupBy)
-	return nil
+	return printRows(out, rows, opts.GroupBy)
 }
 
 func parseDate(value string) (time.Time, error) {
