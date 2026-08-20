@@ -56,19 +56,21 @@ const copyBufferSize = 32 * 1024
 
 var copyBufferPool = sync.Pool{
 	New: func() any {
-		return make([]byte, copyBufferSize)
+		buf := make([]byte, copyBufferSize)
+		return &buf
 	},
 }
 
 func getCopyBuffer() []byte {
-	return copyBufferPool.Get().([]byte)
+	return *copyBufferPool.Get().(*[]byte)
 }
 
 func putCopyBuffer(buf []byte) {
 	if cap(buf) != copyBufferSize {
 		return
 	}
-	copyBufferPool.Put(buf[:copyBufferSize])
+	buf = buf[:copyBufferSize]
+	copyBufferPool.Put(&buf)
 }
 
 // EventSink receives a terminal UsageEvent once a proxied request completes.

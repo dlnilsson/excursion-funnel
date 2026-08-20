@@ -40,30 +40,6 @@ func (s *recordingSink) one(t *testing.T) queue.UsageEvent {
 	return s.events[0]
 }
 
-// waitOne polls for exactly one recorded event, tolerating the asynchronous
-// teardown of a CONNECT tunnel that records its event after both copy loops
-// drain.
-func (s *recordingSink) waitOne(t *testing.T, timeout time.Duration) queue.UsageEvent {
-	t.Helper()
-	deadline := time.Now().Add(timeout)
-	for {
-		s.mu.Lock()
-		n := len(s.events)
-		var ev queue.UsageEvent
-		if n == 1 {
-			ev = s.events[0]
-		}
-		s.mu.Unlock()
-		if n == 1 {
-			return ev
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("events len = %d after %s, want 1", n, timeout)
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-}
-
 func TestProxy_OpenAIStreamingUsage(t *testing.T) {
 	body := `event: response.completed
 data: {"type":"response.completed","response":{"id":"resp_stream","model":"gpt-5.3-codex","status":"completed","usage":{"input_tokens":11,"output_tokens":7,"total_tokens":18}}}

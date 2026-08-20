@@ -167,7 +167,7 @@ func (s *Store) StartQuackAuthenticated(ctx context.Context, address, serverToke
 
 func (s *Store) startQuack(ctx context.Context, address, token string, allowOtherHostname bool, validate func(string) bool) (QuackServer, error) {
 	if s.quackConn != nil {
-		return QuackServer{}, errors.New("Quack server already started")
+		return QuackServer{}, errors.New("quack server already started")
 	}
 	conn, err := s.db.Conn(ctx)
 	if err != nil {
