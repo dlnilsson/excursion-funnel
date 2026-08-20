@@ -42,6 +42,11 @@ func TestHandleIndex_ServesDashboardHTML(t *testing.T) {
 		`/ui/assets/vendor/github.min.css`,
 		`id="history-stacked-chart"`,
 		`id="model-activity-table"`,
+		`fetch("/ui/api/kpis")`,
+		`p50 latency`,
+		`Error rate today`,
+		`Cache-hit rate`,
+		`Peak concurrency`,
 		`data-table-key="summary"`,
 		`data-table-key="sources"`,
 		`data-table-key="directories"`,
@@ -78,6 +83,52 @@ func TestHandleIndex_ServesDashboardHTML(t *testing.T) {
 		if strings.Contains(rec.Body.String(), removed) {
 			t.Fatalf("body contains removed branch UI marker %q", removed)
 		}
+	}
+}
+
+func TestHandleKPIs_ReturnsTodaysOperationalMetrics(t *testing.T) {
+	h := newTestHandler(t)
+
+	rec := doRequest(t, h, http.MethodGet, "/ui/api/kpis")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	var stats report.KPIStats
+	if err := json.Unmarshal(rec.Body.Bytes(), &stats); err != nil {
+		t.Fatalf("decode body: %v: %s", err, rec.Body.String())
+	}
+	if stats.Requests != 2 || stats.Errors != 1 {
+		t.Fatalf("request/error counts = %d/%d, want 2/1: %+v", stats.Requests, stats.Errors, stats)
+	}
+	if stats.LatencyP50MS == nil || *stats.LatencyP50MS != 1000 || stats.LatencyP95MS == nil || *stats.LatencyP95MS != 1000 {
+		t.Fatalf("latencies = %v/%v, want 1000/1000", stats.LatencyP50MS, stats.LatencyP95MS)
+	}
+	if stats.CacheEligibleRequests != 1 || stats.CacheHitRequests != 0 || stats.PeakConcurrency != 1 {
+		t.Fatalf("cache/concurrency stats = %+v, want eligible=1 hits=0 peak=1", stats)
+	}
+}
+
+func TestHandleKPIs_EmptyLedgerReturnsNullLatenciesAndZeroCounts(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "usage.duckdb"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	h := New(report.New(st), slog.New(slog.DiscardHandler))
+
+	rec := doRequest(t, h, http.MethodGet, "/ui/api/kpis")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	var stats report.KPIStats
+	if err := json.Unmarshal(rec.Body.Bytes(), &stats); err != nil {
+		t.Fatalf("decode body: %v: %s", err, rec.Body.String())
+	}
+	if stats.LatencyP50MS != nil || stats.LatencyP95MS != nil || stats.Requests != 0 || stats.PeakConcurrency != 0 {
+		t.Fatalf("empty KPI response = %+v, want nil latencies and zero counts", stats)
+	}
+	if !strings.Contains(rec.Body.String(), `"LatencyP50MS":null`) || !strings.Contains(rec.Body.String(), `"LatencyP95MS":null`) {
+		t.Fatalf("empty KPI JSON does not preserve null latencies: %s", rec.Body.String())
 	}
 }
 
@@ -381,7 +432,7 @@ func TestHandleModelHistory_ReturnsLiveAggregates(t *testing.T) {
 func TestSummaryAndErrors_RejectNonGET(t *testing.T) {
 	h := newTestHandler(t)
 
-	for _, path := range []string{"/ui/api/summary", "/ui/api/history", "/ui/api/history/models", "/ui/api/errors", "/ui/api/tools"} {
+	for _, path := range []string{"/ui/api/kpis", "/ui/api/summary", "/ui/api/history", "/ui/api/history/models", "/ui/api/errors", "/ui/api/tools"} {
 		rec := doRequest(t, h, http.MethodPost, path)
 		if rec.Code != http.StatusMethodNotAllowed {
 			t.Fatalf("POST %s status = %d, want 405", path, rec.Code)

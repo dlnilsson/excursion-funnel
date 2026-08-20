@@ -2,6 +2,8 @@ package report
 
 import (
 	"errors"
+	"math"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -57,6 +59,171 @@ func TestSummary_GroupsByProviderAndModel(t *testing.T) {
 	}
 	if anthropic.Requests != 1 || anthropic.Input != 7 || anthropic.CacheWrite != 3 || anthropic.Output != 11 {
 		t.Fatalf("anthropic totals = %+v, want requests=1 input=7 cache_write=3 output=11", anthropic)
+	}
+}
+
+func TestKPIs_ComputesOperationalMetrics(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "usage.duckdb"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+
+	since := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
+	until := since.AddDate(0, 0, 1)
+	input := int64(100)
+	cached := int64(25)
+	zero := int64(0)
+	events := []queue.UsageEvent{
+		{
+			RequestID: "cross-midnight", StartedAt: since.Add(-time.Minute), CompletedAt: since.Add(2 * time.Minute),
+			Method: "POST", Path: "/v1/responses", UpstreamURL: "/", HTTPStatus: 200,
+		},
+		{
+			RequestID: "success-cache", StartedAt: since.Add(time.Minute), CompletedAt: since.Add(time.Minute + 100*time.Millisecond),
+			Method: "POST", Path: "/v1/responses", UpstreamURL: "/", HTTPStatus: 200,
+			Usage: queue.Usage{InputTokens: &input, CachedInputTokens: &cached},
+		},
+		{
+			RequestID: "success-no-cache", StartedAt: since.Add(2 * time.Minute), CompletedAt: since.Add(2*time.Minute + 300*time.Millisecond),
+			Method: "POST", Path: "/v1/messages", UpstreamURL: "/", HTTPStatus: 200,
+			Usage: queue.Usage{InputTokens: &input, CachedInputTokens: &zero},
+		},
+		{
+			RequestID: "http-error", StartedAt: since.Add(3 * time.Minute), CompletedAt: since.Add(3*time.Minute + 10*time.Millisecond),
+			Method: "POST", Path: "/v1/responses", UpstreamURL: "/", HTTPStatus: 429,
+		},
+		{
+			RequestID: "stream-error", StartedAt: since.Add(4 * time.Minute), CompletedAt: since.Add(4*time.Minute + 500*time.Millisecond),
+			Method: "POST", Path: "/v1/messages", UpstreamURL: "/", HTTPStatus: 200, ErrorType: "overloaded_error",
+			Usage: queue.Usage{InputTokens: &input, CachedInputTokens: &cached},
+		},
+		{
+			RequestID: "health", StartedAt: since, CompletedAt: since.Add(10 * time.Minute),
+			Method: "GET", Path: "/health", UpstreamURL: "/", HTTPStatus: 500,
+		},
+		{
+			RequestID: "tomorrow", StartedAt: until, CompletedAt: until.Add(time.Second),
+			Method: "POST", Path: "/v1/responses", UpstreamURL: "/", HTTPStatus: 500,
+		},
+	}
+	if err := st.InsertBatch(t.Context(), events); err != nil {
+		t.Fatal(err)
+	}
+
+	stats, err := New(st).KPIs(t.Context(), KPIOptions{
+		Since: since, Until: until, KnownProvidersOnly: true,
+	})
+	if err != nil {
+		t.Fatalf("KPIs() error = %v", err)
+	}
+	if stats.Requests != 4 || stats.Errors != 2 {
+		t.Fatalf("request/error counts = %d/%d, want 4/2: %+v", stats.Requests, stats.Errors, stats)
+	}
+	if stats.CacheEligibleRequests != 3 || stats.CacheHitRequests != 2 {
+		t.Fatalf("cache counts = %d/%d, want eligible=3 hits=2: %+v", stats.CacheEligibleRequests, stats.CacheHitRequests, stats)
+	}
+	if stats.LatencyP50MS == nil || math.Abs(*stats.LatencyP50MS-200) > 0.001 {
+		t.Fatalf("LatencyP50MS = %v, want 200", stats.LatencyP50MS)
+	}
+	if stats.LatencyP95MS == nil || math.Abs(*stats.LatencyP95MS-290) > 0.001 {
+		t.Fatalf("LatencyP95MS = %v, want 290", stats.LatencyP95MS)
+	}
+	if stats.PeakConcurrency != 2 {
+		t.Fatalf("PeakConcurrency = %d, want 2", stats.PeakConcurrency)
+	}
+}
+
+func TestKPIs_EmptyLedgerUsesNullLatenciesAndZeroCounts(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "usage.duckdb"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+
+	stats, err := New(st).KPIs(t.Context(), KPIOptions{KnownProvidersOnly: true})
+	if err != nil {
+		t.Fatalf("KPIs() error = %v", err)
+	}
+	if stats.LatencyP50MS != nil || stats.LatencyP95MS != nil || stats.Requests != 0 || stats.Errors != 0 ||
+		stats.CacheEligibleRequests != 0 || stats.CacheHitRequests != 0 || stats.PeakConcurrency != 0 {
+		t.Fatalf("empty KPI stats = %+v, want zero counts and nil latencies", stats)
+	}
+}
+
+func TestKPIs_PeakConcurrencyTreatsIntervalsAsHalfOpen(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "usage.duckdb"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+
+	since := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
+	events := []queue.UsageEvent{
+		{RequestID: "first", StartedAt: since.Add(-time.Minute), CompletedAt: since.Add(time.Minute), Method: "POST", Path: "/v1/responses", UpstreamURL: "/"},
+		{RequestID: "second", StartedAt: since.Add(time.Minute), CompletedAt: since.Add(2 * time.Minute), Method: "POST", Path: "/v1/responses", UpstreamURL: "/"},
+		{RequestID: "zero", StartedAt: since.Add(2 * time.Minute), CompletedAt: since.Add(2 * time.Minute), Method: "POST", Path: "/v1/responses", UpstreamURL: "/"},
+	}
+	if err := st.InsertBatch(t.Context(), events); err != nil {
+		t.Fatal(err)
+	}
+
+	stats, err := New(st).KPIs(t.Context(), KPIOptions{
+		Since: since, Until: since.AddDate(0, 0, 1), KnownProvidersOnly: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.PeakConcurrency != 1 {
+		t.Fatalf("PeakConcurrency = %d, want 1 for touching half-open intervals", stats.PeakConcurrency)
+	}
+}
+
+func TestKPIs_QuackRemote(t *testing.T) {
+	if os.Getenv("EF_TEST_QUACK") == "" {
+		t.Skip("set EF_TEST_QUACK=1 to run the extension integration test")
+	}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	address := listener.Addr().String()
+	_ = listener.Close()
+
+	ledger, err := store.Open(filepath.Join(t.TempDir(), "usage.duckdb"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ledger.Close() })
+	if _, err := ledger.StartQuack(t.Context(), address, "test-token", false); err != nil {
+		t.Fatal(err)
+	}
+
+	started := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+	input := int64(100)
+	cached := int64(50)
+	if err := ledger.InsertBatch(t.Context(), []queue.UsageEvent{{
+		RequestID: "remote-kpi", StartedAt: started, CompletedAt: started.Add(time.Second),
+		Method: "POST", Path: "/v1/responses", UpstreamURL: "/", HTTPStatus: 200,
+		Usage: queue.Usage{InputTokens: &input, CachedInputTokens: &cached},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+
+	rep, err := OpenRemote(address, "test-token", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = rep.Close() })
+	stats, err := rep.KPIs(t.Context(), KPIOptions{
+		Since: started.Add(-time.Hour), Until: started.Add(time.Hour), KnownProvidersOnly: true,
+	})
+	if err != nil {
+		t.Fatalf("remote KPIs() error = %v", err)
+	}
+	if stats.Requests != 1 || stats.CacheHitRequests != 1 || stats.PeakConcurrency != 1 ||
+		stats.LatencyP50MS == nil || *stats.LatencyP50MS != 1000 {
+		t.Fatalf("remote KPI stats = %+v, want one 1000ms cached request at peak 1", stats)
 	}
 }
 

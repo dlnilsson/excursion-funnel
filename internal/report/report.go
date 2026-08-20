@@ -147,6 +147,27 @@ type SummaryRow struct {
 	Total      int64
 }
 
+// KPIOptions controls a dashboard KPI query. Since is inclusive and Until is
+// exclusive, matching the usage-reporting date range semantics.
+type KPIOptions struct {
+	Since              time.Time
+	Until              time.Time
+	KnownProvidersOnly bool
+}
+
+// KPIStats contains the lossless counts and latency values used to render the
+// dashboard's operational KPI cards. Rates are deliberately left to callers
+// so their numerators and denominators remain available for display.
+type KPIStats struct {
+	Requests              int64
+	Errors                int64
+	LatencyP50MS          *float64
+	LatencyP95MS          *float64
+	CacheEligibleRequests int64
+	CacheHitRequests      int64
+	PeakConcurrency       int64
+}
+
 // InspectRow is a detailed request row for the inspect command.
 type InspectRow struct {
 	ID                string
@@ -270,6 +291,119 @@ func (r *Reporter) Summary(ctx context.Context, opts SummaryOptions) ([]SummaryR
 		where = appendWherePredicate(where, predicate)
 	}
 	return r.scanSummary(ctx, buildSummaryQuery(selectGroup, where, groupExpr, orderBy), args...)
+}
+
+// KPIs returns operational request metrics for the selected interval. The
+// aggregate and concurrency inputs are fetched in separate single-table scans
+// so the method also works through a Quack-attached remote catalog.
+func (r *Reporter) KPIs(ctx context.Context, opts KPIOptions) (KPIStats, error) {
+	where, args := timeRange("started_at", opts.Since, opts.Until)
+	if opts.KnownProvidersOnly {
+		where = appendWherePredicate(where, providerSQL("path")+" != 'unknown'")
+	}
+
+	failure := "(COALESCE(error_type, '') != '' OR COALESCE(http_status >= 400, false))"
+	var (
+		stats KPIStats
+		p50   sql.NullFloat64
+		p95   sql.NullFloat64
+	)
+	err := r.store.DB().QueryRowContext(ctx, `SELECT
+  COUNT(*) AS requests,
+  COALESCE(COUNT_IF(`+failure+`), 0) AS errors,
+  quantile_cont(duration_ms, 0.5) FILTER (
+    WHERE duration_ms IS NOT NULL AND NOT `+failure+`
+  ) AS latency_p50_ms,
+  quantile_cont(duration_ms, 0.95) FILTER (
+    WHERE duration_ms IS NOT NULL AND NOT `+failure+`
+  ) AS latency_p95_ms,
+  COALESCE(COUNT_IF(input_tokens IS NOT NULL), 0) AS cache_eligible_requests,
+  COALESCE(COUNT_IF(input_tokens IS NOT NULL AND COALESCE(cached_input_tokens, 0) > 0), 0) AS cache_hit_requests
+FROM requests
+`+where, args...).Scan(
+		&stats.Requests, &stats.Errors, &p50, &p95,
+		&stats.CacheEligibleRequests, &stats.CacheHitRequests,
+	)
+	if err != nil {
+		return KPIStats{}, fmt.Errorf("query KPIs: %w", err)
+	}
+	if p50.Valid {
+		stats.LatencyP50MS = &p50.Float64
+	}
+	if p95.Valid {
+		stats.LatencyP95MS = &p95.Float64
+	}
+
+	peak, err := r.peakConcurrency(ctx, opts)
+	if err != nil {
+		return KPIStats{}, err
+	}
+	stats.PeakConcurrency = peak
+	return stats, nil
+}
+
+func (r *Reporter) peakConcurrency(ctx context.Context, opts KPIOptions) (int64, error) {
+	where := ""
+	var args []any
+	if !opts.Since.IsZero() {
+		where = appendWherePredicate(where, "completed_at > ?")
+		args = append(args, opts.Since)
+	}
+	if !opts.Until.IsZero() {
+		where = appendWherePredicate(where, "started_at < ?")
+		args = append(args, opts.Until)
+	}
+	where = appendWherePredicate(where, "completed_at IS NOT NULL")
+	if opts.KnownProvidersOnly {
+		where = appendWherePredicate(where, providerSQL("path")+" != 'unknown'")
+	}
+
+	rows, err := r.store.DB().QueryContext(ctx, `SELECT started_at, completed_at
+FROM requests
+`+where, args...)
+	if err != nil {
+		return 0, fmt.Errorf("query request intervals for peak concurrency: %w", err)
+	}
+	defer rows.Close()
+
+	deltas := make(map[time.Time]int64)
+	for rows.Next() {
+		var start, end time.Time
+		if err := rows.Scan(&start, &end); err != nil {
+			return 0, fmt.Errorf("scan request interval for peak concurrency: %w", err)
+		}
+		if !opts.Since.IsZero() && start.Before(opts.Since) {
+			start = opts.Since
+		}
+		if !opts.Until.IsZero() && end.After(opts.Until) {
+			end = opts.Until
+		}
+		if !start.Before(end) {
+			continue
+		}
+		// TIMESTAMPTZ values can arrive with different Location pointers even
+		// when they represent the same instant. Normalize before using them as
+		// map keys so touching intervals share one endpoint delta.
+		start = start.UTC()
+		end = end.UTC()
+		deltas[start]++
+		deltas[end]--
+	}
+	if err := rows.Err(); err != nil {
+		return 0, fmt.Errorf("iterate request intervals for peak concurrency: %w", err)
+	}
+
+	times := make([]time.Time, 0, len(deltas))
+	for timestamp := range deltas {
+		times = append(times, timestamp)
+	}
+	sort.Slice(times, func(i, j int) bool { return times[i].Before(times[j]) })
+	var active, peak int64
+	for _, timestamp := range times {
+		active += deltas[timestamp]
+		peak = max(peak, active)
+	}
+	return peak, nil
 }
 
 // HistoricalByModel computes all-time model totals directly from requests.

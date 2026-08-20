@@ -844,7 +844,8 @@ function setHistoryMetric(metric) {
 }
 
 async function load() {
-  const [summary, sources, directories, history, modelHistory, errors, tools, webRequests] = await Promise.all([
+  const [kpis, summary, sources, directories, history, modelHistory, errors, tools, webRequests] = await Promise.all([
+    fetch("/ui/api/kpis").then(r => r.json()),
     fetch("/ui/api/summary").then(r => r.json()),
     fetch("/ui/api/sources").then(r => r.json()),
     fetch("/ui/api/directories").then(r => r.json()),
@@ -854,7 +855,7 @@ async function load() {
     fetch("/ui/api/tools").then(r => r.json()),
     fetch("/ui/api/web-requests").then(r => r.json()),
   ]);
-  renderStats(summary);
+  renderStats(summary, kpis);
   renderSummary(summary);
   renderSources(sources);
   renderDirectories(directories);
@@ -907,6 +908,27 @@ function tokenCell(value) {
   return `<td title="${fullValue}">${formatTokenCount(value)}</td>`;
 }
 
+function formatDurationMS(value) {
+  if (value === null || value === undefined || !Number.isFinite(Number(value))) {
+    return "—";
+  }
+  const milliseconds = Number(value);
+  if (milliseconds < 1000) {
+    return `${Math.round(milliseconds).toLocaleString()} ms`;
+  }
+  if (milliseconds < 60000) {
+    return `${(milliseconds / 1000).toFixed(1)} s`;
+  }
+  return `${(milliseconds / 60000).toFixed(1)} min`;
+}
+
+function formatRate(numerator, denominator) {
+  if (!denominator) {
+    return "—";
+  }
+  return `${(100 * numerator / denominator).toFixed(1)}%`;
+}
+
 // freshInput returns uncached, non-cache-write input — the "input" figure Claude
 // Code's /status shows. Input is normalized differently per provider: Anthropic
 // folds both cache reads and cache writes into Input, whereas OpenAI's
@@ -922,7 +944,7 @@ function freshInput(r) {
   return Math.max(0, fresh);
 }
 
-function renderStats(rows) {
+function renderStats(rows, kpis) {
   // Token totals are kept per provider rather than summed into one figure:
   // Anthropic and Codex are billed and rate-limited separately, so a combined
   // total hides which one is driving usage. Input is normalized server-side to
@@ -938,14 +960,44 @@ function renderStats(rows) {
     byProvider.set(r.Provider, p);
   }
 
-  const cards = [["Requests today", requests]];
+  const cards = [{ label: "Requests today", value: (kpis?.Requests ?? requests).toLocaleString() }];
   for (const [provider, p] of [...byProvider].sort((a, b) => b[1].total - a[1].total)) {
     const share = p.input > 0 ? ` · ${(100 * p.cached / p.input).toFixed(1)}% cached` : "";
-    cards.push([`${providerLabel(provider)} tokens`, `<span title="${p.total.toLocaleString()}">${formatTokenCount(p.total)}</span>`, share]);
+    cards.push({
+      label: `${providerLabel(provider)} tokens`,
+      value: `<span title="${p.total.toLocaleString()}">${formatTokenCount(p.total)}</span>`,
+      sub: share,
+    });
   }
 
+  const p95 = formatDurationMS(kpis?.LatencyP95MS);
+  cards.push({
+    label: "p50 latency",
+    value: formatDurationMS(kpis?.LatencyP50MS),
+    sub: ` · p95 ${p95}`,
+    title: "End-to-end duration for successful known-provider requests started today; this is not time to first token.",
+  });
+  cards.push({
+    label: "Error rate today",
+    value: formatRate(kpis?.Errors || 0, kpis?.Requests || 0),
+    sub: ` · ${(kpis?.Errors || 0).toLocaleString()} of ${(kpis?.Requests || 0).toLocaleString()} requests`,
+    title: "Requests with a recorded provider or proxy error, or an HTTP status of 400 or greater.",
+  });
+  cards.push({
+    label: "Cache-hit rate",
+    value: formatRate(kpis?.CacheHitRequests || 0, kpis?.CacheEligibleRequests || 0),
+    sub: ` · ${(kpis?.CacheHitRequests || 0).toLocaleString()} of ${(kpis?.CacheEligibleRequests || 0).toLocaleString()} token-reported requests`,
+    title: "Requests with reported input tokens where cached input tokens were greater than zero.",
+  });
+  cards.push({
+    label: "Peak concurrency",
+    value: (kpis?.PeakConcurrency || 0).toLocaleString(),
+    sub: " · simultaneous completed requests",
+    title: "Maximum overlap among completed known-provider request intervals today; currently in-flight requests are not yet stored.",
+  });
+
   document.getElementById("stats").innerHTML = cards
-    .map(([label, value, sub]) => `<div class="stat"><div class="value">${value}</div><div class="label">${label}${sub || ""}</div></div>`)
+    .map(card => `<div class="stat"${card.title ? ` title="${escapeHTML(card.title)}"` : ""}><div class="value">${card.value}</div><div class="label">${card.label}${card.sub || ""}</div></div>`)
     .join("");
 }
 

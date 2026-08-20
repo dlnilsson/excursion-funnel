@@ -32,6 +32,7 @@ func New(rep *report.Reporter, log *slog.Logger) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /ui/", handleIndex)
 	mux.Handle("GET /ui/assets/", http.StripPrefix("/ui/assets/", http.FileServerFS(staticAssets)))
+	mux.HandleFunc("GET /ui/api/kpis", handleKPIs(rep, log))
 	mux.HandleFunc("GET /ui/api/summary", handleSummary(rep, log))
 	mux.HandleFunc("GET /ui/api/sources", handleSources(rep, log))
 	mux.HandleFunc("GET /ui/api/directories", handleDirectories(rep, log))
@@ -41,6 +42,23 @@ func New(rep *report.Reporter, log *slog.Logger) http.Handler {
 	mux.HandleFunc("GET /ui/api/tools", handleToolCalls(rep, log))
 	mux.HandleFunc("GET /ui/api/web-requests", handleWebRequests(rep, log))
 	return mux
+}
+
+func handleKPIs(rep *report.Reporter, log *slog.Logger) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		since := beginningOfDay(time.Now())
+		stats, err := rep.KPIs(r.Context(), report.KPIOptions{
+			Since:              since,
+			Until:              since.AddDate(0, 0, 1),
+			KnownProvidersOnly: true,
+		})
+		if err != nil {
+			log.Error("ui: query KPIs", "err", err)
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, stats)
+	}
 }
 
 func handleDirectories(rep *report.Reporter, log *slog.Logger) http.HandlerFunc {
