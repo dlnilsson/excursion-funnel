@@ -31,6 +31,7 @@ import (
 	"github.com/dlnilsson/excursion-funnel/internal/report"
 	"github.com/dlnilsson/excursion-funnel/internal/store"
 	"github.com/dlnilsson/excursion-funnel/internal/ui"
+	"github.com/dlnilsson/excursion-funnel/internal/version"
 	proxyproto "github.com/pires/go-proxyproto"
 )
 
@@ -49,6 +50,11 @@ func main() {
 	case "hub":
 		if err := runHub(os.Args[2:]); err != nil {
 			slog.Error("hub failed", "err", err)
+			os.Exit(1)
+		}
+	case "version":
+		if err := runVersion(os.Args[2:]); err != nil {
+			fmt.Fprintf(os.Stderr, "version: %v\n", err)
 			os.Exit(1)
 		}
 	case "migrate":
@@ -293,6 +299,7 @@ func runServe(args []string) error {
 		return err
 	}
 	log := newLogger(os.Stdout)
+	version.LogStartup(log, "serve", version.Current())
 
 	var (
 		writer    queue.Writer
@@ -406,6 +413,7 @@ func runHub(args []string) error {
 		return fmt.Errorf("hub-quack-addr: %w", err)
 	}
 	log := newLogger(os.Stdout)
+	version.LogStartup(log, "hub", version.Current())
 	allowed, err := hubauth.LoadAuthorizedKeys(cfg.HubAuthorizedKeys)
 	if err != nil {
 		return err
@@ -541,6 +549,10 @@ func runMigrate(args []string) error {
 	return nil
 }
 
+func runVersion(args []string) error {
+	return version.Run(args, os.Stdout)
+}
+
 func runRetention(st *store.Store, cfg config.Config, log *slog.Logger) error {
 	if cfg.RetentionDays <= 0 {
 		return nil
@@ -595,6 +607,7 @@ func usage() {
 	fmt.Fprint(os.Stderr, `ef — local usage-telemetry proxy for Codex and Claude Code
 
 Usage:
+  ef version
   ef serve [--addr host:port] [--openai-upstream url] [--anthropic-upstream url] [--db path] [--ui-enabled]
   ef hub --hub-addr host:port --hub-authorized-keys path --hub-token token [--hub-quack-addr 127.0.0.1:9495] [--addr dashboard-host:port] [--db path]
   ef migrate [--from usage.sqlite] [--db usage.duckdb]

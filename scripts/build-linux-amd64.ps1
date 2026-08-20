@@ -75,7 +75,7 @@ if [ "$(uname -m)" != "x86_64" ]; then
     exit 1
 fi
 
-for tool in go gcc g++; do
+for tool in go gcc g++ git; do
     if ! command -v "$tool" >/dev/null 2>&1; then
         echo "error: $tool is not installed in WSL" >&2
         echo "install Go 1.25+ and run: sudo apt update && sudo apt install build-essential" >&2
@@ -84,12 +84,13 @@ for tool in go gcc g++; do
 done
 
 cd "$repo_root"
+version=$(git rev-parse --short HEAD)
 CGO_ENABLED=1 \
 GOOS=linux \
 GOARCH=amd64 \
 CC=gcc \
 CXX=g++ \
-go build -trimpath -o "$output_path" ./cmd/ef
+go build -trimpath -ldflags "-X github.com/dlnilsson/excursion-funnel/internal/version.Build=$version" -o "$output_path" ./cmd/ef
 '@
 
 Write-Host "Building Linux amd64 binary with WSL..."

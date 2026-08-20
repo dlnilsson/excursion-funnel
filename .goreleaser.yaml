@@ -6,6 +6,8 @@ builds:
   - id: ef
     main: ./cmd/ef
     binary: ef
+    ldflags:
+      - -s -w -X github.com/dlnilsson/excursion-funnel/internal/version.Build={{ .ShortCommit }}
     env:
       - CGO_ENABLED=1
     goos:
