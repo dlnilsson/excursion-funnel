@@ -1,0 +1,11 @@
+{
+  "name": "excursion-funnel-ui-assets",
+  "private": true,
+  "scripts": {
+    "vendor-ui": "node scripts/vendor-ui.mjs"
+  },
+  "devDependencies": {
+    "@highlightjs/cdn-assets": "11.11.1",
+    "chart.js": "4.5.0"
+  }
+}

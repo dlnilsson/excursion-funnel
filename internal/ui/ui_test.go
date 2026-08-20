@@ -32,8 +32,14 @@ func TestHandleIndex_ServesDashboardHTML(t *testing.T) {
 	if strings.Contains(rec.Body.String(), "history-table") {
 		t.Fatalf("body contains history table, want chart canvases")
 	}
+	if strings.Contains(rec.Body.String(), "cdn.jsdelivr.net") {
+		t.Fatalf("body contains CDN dependency: %s", rec.Body.String())
+	}
 	for _, marker := range []string{
-		"https://cdn.jsdelivr.net/npm/chart.js",
+		`/ui/assets/vendor/chart.umd.min.js`,
+		`/ui/assets/vendor/highlight.min.js`,
+		`/ui/assets/vendor/github-dark.min.css`,
+		`/ui/assets/vendor/github.min.css`,
 		`id="history-stacked-chart"`,
 		`id="model-activity-table"`,
 		`data-table-key="summary"`,
@@ -51,7 +57,6 @@ func TestHandleIndex_ServesDashboardHTML(t *testing.T) {
 		`data-table-key="web-requests"`,
 		`id="web-requests-table"`,
 		`fetch("/ui/api/web-requests")`,
-		`https://cdn.jsdelivr.net/npm/highlight.js@11.11.1/lib/common.min.js`,
 		`hljs.highlightElement`,
 		`data-command-index`,
 		`navigator.clipboard`,
@@ -73,6 +78,36 @@ func TestHandleIndex_ServesDashboardHTML(t *testing.T) {
 		if strings.Contains(rec.Body.String(), removed) {
 			t.Fatalf("body contains removed branch UI marker %q", removed)
 		}
+	}
+}
+
+func TestHandleAssets_ServesEmbeddedDependencies(t *testing.T) {
+	h := newTestHandler(t)
+
+	tests := []struct {
+		path        string
+		contentType string
+		marker      string
+	}{
+		{"/ui/assets/vendor/chart.umd.min.js", "javascript", "Chart"},
+		{"/ui/assets/vendor/highlight.min.js", "javascript", "hljs"},
+		{"/ui/assets/vendor/github-dark.min.css", "text/css", ".hljs"},
+		{"/ui/assets/vendor/github.min.css", "text/css", ".hljs"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.path, func(t *testing.T) {
+			rec := doRequest(t, h, http.MethodGet, tt.path)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
+			}
+			if ct := rec.Header().Get("Content-Type"); !strings.Contains(ct, tt.contentType) {
+				t.Fatalf("content-type = %q, want it to contain %q", ct, tt.contentType)
+			}
+			if !strings.Contains(rec.Body.String(), tt.marker) {
+				t.Fatalf("body missing marker %q", tt.marker)
+			}
+		})
 	}
 }
 

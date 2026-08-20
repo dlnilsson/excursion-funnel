@@ -1,3 +1,5 @@
 # Build artifacts
 *.exe
 /dist/
+/node_modules/
+/internal/ui/assets/vendor/

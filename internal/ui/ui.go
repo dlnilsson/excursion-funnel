@@ -5,6 +5,7 @@ package ui
 import (
 	"embed"
 	"encoding/json"
+	"io/fs"
 	"log/slog"
 	"net/http"
 	"time"
@@ -12,7 +13,7 @@ import (
 	"github.com/dlnilsson/excursion-funnel/internal/report"
 )
 
-//go:embed assets/index.html
+//go:embed assets/index.html assets/vendor/*
 var assets embed.FS
 
 const recentErrorsLimit = 20
@@ -23,8 +24,14 @@ const recentWebRequestsLimit = 50
 
 // New builds the dashboard handler, rooted at /ui/.
 func New(rep *report.Reporter, log *slog.Logger) http.Handler {
+	staticAssets, err := fs.Sub(assets, "assets")
+	if err != nil {
+		panic("ui: open embedded assets: " + err.Error())
+	}
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /ui/", handleIndex)
+	mux.Handle("GET /ui/assets/", http.StripPrefix("/ui/assets/", http.FileServerFS(staticAssets)))
 	mux.HandleFunc("GET /ui/api/summary", handleSummary(rep, log))
 	mux.HandleFunc("GET /ui/api/sources", handleSources(rep, log))
 	mux.HandleFunc("GET /ui/api/directories", handleDirectories(rep, log))

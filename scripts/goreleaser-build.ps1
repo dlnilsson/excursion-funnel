@@ -29,6 +29,10 @@ $go = Get-Command go -ErrorAction SilentlyContinue
 if ($null -eq $go) {
     throw 'go was not found.'
 }
+$npm = Get-Command npm -ErrorAction SilentlyContinue
+if ($null -eq $npm) {
+    throw 'npm was not found.'
+}
 
 & $docker.Source info --format '{{.ServerVersion}}' *> $null
 if ($LASTEXITCODE -ne 0) {
@@ -74,9 +78,9 @@ try {
 
     $buildCommand = @'
 set -eu
-tar -C /source --exclude='./dist' --exclude='./vendor' -cf - . | tar -C /workspace -xf -
+tar -C /source --exclude='./dist' --exclude='./vendor' --exclude='./node_modules' -cf - . | tar -C /workspace -xf -
 cd /workspace
-exec goreleaser build --snapshot --single-target --output /output/ef-linux-amd64
+exec goreleaser build --snapshot --single-target --skip=before --output /output/ef-linux-amd64
 '@
 
     Write-Host 'Building Linux amd64 with GoReleaser Cross...'

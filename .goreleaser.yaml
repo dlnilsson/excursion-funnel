@@ -2,6 +2,11 @@ version: 2
 
 project_name: excursion-funnel
 
+before:
+  hooks:
+    - npm ci
+    - npm run vendor-ui
+
 builds:
   - id: ef
     main: ./cmd/ef
