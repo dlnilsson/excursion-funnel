@@ -27,8 +27,7 @@ func New(rep *report.Reporter, log *slog.Logger) http.Handler {
 	mux.HandleFunc("GET /ui/", handleIndex)
 	mux.HandleFunc("GET /ui/api/summary", handleSummary(rep, log))
 	mux.HandleFunc("GET /ui/api/sources", handleSources(rep, log))
-	mux.HandleFunc("GET /ui/api/directories", handleProjectContext(rep, log, "directory"))
-	mux.HandleFunc("GET /ui/api/branches", handleProjectContext(rep, log, "git_branch"))
+	mux.HandleFunc("GET /ui/api/directories", handleDirectories(rep, log))
 	mux.HandleFunc("GET /ui/api/history", handleHistory(rep, log))
 	mux.HandleFunc("GET /ui/api/history/models", handleModelHistory(rep, log))
 	mux.HandleFunc("GET /ui/api/errors", handleErrors(rep, log))
@@ -37,17 +36,17 @@ func New(rep *report.Reporter, log *slog.Logger) http.Handler {
 	return mux
 }
 
-func handleProjectContext(rep *report.Reporter, log *slog.Logger, groupBy string) http.HandlerFunc {
+func handleDirectories(rep *report.Reporter, log *slog.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		since := beginningOfDay(time.Now())
 		rows, err := rep.Summary(r.Context(), report.SummaryOptions{
 			Since:              since,
 			Until:              since.AddDate(0, 0, 1),
-			GroupBy:            groupBy,
+			GroupBy:            "directory",
 			KnownProvidersOnly: true,
 		})
 		if err != nil {
-			log.Error("ui: query project context", "group_by", groupBy, "err", err)
+			log.Error("ui: query directories", "err", err)
 			http.Error(w, "internal error", http.StatusInternalServerError)
 			return
 		}

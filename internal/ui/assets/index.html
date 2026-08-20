@@ -610,14 +610,6 @@
   </table>
 </details>
 
-<details class="table-section" data-table-key="branches" open>
-  <summary>Requests by git branch</summary>
-  <table id="branches-table">
-    <thead><tr><th>Git branch</th><th>Requests</th><th>Errors</th><th>Total tokens</th></tr></thead>
-    <tbody></tbody>
-  </table>
-</details>
-
 <h2>Model activity</h2>
 <div class="history-layout">
   <div class="history-actions">
@@ -852,11 +844,10 @@ function setHistoryMetric(metric) {
 }
 
 async function load() {
-  const [summary, sources, directories, branches, history, modelHistory, errors, tools, webRequests] = await Promise.all([
+  const [summary, sources, directories, history, modelHistory, errors, tools, webRequests] = await Promise.all([
     fetch("/ui/api/summary").then(r => r.json()),
     fetch("/ui/api/sources").then(r => r.json()),
     fetch("/ui/api/directories").then(r => r.json()),
-    fetch("/ui/api/branches").then(r => r.json()),
     fetch("/ui/api/history").then(r => r.json()),
     fetch("/ui/api/history/models").then(r => r.json()),
     fetch("/ui/api/errors").then(r => r.json()),
@@ -866,8 +857,7 @@ async function load() {
   renderStats(summary);
   renderSummary(summary);
   renderSources(sources);
-  renderProjectContext("directories", directories, "Directory", "directory activity");
-  renderProjectContext("branches", branches, "GitBranch", "git branch activity");
+  renderDirectories(directories);
   renderHistoryCharts(history, modelHistory);
   renderErrors(errors);
   renderTools(tools);
@@ -883,13 +873,13 @@ function renderSources(rows) {
   tbody.innerHTML = rows.map(r => `<tr><td>${escapeHTML(r.Source)}</td><td>${r.Requests}</td><td>${r.Errors}</td>${tokenCell(r.Total)}</tr>`).join("");
 }
 
-function renderProjectContext(table, rows, field, emptyLabel) {
-  const tbody = document.querySelector(`#${table}-table tbody`);
+function renderDirectories(rows) {
+  const tbody = document.querySelector("#directories-table tbody");
   if (rows.length === 0) {
-    tbody.innerHTML = `<tr><td colspan="4" class="empty">No ${emptyLabel} today</td></tr>`;
+    tbody.innerHTML = '<tr><td colspan="4" class="empty">No directory activity today</td></tr>';
     return;
   }
-  tbody.innerHTML = rows.map(r => `<tr><td>${escapeHTML(r[field])}</td><td>${r.Requests}</td><td>${r.Errors}</td>${tokenCell(r.Total)}</tr>`).join("");
+  tbody.innerHTML = rows.map(r => `<tr><td>${escapeHTML(r.Directory)}</td><td>${r.Requests}</td><td>${r.Errors}</td>${tokenCell(r.Total)}</tr>`).join("");
 }
 
 const providerLabels = { anthropic: "Anthropic", openai: "Codex" };

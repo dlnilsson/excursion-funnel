@@ -39,7 +39,6 @@ func TestHandleIndex_ServesDashboardHTML(t *testing.T) {
 		`data-table-key="summary"`,
 		`data-table-key="sources"`,
 		`data-table-key="directories"`,
-		`data-table-key="branches"`,
 		`data-table-key="model-activity"`,
 		`data-table-key="errors"`,
 		`data-table-key="tools"`,
@@ -47,7 +46,6 @@ func TestHandleIndex_ServesDashboardHTML(t *testing.T) {
 		`fetch("/ui/api/history/models")`,
 		`fetch("/ui/api/sources")`,
 		`fetch("/ui/api/directories")`,
-		`fetch("/ui/api/branches")`,
 		`id="tools-table"`,
 		`fetch("/ui/api/tools")`,
 		`data-table-key="web-requests"`,
@@ -67,35 +65,43 @@ func TestHandleIndex_ServesDashboardHTML(t *testing.T) {
 			t.Fatalf("body missing chart marker %q: %s", marker, rec.Body.String())
 		}
 	}
+	for _, removed := range []string{
+		"Requests by git branch",
+		`data-table-key="branches"`,
+		`fetch("/ui/api/branches")`,
+	} {
+		if strings.Contains(rec.Body.String(), removed) {
+			t.Fatalf("body contains removed branch UI marker %q", removed)
+		}
+	}
 }
 
-func TestHandleProjectContext_ReturnsTodaysGroups(t *testing.T) {
+func TestHandleDirectories_ReturnsTodaysGroups(t *testing.T) {
 	h := newTestHandler(t)
-	tests := []struct {
-		path  string
-		field func(report.SummaryRow) string
-		want  map[string]bool
-	}{
-		{"/ui/api/directories", func(row report.SummaryRow) string { return row.Directory }, map[string]bool{"/work/api": true, "/work/web": true}},
-		{"/ui/api/branches", func(row report.SummaryRow) string { return row.GitBranch }, map[string]bool{"main": true, "feature-x": true}},
+	rec := doRequest(t, h, http.MethodGet, "/ui/api/directories")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d: %s", rec.Code, rec.Body.String())
 	}
-	for _, test := range tests {
-		rec := doRequest(t, h, http.MethodGet, test.path)
-		if rec.Code != http.StatusOK {
-			t.Fatalf("%s status = %d: %s", test.path, rec.Code, rec.Body.String())
+	var rows []report.SummaryRow
+	if err := json.Unmarshal(rec.Body.Bytes(), &rows); err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]bool{"/work/api": true, "/work/web": true}
+	if len(rows) != len(want) {
+		t.Fatalf("rows = %+v", rows)
+	}
+	for _, row := range rows {
+		if !want[row.Directory] {
+			t.Fatalf("unexpected row = %+v", row)
 		}
-		var rows []report.SummaryRow
-		if err := json.Unmarshal(rec.Body.Bytes(), &rows); err != nil {
-			t.Fatal(err)
-		}
-		if len(rows) != len(test.want) {
-			t.Fatalf("%s rows = %+v", test.path, rows)
-		}
-		for _, row := range rows {
-			if !test.want[test.field(row)] {
-				t.Fatalf("%s unexpected row = %+v", test.path, row)
-			}
-		}
+	}
+}
+
+func TestBranchesEndpointNoLongerServesAPI(t *testing.T) {
+	h := newTestHandler(t)
+	rec := doRequest(t, h, http.MethodGet, "/ui/api/branches")
+	if ct := rec.Header().Get("Content-Type"); strings.Contains(ct, "application/json") {
+		t.Fatalf("content-type = %q, branch endpoint still serves JSON", ct)
 	}
 }
 
