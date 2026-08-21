@@ -1411,8 +1411,9 @@ function renderHistoryStackedChart(rows) {
 }
 
 function renderModelActivityTable(rows) {
-  const topRows = [...rows].sort((a, b) => b.Total - a.Total).slice(0, 12);
-  const total = rows.reduce((sum, r) => sum + r.Total, 0);
+  const modelRows = aggregateModelActivityRows(rows);
+  const topRows = modelRows.sort((a, b) => b.Total - a.Total).slice(0, 12);
+  const total = modelRows.reduce((sum, r) => sum + r.Total, 0);
   const tbody = document.querySelector("#model-activity-table tbody");
   if (topRows.length === 0) {
     tbody.innerHTML = '<tr><td colspan="5" class="empty">No model history yet</td></tr>';
@@ -1426,6 +1427,18 @@ function renderModelActivityTable(rows) {
       <td>${r.Requests.toLocaleString()}</td><td>${average.toLocaleString()}</td><td>${share}</td>
     </tr>`;
   }).join("");
+}
+
+function aggregateModelActivityRows(rows) {
+  const byModel = new Map();
+  for (const row of rows) {
+    const model = modelLabel(row);
+    const aggregate = byModel.get(model) || { Model: model, Requests: 0, Total: 0 };
+    aggregate.Requests += Number(row.Requests) || 0;
+    aggregate.Total += Number(row.Total) || 0;
+    byModel.set(model, aggregate);
+  }
+  return [...byModel.values()];
 }
 
 function renderHistoryLegend(datasets) {

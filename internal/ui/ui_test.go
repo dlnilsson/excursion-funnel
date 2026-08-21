@@ -47,6 +47,7 @@ func TestHandleIndex_ServesDashboardHTML(t *testing.T) {
 		`renderTokenHeatmap(historyRows)`,
 		`id="history-stacked-chart"`,
 		`id="model-activity-table"`,
+		`aggregateModelActivityRows(rows)`,
 		`fetch("/ui/api/kpis")`,
 		`p50 latency`,
 		`Error rate today`,
