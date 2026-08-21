@@ -2,6 +2,8 @@
 package usage
 
 import (
+	"io"
+
 	"github.com/dlnilsson/excursion-funnel/cmd/reportflags"
 	appusage "github.com/dlnilsson/excursion-funnel/internal/usage"
 	"github.com/spf13/cobra"
@@ -40,15 +42,27 @@ func New() *cobra.Command {
 
 func run(opts *options, today bool) func(*cobra.Command, []string) error {
 	return func(cmd *cobra.Command, _ []string) error {
-		return appusage.Run(cmd.Context(), cmd.OutOrStdout(), appusage.Options{
-			Connection: opts.connection.Resolve(cmd.Flags()),
-			Since:      opts.since,
-			Until:      opts.until,
-			GroupBy:    opts.groupBy,
-			Directory:  opts.directory,
-			Branch:     opts.branch,
-			JSON:       opts.json,
-			Today:      today,
-		})
+		var (
+			ctx       = cmd.Context()
+			out       = cmd.OutOrStdout()
+			statusOut = cmd.ErrOrStderr()
+			appOpts   = appusage.Options{
+				Connection: opts.connection.Resolve(cmd.Flags()),
+				Since:      opts.since,
+				Until:      opts.until,
+				GroupBy:    opts.groupBy,
+				Directory:  opts.directory,
+				Branch:     opts.branch,
+				JSON:       opts.json,
+				Today:      today,
+			}
+		)
+		runUsage := func(writer io.Writer) error {
+			return appusage.Run(ctx, writer, appOpts)
+		}
+		if !shouldAnimateUsage(appOpts.JSON, isTerminalWriter(out), isTerminalWriter(statusOut)) {
+			return runUsage(out)
+		}
+		return runWithSpinner(ctx, out, statusOut, runUsage)
 	}
 }
