@@ -11,7 +11,7 @@ GoReleaser Cross container for Linux. Docker Desktop must be running.
 #>
 [CmdletBinding()]
 param(
-    [string]$Image = 'ghcr.io/goreleaser/goreleaser-cross@sha256:0cf2b7f757b40397d2bef5423adb88d0ac63899e88a9f0c4bbb370d3fb7b2fb5'
+    [string]$Image = 'ghcr.io/goreleaser/goreleaser-cross@sha256:3ce3506ee9179c4122ba0b5dc13ab564ff259fb65f45bfad005ddd5e4a3d326d'
 )
 
 Set-StrictMode -Version Latest
