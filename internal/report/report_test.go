@@ -327,6 +327,13 @@ func TestKPIs_QuackRemote(t *testing.T) {
 		stats.Anthropic.CacheWriteUnclassifiedTokens != 10 {
 		t.Fatalf("remote Anthropic KPI stats = %+v, want thinking=10 cache=100/40/50/10", stats.Anthropic)
 	}
+	recent, err := rep.RecentRequests(t.Context(), 1)
+	if err != nil {
+		t.Fatalf("remote RecentRequests() error = %v", err)
+	}
+	if len(recent) != 1 || recent[0].ID != "remote-anthropic" {
+		t.Fatalf("remote recent requests = %+v", recent)
+	}
 }
 
 func TestSummary_GroupsBySourceWithMixedProviderInput(t *testing.T) {
@@ -478,6 +485,32 @@ func TestInspect_FindsByResponseID(t *testing.T) {
 	}
 	if !got.Total.Valid || got.Total.Int64 != 15 {
 		t.Fatalf("total = %+v, want valid 15", got.Total)
+	}
+}
+
+func TestRecentRequests_ReturnsNewestLightweightRows(t *testing.T) {
+	dbPath := seedReportDB(t)
+
+	r, err := OpenWithHubKey(dbPath, "", "")
+	if err != nil {
+		t.Fatalf("OpenWithHubKey() error = %v", err)
+	}
+	t.Cleanup(func() { _ = r.Close() })
+
+	rows, err := r.RecentRequests(t.Context(), 2)
+	if err != nil {
+		t.Fatalf("RecentRequests() error = %v", err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("rows len = %d, want 2: %+v", len(rows), rows)
+	}
+	if rows[0].ID != "req-anthropic-1" || rows[0].ResponseID != "msg-anthropic-1" ||
+		rows[0].Provider != "anthropic" || rows[0].Client != "Claude Code" || rows[0].Model != "claude-opus-5" ||
+		!rows[0].HTTPStatus.Valid || rows[0].HTTPStatus.Int64 != 200 || rows[0].Method != "POST" || rows[0].Path != "/v1/messages" {
+		t.Fatalf("newest row = %+v", rows[0])
+	}
+	if rows[1].ID != "req-openai-2" {
+		t.Fatalf("second row = %+v, want req-openai-2", rows[1])
 	}
 }
 

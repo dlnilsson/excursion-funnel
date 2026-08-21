@@ -184,6 +184,20 @@ type KPIStats struct {
 	Anthropic             AnthropicKPIStats
 }
 
+// RecentRequestRow is the lightweight request metadata used by the inspect
+// command's recent-request picker.
+type RecentRequestRow struct {
+	ID         string
+	ResponseID string
+	StartedAt  time.Time
+	Provider   string
+	Client     string
+	Model      string
+	HTTPStatus sql.NullInt64
+	Method     string
+	Path       string
+}
+
 // InspectRow is a detailed request row for the inspect command.
 type InspectRow struct {
 	ID                string
@@ -480,7 +494,40 @@ func (r *Reporter) scanSummary(ctx context.Context, query string, args ...any) (
 }
 
 const DefaultInspectLimit = 20
+const DefaultRecentRequestLimit = 50
 const DefaultRecentToolCallLimit = 50
+
+// RecentRequests returns lightweight metadata for the newest recorded
+// requests without loading their tool calls or web requests.
+func (r *Reporter) RecentRequests(ctx context.Context, limit int) ([]RecentRequestRow, error) {
+	if limit <= 0 {
+		limit = DefaultRecentRequestLimit
+	}
+	rows, err := r.store.DB().QueryContext(ctx, `
+SELECT id, COALESCE(response_id, ''), started_at, `+providerSQL("path")+`, `+clientSQL()+`,
+  COALESCE(model_reported, model_requested, ''), http_status, method, path
+FROM requests
+ORDER BY started_at DESC, id DESC
+LIMIT ?`, limit)
+	if err != nil {
+		return nil, fmt.Errorf("query recent requests: %w", err)
+	}
+	defer rows.Close()
+
+	out := make([]RecentRequestRow, 0, limit)
+	for rows.Next() {
+		var row RecentRequestRow
+		if err := rows.Scan(&row.ID, &row.ResponseID, &row.StartedAt, &row.Provider, &row.Client,
+			&row.Model, &row.HTTPStatus, &row.Method, &row.Path); err != nil {
+			return nil, fmt.Errorf("scan recent request: %w", err)
+		}
+		out = append(out, row)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate recent requests: %w", err)
+	}
+	return out, nil
+}
 
 func (r *Reporter) Inspect(ctx context.Context, id string, limit int) ([]InspectRow, error) {
 	if limit <= 0 {
