@@ -45,6 +45,11 @@
     --error: var(--nord11);
     --heading: var(--nord6);
     --heading-secondary: var(--nord5);
+    --heatmap-empty: var(--nord2);
+    --heatmap-level-1: #3f6470;
+    --heatmap-level-2: #527f8c;
+    --heatmap-level-3: #6ca1ac;
+    --heatmap-level-4: var(--nord8);
     --hover-row: rgba(136, 192, 208, 0.08);
     --page-wash: linear-gradient(180deg, rgba(67, 76, 94, 0.48), rgba(46, 52, 64, 0) 18rem);
     --surface: var(--nord1);
@@ -66,6 +71,11 @@
     --error: #a83d49;
     --heading: var(--nord0);
     --heading-secondary: var(--nord1);
+    --heatmap-empty: var(--nord4);
+    --heatmap-level-1: #c6d4e5;
+    --heatmap-level-2: #9eb5d1;
+    --heatmap-level-3: #7897bd;
+    --heatmap-level-4: var(--nord10);
     --hover-row: rgba(94, 129, 172, 0.12);
     --page-wash: linear-gradient(180deg, rgba(216, 222, 233, 0.78), rgba(236, 239, 244, 0) 18rem);
     --surface: var(--nord5);
@@ -318,6 +328,128 @@
     min-width: 0;
   }
 
+  .heatmap-panel {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    min-width: 0;
+    padding: 1rem;
+  }
+
+  .heatmap-scroll {
+    overflow-x: auto;
+    padding-bottom: 0.35rem;
+  }
+
+  .heatmap-calendar {
+    --heatmap-cell-size: 0.75rem;
+    --heatmap-gap: 0.2rem;
+    display: grid;
+    gap: 0.35rem 0.65rem;
+    grid-template-columns: 2rem max-content;
+    grid-template-rows: 1rem max-content;
+    min-width: max-content;
+  }
+
+  .heatmap-months,
+  .heatmap-weeks {
+    display: grid;
+    gap: var(--heatmap-gap);
+    grid-template-columns: repeat(53, var(--heatmap-cell-size));
+  }
+
+  .heatmap-months {
+    color: var(--text-muted);
+    font-size: 0.72rem;
+    grid-column: 2;
+    line-height: 1;
+  }
+
+  .heatmap-month {
+    min-width: 0;
+    overflow: hidden;
+    white-space: nowrap;
+  }
+
+  .heatmap-weekdays,
+  .heatmap-week {
+    display: grid;
+    gap: var(--heatmap-gap);
+    grid-template-rows: repeat(7, var(--heatmap-cell-size));
+  }
+
+  .heatmap-weekdays {
+    color: var(--text-muted);
+    font-size: 0.68rem;
+    grid-column: 1;
+    grid-row: 2;
+    line-height: var(--heatmap-cell-size);
+    text-align: right;
+  }
+
+  .heatmap-weeks {
+    grid-column: 2;
+    grid-row: 2;
+  }
+
+  .heatmap-day,
+  .heatmap-legend-swatch {
+    background: var(--heatmap-empty);
+    border-radius: 2px;
+    display: block;
+    height: var(--heatmap-cell-size);
+    width: var(--heatmap-cell-size);
+  }
+
+  .heatmap-day:hover {
+    outline: 1px solid var(--heading);
+    outline-offset: 1px;
+  }
+
+  .heatmap-day.is-future {
+    background: transparent;
+    outline: 0;
+  }
+
+  .heatmap-level-1 {
+    background: var(--heatmap-level-1);
+  }
+
+  .heatmap-level-2 {
+    background: var(--heatmap-level-2);
+  }
+
+  .heatmap-level-3 {
+    background: var(--heatmap-level-3);
+  }
+
+  .heatmap-level-4 {
+    background: var(--heatmap-level-4);
+  }
+
+  .heatmap-footer,
+  .heatmap-legend {
+    align-items: center;
+    display: flex;
+  }
+
+  .heatmap-footer {
+    color: var(--text-muted);
+    flex-wrap: wrap;
+    font-size: 0.78rem;
+    gap: 0.75rem 1rem;
+    justify-content: space-between;
+    margin-top: 0.75rem;
+  }
+
+  .heatmap-legend {
+    gap: 0.3rem;
+  }
+
+  .heatmap-legend-swatch {
+    --heatmap-cell-size: 0.7rem;
+  }
+
   .history-actions {
     align-items: center;
     display: flex;
@@ -542,6 +674,10 @@
       height: 16rem;
     }
 
+    .heatmap-panel {
+      padding: 0.85rem;
+    }
+
     .agent-config-tabs {
       overflow-x: auto;
     }
@@ -686,6 +822,25 @@ requires_openai_auth = true</code></pre>
       </section>
     </div>
   </details>
+
+  <h2>Token activity over the last 12 months</h2>
+  <section class="heatmap-panel" aria-label="Token activity over the last 12 months">
+    <div class="heatmap-scroll" id="token-heatmap-scroll">
+      <div class="heatmap-calendar" id="token-heatmap" role="img" aria-label="Daily token usage calendar"></div>
+    </div>
+    <div class="heatmap-footer">
+      <span id="token-heatmap-summary">No token activity in the last 12 months</span>
+      <div class="heatmap-legend" id="token-heatmap-legend" aria-label="Token usage intensity from less to more">
+        <span>Less</span>
+        <span class="heatmap-legend-swatch"></span>
+        <span class="heatmap-legend-swatch heatmap-level-1"></span>
+        <span class="heatmap-legend-swatch heatmap-level-2"></span>
+        <span class="heatmap-legend-swatch heatmap-level-3"></span>
+        <span class="heatmap-legend-swatch heatmap-level-4"></span>
+        <span>More</span>
+      </div>
+    </div>
+  </section>
 </footer>
 
 <script src="/ui/assets/vendor/chart.umd.min.js"></script>
@@ -698,6 +853,8 @@ let latestHistoryRows = [];
 let latestModelHistoryRows = [];
 let latestToolRows = [];
 let selectedHistoryMetric = "tokens";
+const heatmapWeeks = 53;
+const heatmapWeekStart = 1;
 const modelPalette = ["#5e81ac", "#88c0d0", "#a3be8c", "#ebcb8b", "#bf616a", "#b48ead", "#d08770", "#81a1c1", "#8fbcbb", "#d8dee9", "#4c566a", "#e5e9f0"];
 const moonIcon = `<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="bi bi-moon-fill" viewBox="0 0 16 16" aria-hidden="true">
   <path d="M6 .278a.77.77 0 0 1 .08.858 7.2 7.2 0 0 0-.878 3.46c0 4.021 3.278 7.277 7.318 7.277q.792-.001 1.533-.16a.79.79 0 0 1 .81.316.73.73 0 0 1-.031.893A8.35 8.35 0 0 1 8.344 16C3.734 16 0 12.286 0 7.71 0 4.266 2.114 1.312 5.124.06A.75.75 0 0 1 6 .278"/>
@@ -908,6 +1065,10 @@ function tokenCell(value) {
   return `<td title="${fullValue}">${formatTokenCount(value)}</td>`;
 }
 
+function tokenValue(value) {
+  return `<span title="${value.toLocaleString()}">${formatTokenCount(value)}</span>`;
+}
+
 function formatDurationMS(value) {
   if (value === null || value === undefined || !Number.isFinite(Number(value))) {
     return "—";
@@ -965,8 +1126,37 @@ function renderStats(rows, kpis) {
     const share = p.input > 0 ? ` · ${(100 * p.cached / p.input).toFixed(1)}% cached` : "";
     cards.push({
       label: `${providerLabel(provider)} tokens`,
-      value: `<span title="${p.total.toLocaleString()}">${formatTokenCount(p.total)}</span>`,
+      value: tokenValue(p.total),
       sub: share,
+    });
+  }
+
+  const anthropic = kpis?.Anthropic;
+  if ((anthropic?.Requests || 0) > 0) {
+    const thinkingReported = anthropic.ThinkingReportedRequests || 0;
+    const outputReported = anthropic.OutputReportedRequests || 0;
+    const thinkingShare = anthropic.OutputTokens > 0
+      ? ` · ${(100 * anthropic.ThinkingTokens / anthropic.OutputTokens).toFixed(1)}% of output`
+      : "";
+    cards.push({
+      label: "Anthropic thinking",
+      value: thinkingReported > 0 ? tokenValue(anthropic.ThinkingTokens) : "—",
+      sub: thinkingReported > 0 ? thinkingShare : " · not reported",
+      title: thinkingReported > 0
+        ? `Thinking detail reported for ${thinkingReported.toLocaleString()} of ${outputReported.toLocaleString()} Anthropic output-reporting requests. Thinking tokens: ${anthropic.ThinkingTokens.toLocaleString()}; output tokens: ${anthropic.OutputTokens.toLocaleString()}.`
+        : "No Anthropic request reported output_tokens_details.thinking_tokens today.",
+    });
+
+    const cacheReported = anthropic.CacheWriteReportedRequests || 0;
+    cards.push({
+      label: "Anthropic cache writes",
+      value: cacheReported > 0 ? tokenValue(anthropic.CacheWriteTokens) : "—",
+      sub: cacheReported > 0
+        ? ` · 5m ${formatTokenCount(anthropic.CacheWrite5MTokens)} · 1h ${formatTokenCount(anthropic.CacheWrite1HTokens)} · unclassified ${formatTokenCount(anthropic.CacheWriteUnclassifiedTokens)}`
+        : " · not reported",
+      title: cacheReported > 0
+        ? `Cache-write telemetry reported by ${cacheReported.toLocaleString()} Anthropic requests. Total: ${anthropic.CacheWriteTokens.toLocaleString()}; 5-minute: ${anthropic.CacheWrite5MTokens.toLocaleString()}; 1-hour: ${anthropic.CacheWrite1HTokens.toLocaleString()}; unclassified: ${anthropic.CacheWriteUnclassifiedTokens.toLocaleString()}.`
+        : "No Anthropic request reported cache-write telemetry today.",
     });
   }
 
@@ -1016,8 +1206,140 @@ function renderSummary(rows) {
 function renderHistoryCharts(historyRows, modelRows) {
   latestHistoryRows = historyRows;
   latestModelHistoryRows = modelRows;
+  renderTokenHeatmap(historyRows);
   renderHistoryStackedChart(historyRows);
   renderModelActivityTable(modelRows);
+}
+
+function renderTokenHeatmap(rows) {
+  const calendar = document.getElementById("token-heatmap");
+  const scroll = document.getElementById("token-heatmap-scroll");
+  const summary = document.getElementById("token-heatmap-summary");
+  const today = startOfCalendarDay(new Date());
+  const daysSinceMonday = (today.getDay() - heatmapWeekStart + 7) % 7;
+  const currentMonday = addCalendarDays(today, -daysSinceMonday);
+  const firstMonday = addCalendarDays(currentMonday, -(heatmapWeeks - 1) * 7);
+  const byDay = new Map();
+
+  for (const row of rows) {
+    const date = parseCalendarDay(row.Day);
+    const total = Number(row.Total);
+    if (!date || date < firstMonday || date > today || !Number.isFinite(total) || total <= 0) {
+      continue;
+    }
+    const key = calendarDayKey(date);
+    byDay.set(key, (byDay.get(key) || 0) + total);
+  }
+
+  let maximum = 0;
+  let periodTotal = 0;
+  let activeDays = 0;
+  for (const total of byDay.values()) {
+    maximum = Math.max(maximum, total);
+    periodTotal += total;
+    activeDays++;
+  }
+
+  const monthByColumn = new Map([[1, firstMonday]]);
+  const weeks = [];
+  for (let weekIndex = 0; weekIndex < heatmapWeeks; weekIndex++) {
+    const days = [];
+    for (let dayIndex = 0; dayIndex < 7; dayIndex++) {
+      const date = addCalendarDays(firstMonday, weekIndex * 7 + dayIndex);
+      if (date <= today && date.getDate() === 1) {
+        monthByColumn.set(weekIndex + 1, date);
+      }
+      if (date > today) {
+        days.push('<span class="heatmap-day is-future" aria-hidden="true"></span>');
+        continue;
+      }
+
+      const total = Math.max(0, Math.round(byDay.get(calendarDayKey(date)) || 0));
+      const level = heatmapLevel(total, maximum);
+      const dateLabel = date.toLocaleDateString(undefined, {
+        weekday: "long",
+        year: "numeric",
+        month: "long",
+        day: "numeric",
+      });
+      const tokenLabel = total === 1 ? "1 token" : `${total.toLocaleString()} tokens`;
+      const tooltip = total === 0 ? `No tokens on ${dateLabel}` : `${tokenLabel} on ${dateLabel}`;
+      days.push(`<span class="heatmap-day heatmap-level-${level}" title="${escapeHTML(tooltip)}"></span>`);
+    }
+    weeks.push(`<div class="heatmap-week">${days.join("")}</div>`);
+  }
+
+  const monthMarkers = [...monthByColumn]
+    .map(([column, date]) => ({ column, date }))
+    .sort((a, b) => a.column - b.column);
+  const months = monthMarkers.map((marker, index) => {
+    const nextColumn = monthMarkers[index + 1]?.column || heatmapWeeks + 1;
+    const span = Math.max(1, nextColumn - marker.column);
+    const label = marker.date.toLocaleDateString(undefined, { month: "short" });
+    return `<span class="heatmap-month" style="grid-column:${marker.column} / span ${span}">${escapeHTML(label)}</span>`;
+  });
+  const weekdayLabels = ["Mon", "", "Wed", "", "Fri", "", ""]
+    .map(label => `<span>${label}</span>`)
+    .join("");
+
+  calendar.innerHTML = `
+    <div class="heatmap-months" aria-hidden="true">${months.join("")}</div>
+    <div class="heatmap-weekdays" aria-hidden="true">${weekdayLabels}</div>
+    <div class="heatmap-weeks" aria-hidden="true">${weeks.join("")}</div>`;
+
+  const rangeStart = firstMonday.toLocaleDateString(undefined, { year: "numeric", month: "long", day: "numeric" });
+  const rangeEnd = today.toLocaleDateString(undefined, { year: "numeric", month: "long", day: "numeric" });
+  const activeDayLabel = activeDays === 1 ? "1 active day" : `${activeDays.toLocaleString()} active days`;
+  calendar.setAttribute("aria-label", `Daily token usage from ${rangeStart} through ${rangeEnd}: ${periodTotal.toLocaleString()} tokens across ${activeDayLabel}.`);
+  if (periodTotal > 0) {
+    summary.innerHTML = `${tokenValue(periodTotal)} tokens across ${activeDayLabel}`;
+  } else {
+    summary.textContent = "No token activity in the last 12 months";
+  }
+
+  if (!scroll.dataset.heatmapInitialized) {
+    scroll.dataset.heatmapInitialized = "true";
+    window.requestAnimationFrame(() => {
+      scroll.scrollLeft = scroll.scrollWidth;
+    });
+  }
+}
+
+function heatmapLevel(total, maximum) {
+  if (total <= 0 || maximum <= 0) {
+    return 0;
+  }
+  return Math.min(4, Math.max(1, Math.ceil(4 * Math.log1p(total) / Math.log1p(maximum))));
+}
+
+function startOfCalendarDay(date) {
+  return new Date(date.getFullYear(), date.getMonth(), date.getDate());
+}
+
+function addCalendarDays(date, days) {
+  const result = new Date(date);
+  result.setDate(result.getDate() + days);
+  return result;
+}
+
+function parseCalendarDay(value) {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(value || ""));
+  if (!match) {
+    return null;
+  }
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const date = new Date(year, month - 1, day);
+  if (date.getFullYear() !== year || date.getMonth() !== month - 1 || date.getDate() !== day) {
+    return null;
+  }
+  return date;
+}
+
+function calendarDayKey(date) {
+  const pad = value => String(value).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
 }
 
 function renderHistoryStackedChart(rows) {

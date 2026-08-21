@@ -40,6 +40,11 @@ func TestHandleIndex_ServesDashboardHTML(t *testing.T) {
 		`/ui/assets/vendor/highlight.min.js`,
 		`/ui/assets/vendor/github-dark.min.css`,
 		`/ui/assets/vendor/github.min.css`,
+		`id="token-heatmap"`,
+		`id="token-heatmap-legend"`,
+		`const heatmapWeeks = 53`,
+		`const heatmapWeekStart = 1`,
+		`renderTokenHeatmap(historyRows)`,
 		`id="history-stacked-chart"`,
 		`id="model-activity-table"`,
 		`fetch("/ui/api/kpis")`,
@@ -47,6 +52,9 @@ func TestHandleIndex_ServesDashboardHTML(t *testing.T) {
 		`Error rate today`,
 		`Cache-hit rate`,
 		`Peak concurrency`,
+		`Anthropic thinking`,
+		`Anthropic cache writes`,
+		`anthropic?.Requests`,
 		`data-table-key="summary"`,
 		`data-table-key="sources"`,
 		`data-table-key="directories"`,
@@ -84,6 +92,10 @@ func TestHandleIndex_ServesDashboardHTML(t *testing.T) {
 			t.Fatalf("body contains removed branch UI marker %q", removed)
 		}
 	}
+	body := rec.Body.String()
+	if strings.Index(body, `id="token-heatmap"`) < strings.Index(body, `id="agent-config"`) {
+		t.Fatal("token heatmap appears before agent configuration, want it below")
+	}
 }
 
 func TestHandleKPIs_ReturnsTodaysOperationalMetrics(t *testing.T) {
@@ -105,6 +117,49 @@ func TestHandleKPIs_ReturnsTodaysOperationalMetrics(t *testing.T) {
 	}
 	if stats.CacheEligibleRequests != 1 || stats.CacheHitRequests != 0 || stats.PeakConcurrency != 1 {
 		t.Fatalf("cache/concurrency stats = %+v, want eligible=1 hits=0 peak=1", stats)
+	}
+	if stats.Anthropic.Requests != 1 || stats.Anthropic.ThinkingReportedRequests != 0 || stats.Anthropic.CacheWriteReportedRequests != 0 {
+		t.Fatalf("Anthropic coverage = %+v, want one request with no detailed usage", stats.Anthropic)
+	}
+}
+
+func TestHandleKPIs_ReturnsAnthropicUsageDetails(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "usage.duckdb"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	var (
+		today      = beginningOfDay(time.Now())
+		output     = int64(100)
+		cacheWrite = int64(1000)
+	)
+	if err := st.InsertBatch(t.Context(), []queue.UsageEvent{{
+		RequestID: "anthropic-details", StartedAt: today.Add(time.Hour), CompletedAt: today.Add(time.Hour + time.Second),
+		Method: "POST", Path: "/v1/messages", UpstreamURL: "/", HTTPStatus: 200,
+		Usage:     queue.Usage{OutputTokens: &output, CacheWriteTokens: &cacheWrite},
+		UsageJSON: json.RawMessage(`{"output_tokens_details":{"thinking_tokens":40},"cache_creation":{"ephemeral_5m_input_tokens":300,"ephemeral_1h_input_tokens":600}}`),
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	h := New(report.New(st), slog.New(slog.DiscardHandler))
+
+	rec := doRequest(t, h, http.MethodGet, "/ui/api/kpis")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	var stats report.KPIStats
+	if err := json.Unmarshal(rec.Body.Bytes(), &stats); err != nil {
+		t.Fatalf("decode body: %v: %s", err, rec.Body.String())
+	}
+	got := stats.Anthropic
+	if got.Requests != 1 || got.OutputReportedRequests != 1 || got.ThinkingReportedRequests != 1 ||
+		got.ThinkingTokens != 40 || got.OutputTokens != 100 {
+		t.Fatalf("Anthropic thinking response = %+v, want one reported request with thinking=40 output=100", got)
+	}
+	if got.CacheWriteTokens != 1000 || got.CacheWrite5MTokens != 300 ||
+		got.CacheWrite1HTokens != 600 || got.CacheWriteUnclassifiedTokens != 100 {
+		t.Fatalf("Anthropic cache response = %+v, want total=1000 5m=300 1h=600 unclassified=100", got)
 	}
 }
 

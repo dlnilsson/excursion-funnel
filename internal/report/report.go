@@ -155,6 +155,21 @@ type KPIOptions struct {
 	KnownProvidersOnly bool
 }
 
+// AnthropicKPIStats contains provider-specific usage details that Anthropic
+// currently reports only in the preserved usage JSON.
+type AnthropicKPIStats struct {
+	Requests                     int64
+	OutputReportedRequests       int64
+	ThinkingReportedRequests     int64
+	ThinkingTokens               int64
+	OutputTokens                 int64
+	CacheWriteReportedRequests   int64
+	CacheWriteTokens             int64
+	CacheWrite5MTokens           int64
+	CacheWrite1HTokens           int64
+	CacheWriteUnclassifiedTokens int64
+}
+
 // KPIStats contains the lossless counts and latency values used to render the
 // dashboard's operational KPI cards. Rates are deliberately left to callers
 // so their numerators and denominators remain available for display.
@@ -166,6 +181,7 @@ type KPIStats struct {
 	CacheEligibleRequests int64
 	CacheHitRequests      int64
 	PeakConcurrency       int64
+	Anthropic             AnthropicKPIStats
 }
 
 // InspectRow is a detailed request row for the inspect command.
@@ -302,8 +318,14 @@ func (r *Reporter) KPIs(ctx context.Context, opts KPIOptions) (KPIStats, error) 
 		where = appendWherePredicate(where, providerSQL("path")+" != 'unknown'")
 	}
 
-	failure := "(COALESCE(error_type, '') != '' OR COALESCE(http_status >= 400, false))"
 	var (
+		failure   = "(COALESCE(error_type, '') != '' OR COALESCE(http_status >= 400, false))"
+		anthropic = "(" + providerSQL("path") + " = 'anthropic')"
+		thinking  = "TRY_CAST(json_extract(TRY_CAST(usage_json AS JSON), '$.output_tokens_details.thinking_tokens') AS BIGINT)"
+		cache5M   = "TRY_CAST(json_extract(TRY_CAST(usage_json AS JSON), '$.cache_creation.ephemeral_5m_input_tokens') AS BIGINT)"
+		cache1H   = "TRY_CAST(json_extract(TRY_CAST(usage_json AS JSON), '$.cache_creation.ephemeral_1h_input_tokens') AS BIGINT)"
+		cacheTTL  = "(COALESCE(" + cache5M + ", 0) + COALESCE(" + cache1H + ", 0))"
+
 		stats KPIStats
 		p50   sql.NullFloat64
 		p95   sql.NullFloat64
@@ -318,11 +340,26 @@ func (r *Reporter) KPIs(ctx context.Context, opts KPIOptions) (KPIStats, error) 
     WHERE duration_ms IS NOT NULL AND NOT `+failure+`
   ) AS latency_p95_ms,
   COALESCE(COUNT_IF(input_tokens IS NOT NULL), 0) AS cache_eligible_requests,
-  COALESCE(COUNT_IF(input_tokens IS NOT NULL AND COALESCE(cached_input_tokens, 0) > 0), 0) AS cache_hit_requests
+  COALESCE(COUNT_IF(input_tokens IS NOT NULL AND COALESCE(cached_input_tokens, 0) > 0), 0) AS cache_hit_requests,
+  COALESCE(COUNT_IF(`+anthropic+`), 0) AS anthropic_requests,
+  COALESCE(COUNT_IF(`+anthropic+` AND output_tokens IS NOT NULL), 0) AS anthropic_output_reported_requests,
+  COALESCE(COUNT_IF(`+anthropic+` AND `+thinking+` IS NOT NULL), 0) AS anthropic_thinking_reported_requests,
+  COALESCE(SUM(CASE WHEN `+anthropic+` THEN COALESCE(`+thinking+`, 0) ELSE 0 END), 0) AS anthropic_thinking_tokens,
+  COALESCE(SUM(CASE WHEN `+anthropic+` THEN COALESCE(output_tokens, 0) ELSE 0 END), 0) AS anthropic_output_tokens,
+  COALESCE(COUNT_IF(`+anthropic+` AND (cache_write_tokens IS NOT NULL OR `+cache5M+` IS NOT NULL OR `+cache1H+` IS NOT NULL)), 0) AS anthropic_cache_write_reported_requests,
+  COALESCE(SUM(CASE WHEN `+anthropic+` THEN GREATEST(COALESCE(cache_write_tokens, 0), `+cacheTTL+`) ELSE 0 END), 0) AS anthropic_cache_write_tokens,
+  COALESCE(SUM(CASE WHEN `+anthropic+` THEN COALESCE(`+cache5M+`, 0) ELSE 0 END), 0) AS anthropic_cache_write_5m_tokens,
+  COALESCE(SUM(CASE WHEN `+anthropic+` THEN COALESCE(`+cache1H+`, 0) ELSE 0 END), 0) AS anthropic_cache_write_1h_tokens,
+  COALESCE(SUM(CASE WHEN `+anthropic+` THEN GREATEST(COALESCE(cache_write_tokens, 0) - `+cacheTTL+`, 0) ELSE 0 END), 0) AS anthropic_cache_write_unclassified_tokens
 FROM requests
 `+where, args...).Scan(
 		&stats.Requests, &stats.Errors, &p50, &p95,
 		&stats.CacheEligibleRequests, &stats.CacheHitRequests,
+		&stats.Anthropic.Requests, &stats.Anthropic.OutputReportedRequests,
+		&stats.Anthropic.ThinkingReportedRequests, &stats.Anthropic.ThinkingTokens,
+		&stats.Anthropic.OutputTokens, &stats.Anthropic.CacheWriteReportedRequests,
+		&stats.Anthropic.CacheWriteTokens, &stats.Anthropic.CacheWrite5MTokens,
+		&stats.Anthropic.CacheWrite1HTokens, &stats.Anthropic.CacheWriteUnclassifiedTokens,
 	)
 	if err != nil {
 		return KPIStats{}, fmt.Errorf("query KPIs: %w", err)

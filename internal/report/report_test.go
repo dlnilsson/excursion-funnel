@@ -1,6 +1,7 @@
 package report
 
 import (
+	"encoding/json"
 	"errors"
 	"math"
 	"net"
@@ -179,6 +180,93 @@ func TestKPIs_PeakConcurrencyTreatsIntervalsAsHalfOpen(t *testing.T) {
 	}
 }
 
+func TestKPIs_ExtractsAnthropicThinkingAndCacheTTLDetails(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "usage.duckdb"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+
+	var (
+		since       = time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
+		until       = since.AddDate(0, 0, 1)
+		output100   = int64(100)
+		output50    = int64(50)
+		output25    = int64(25)
+		output20    = int64(20)
+		cache1000   = int64(1000)
+		cache200    = int64(200)
+		cache100    = int64(100)
+		cache30     = int64(30)
+		openAICache = int64(999)
+	)
+	events := []queue.UsageEvent{
+		{
+			RequestID: "anthropic-full", StartedAt: since.Add(time.Minute), CompletedAt: since.Add(time.Minute + time.Second),
+			Method: "POST", Path: "/v1/messages", UpstreamURL: "/",
+			Usage:     queue.Usage{OutputTokens: &output100, CacheWriteTokens: &cache1000},
+			UsageJSON: json.RawMessage(`{"output_tokens_details":{"thinking_tokens":40},"cache_creation":{"ephemeral_5m_input_tokens":300,"ephemeral_1h_input_tokens":600}}`),
+		},
+		{
+			RequestID: "anthropic-no-details", StartedAt: since.Add(2 * time.Minute), CompletedAt: since.Add(2*time.Minute + time.Second),
+			Method: "POST", Path: "/v1/messages", UpstreamURL: "/",
+			Usage:     queue.Usage{OutputTokens: &output50, CacheWriteTokens: &cache200},
+			UsageJSON: json.RawMessage(`{"output_tokens_details":{},"cache_creation":{}}`),
+		},
+		{
+			RequestID: "anthropic-raw-only", StartedAt: since.Add(3 * time.Minute), CompletedAt: since.Add(3*time.Minute + time.Second),
+			Method: "POST", Path: "/v1/messages", UpstreamURL: "/",
+			Usage:     queue.Usage{OutputTokens: &output25},
+			UsageJSON: json.RawMessage(`{"output_tokens_details":{"thinking_tokens":0},"cache_creation":{"ephemeral_5m_input_tokens":50,"ephemeral_1h_input_tokens":75}}`),
+		},
+		{
+			RequestID: "anthropic-details-exceed-total", StartedAt: since.Add(4 * time.Minute), CompletedAt: since.Add(4*time.Minute + time.Second),
+			Method: "POST", Path: "/v1/messages", UpstreamURL: "/",
+			Usage:     queue.Usage{CacheWriteTokens: &cache100},
+			UsageJSON: json.RawMessage(`{"cache_creation":{"ephemeral_5m_input_tokens":80,"ephemeral_1h_input_tokens":70}}`),
+		},
+		{
+			RequestID: "anthropic-malformed", StartedAt: since.Add(5 * time.Minute), CompletedAt: since.Add(5*time.Minute + time.Second),
+			Method: "POST", Path: "/v1/messages", UpstreamURL: "/",
+			Usage:     queue.Usage{OutputTokens: &output20, CacheWriteTokens: &cache30},
+			UsageJSON: json.RawMessage(`not-json`),
+		},
+		{
+			RequestID: "openai-lookalike", StartedAt: since.Add(6 * time.Minute), CompletedAt: since.Add(6*time.Minute + time.Second),
+			Method: "POST", Path: "/v1/responses", UpstreamURL: "/",
+			Usage:     queue.Usage{OutputTokens: &output100, CacheWriteTokens: &openAICache},
+			UsageJSON: json.RawMessage(`{"output_tokens_details":{"thinking_tokens":999},"cache_creation":{"ephemeral_5m_input_tokens":999}}`),
+		},
+		{
+			RequestID: "anthropic-tomorrow", StartedAt: until, CompletedAt: until.Add(time.Second),
+			Method: "POST", Path: "/v1/messages", UpstreamURL: "/",
+			Usage:     queue.Usage{OutputTokens: &output100, CacheWriteTokens: &cache1000},
+			UsageJSON: json.RawMessage(`{"output_tokens_details":{"thinking_tokens":999},"cache_creation":{"ephemeral_1h_input_tokens":999}}`),
+		},
+	}
+	if err := st.InsertBatch(t.Context(), events); err != nil {
+		t.Fatal(err)
+	}
+
+	stats, err := New(st).KPIs(t.Context(), KPIOptions{
+		Since: since, Until: until, KnownProvidersOnly: true,
+	})
+	if err != nil {
+		t.Fatalf("KPIs() error = %v", err)
+	}
+	got := stats.Anthropic
+	if got.Requests != 5 || got.OutputReportedRequests != 4 || got.ThinkingReportedRequests != 2 {
+		t.Fatalf("Anthropic request coverage = %+v, want requests=5 output=4 thinking=2", got)
+	}
+	if got.ThinkingTokens != 40 || got.OutputTokens != 195 {
+		t.Fatalf("Anthropic thinking/output = %d/%d, want 40/195", got.ThinkingTokens, got.OutputTokens)
+	}
+	if got.CacheWriteReportedRequests != 5 || got.CacheWriteTokens != 1505 ||
+		got.CacheWrite5MTokens != 430 || got.CacheWrite1HTokens != 745 || got.CacheWriteUnclassifiedTokens != 330 {
+		t.Fatalf("Anthropic cache details = %+v, want reported=5 total=1505 5m=430 1h=745 unclassified=330", got)
+	}
+}
+
 func TestKPIs_QuackRemote(t *testing.T) {
 	if os.Getenv("EF_TEST_QUACK") == "" {
 		t.Skip("set EF_TEST_QUACK=1 to run the extension integration test")
@@ -199,13 +287,22 @@ func TestKPIs_QuackRemote(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	started := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
-	input := int64(100)
-	cached := int64(50)
+	var (
+		started    = time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+		input      = int64(100)
+		cached     = int64(50)
+		output     = int64(25)
+		cacheWrite = int64(100)
+	)
 	if err := ledger.InsertBatch(t.Context(), []queue.UsageEvent{{
 		RequestID: "remote-kpi", StartedAt: started, CompletedAt: started.Add(time.Second),
 		Method: "POST", Path: "/v1/responses", UpstreamURL: "/", HTTPStatus: 200,
 		Usage: queue.Usage{InputTokens: &input, CachedInputTokens: &cached},
+	}, {
+		RequestID: "remote-anthropic", StartedAt: started.Add(time.Minute), CompletedAt: started.Add(time.Minute + time.Second),
+		Method: "POST", Path: "/v1/messages", UpstreamURL: "/", HTTPStatus: 200,
+		Usage:     queue.Usage{OutputTokens: &output, CacheWriteTokens: &cacheWrite},
+		UsageJSON: json.RawMessage(`{"output_tokens_details":{"thinking_tokens":10},"cache_creation":{"ephemeral_5m_input_tokens":40,"ephemeral_1h_input_tokens":50}}`),
 	}}); err != nil {
 		t.Fatal(err)
 	}
@@ -221,9 +318,14 @@ func TestKPIs_QuackRemote(t *testing.T) {
 	if err != nil {
 		t.Fatalf("remote KPIs() error = %v", err)
 	}
-	if stats.Requests != 1 || stats.CacheHitRequests != 1 || stats.PeakConcurrency != 1 ||
+	if stats.Requests != 2 || stats.CacheHitRequests != 1 || stats.PeakConcurrency != 1 ||
 		stats.LatencyP50MS == nil || *stats.LatencyP50MS != 1000 {
-		t.Fatalf("remote KPI stats = %+v, want one 1000ms cached request at peak 1", stats)
+		t.Fatalf("remote KPI stats = %+v, want two 1000ms requests with one cache hit at peak 1", stats)
+	}
+	if stats.Anthropic.ThinkingTokens != 10 || stats.Anthropic.CacheWriteTokens != 100 ||
+		stats.Anthropic.CacheWrite5MTokens != 40 || stats.Anthropic.CacheWrite1HTokens != 50 ||
+		stats.Anthropic.CacheWriteUnclassifiedTokens != 10 {
+		t.Fatalf("remote Anthropic KPI stats = %+v, want thinking=10 cache=100/40/50/10", stats.Anthropic)
 	}
 }
 
