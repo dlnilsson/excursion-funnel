@@ -2,6 +2,10 @@
 package requests
 
 import (
+	"bytes"
+	"io"
+
+	"github.com/dlnilsson/excursion-funnel/cmd/loading"
 	"github.com/dlnilsson/excursion-funnel/cmd/reportflags"
 	"github.com/dlnilsson/excursion-funnel/internal/report"
 	apprequests "github.com/dlnilsson/excursion-funnel/internal/requests"
@@ -15,6 +19,8 @@ type options struct {
 	until      string
 	json       bool
 }
+
+const loadingRequestsText = "Loading requests…"
 
 // New creates the requests command and its today child command.
 func New() *cobra.Command {
@@ -37,13 +43,34 @@ func New() *cobra.Command {
 
 func run(opts *options, today bool) func(*cobra.Command, []string) error {
 	return func(cmd *cobra.Command, _ []string) error {
-		return apprequests.Run(cmd.Context(), cmd.OutOrStdout(), apprequests.Options{
-			Connection: opts.connection.Resolve(cmd.Flags()),
-			Limit:      opts.limit,
-			Since:      opts.since,
-			Until:      opts.until,
-			JSON:       opts.json,
-			Today:      today,
+		var (
+			ctx       = cmd.Context()
+			out       = cmd.OutOrStdout()
+			statusOut = cmd.ErrOrStderr()
+			appOpts   = apprequests.Options{
+				Connection: opts.connection.Resolve(cmd.Flags()),
+				Limit:      opts.limit,
+				Since:      opts.since,
+				Until:      opts.until,
+				JSON:       opts.json,
+				Today:      today,
+			}
+		)
+		runRequests := func(writer io.Writer) error {
+			return apprequests.Run(ctx, writer, appOpts)
+		}
+		if !loading.ShouldAnimate(appOpts.JSON, loading.IsTerminalWriter(out), loading.IsTerminalWriter(statusOut)) {
+			return runRequests(out)
+		}
+		output, err := loading.Run(ctx, statusOut, loadingRequestsText, func() ([]byte, error) {
+			var buffered bytes.Buffer
+			err := runRequests(&buffered)
+			return buffered.Bytes(), err
 		})
+		if err != nil {
+			return err
+		}
+		_, err = io.Copy(out, bytes.NewReader(output))
+		return err
 	}
 }
