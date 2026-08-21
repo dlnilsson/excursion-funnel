@@ -8,7 +8,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
-	"encoding/json"
+	"encoding/json/v2"
 	"errors"
 	"fmt"
 	"io"
@@ -30,6 +30,7 @@ const (
 	challengeTTL  = time.Minute
 	sessionTTL    = 5 * time.Minute
 	maxChallenges = 1024
+	maxAuthJSON   = 32 << 10
 	maxKeySize    = 10 << 20
 )
 
@@ -203,8 +204,10 @@ func (h *Hub) authenticate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer r.Body.Close()
+	r.Body = http.MaxBytesReader(w, r.Body, maxAuthJSON)
 	var request loginRequest
-	if err := json.NewDecoder(io.LimitReader(r.Body, 32<<10)).Decode(&request); err != nil {
+	if err := json.UnmarshalRead(r.Body, &request); err != nil ||
+		request.ID == "" || request.PublicKey == "" || request.Signature == "" {
 		h.failed(ip)
 		h.logAuthFailure(ip, "", "invalid_request")
 		http.Error(w, "invalid authentication request", 400)
@@ -350,7 +353,18 @@ func clientIP(r *http.Request) string {
 }
 func writeJSON(w http.ResponseWriter, value any) {
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(value)
+	_ = json.MarshalWrite(w, value)
+}
+
+func unmarshalAuthResponse(body io.Reader, value any) error {
+	limited := &io.LimitedReader{R: body, N: maxAuthJSON + 1}
+	if err := json.UnmarshalRead(limited, value); err != nil {
+		return err
+	}
+	if limited.N == 0 {
+		return errors.New("hub authentication response exceeds size limit")
+	}
+	return nil
 }
 
 // ClientConfig identifies a remote hub and optional preferred private key.
@@ -415,7 +429,7 @@ func (c *Client) login(ctx context.Context) (string, time.Time, error) {
 		return "", time.Time{}, fmt.Errorf("request hub challenge: %s", response.Status)
 	}
 	var challenge Challenge
-	if err := json.NewDecoder(io.LimitReader(response.Body, 32<<10)).Decode(&challenge); err != nil {
+	if err := unmarshalAuthResponse(response.Body, &challenge); err != nil {
 		return "", time.Time{}, fmt.Errorf("decode hub challenge: %w", err)
 	}
 	raw, err := base64.RawURLEncoding.DecodeString(challenge.Challenge)
@@ -430,7 +444,10 @@ func (c *Client) login(ctx context.Context) (string, time.Time, error) {
 		if err != nil {
 			continue
 		}
-		body, _ := json.Marshal(loginRequest{ID: challenge.ID, PublicKey: canonicalKey(pub), Signature: base64.RawURLEncoding.EncodeToString(signature.Blob)})
+		body, err := json.Marshal(loginRequest{ID: challenge.ID, PublicKey: canonicalKey(pub), Signature: base64.RawURLEncoding.EncodeToString(signature.Blob)})
+		if err != nil {
+			return "", time.Time{}, fmt.Errorf("encode hub authentication request: %w", err)
+		}
 		req, err := http.NewRequestWithContext(ctx, http.MethodPost, base+"/api/v1/auth", bytes.NewReader(body))
 		if err != nil {
 			return "", time.Time{}, err
@@ -442,7 +459,7 @@ func (c *Client) login(ctx context.Context) (string, time.Time, error) {
 		}
 		if res.StatusCode == http.StatusOK {
 			var out loginResponse
-			err = json.NewDecoder(io.LimitReader(res.Body, 32<<10)).Decode(&out)
+			err = unmarshalAuthResponse(res.Body, &out)
 			res.Body.Close()
 			if err != nil {
 				return "", time.Time{}, err

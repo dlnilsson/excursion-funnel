@@ -8,6 +8,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/dlnilsson/excursion-funnel/internal/testutil"
 )
 
 type fakeWriter struct {
@@ -108,6 +110,7 @@ func TestQueue_CloseDrainsBufferedEvents(t *testing.T) {
 	if got := fw.count(); got != 2 {
 		t.Fatalf("writer received %d events after Close, want 2", got)
 	}
+	testutil.AssertNoGoroutineLeaks(t, "internal/queue.(*Queue).run")
 }
 
 func TestNewWebRequestProjectsAndRedactsPayload(t *testing.T) {

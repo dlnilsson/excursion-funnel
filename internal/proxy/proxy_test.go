@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/dlnilsson/excursion-funnel/internal/queue"
+	"github.com/dlnilsson/excursion-funnel/internal/testutil"
 )
 
 type recordingSink struct {
@@ -332,7 +333,9 @@ func TestProxy_ForwardProxyCONNECTTunnel(t *testing.T) {
 	}
 
 	_ = conn.Close()
-	time.Sleep(20 * time.Millisecond)
+	proxyServer.Close()
+	upstream.Close()
+	testutil.AssertNoGoroutineLeaks(t, "internal/proxy.(*Proxy).handleConnect.func")
 	sink.mu.Lock()
 	n := len(sink.events)
 	sink.mu.Unlock()
@@ -442,6 +445,7 @@ data: {"type":"message_stop"}
 	if ev.ResponseID != "msg_gzip" || ev.ModelReported != "claude-opus-4-8" {
 		t.Fatalf("event = %+v, want decoded gzip metadata", ev)
 	}
+	testutil.AssertNoGoroutineLeaks(t, "internal/proxy.newDecodingCapture.func")
 	// Input normalized to include cache read: fresh 13 + cache read 8 = 21.
 	checkUsagePtr(t, "InputTokens", ev.Usage.InputTokens, 21)
 	checkUsagePtr(t, "OutputTokens", ev.Usage.OutputTokens, 21)

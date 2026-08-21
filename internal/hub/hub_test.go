@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dlnilsson/excursion-funnel/internal/testutil"
 	proxyproto "github.com/pires/go-proxyproto"
 )
 
@@ -122,4 +123,5 @@ func TestRunServersStopsOnContextCancellation(t *testing.T) {
 	if err := runServers(ctx, "127.0.0.1:0", handler, "127.0.0.1:0", handler, time.Second, log); err != nil {
 		t.Fatal(err)
 	}
+	testutil.AssertNoGoroutineLeaks(t, "internal/hub.runServers.func")
 }

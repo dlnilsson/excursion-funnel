@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -15,6 +16,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/dlnilsson/excursion-funnel/internal/testutil"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -36,6 +38,7 @@ func TestAuthorizedKeyLoginAndSession(t *testing.T) {
 		t.Fatal(err)
 	}
 	hub := NewHubWithLogger(allowed, nil)
+	t.Cleanup(func() { testutil.AssertNoGoroutineLeaks(t, "internal/hubauth.(*Hub).reapLoop") })
 	t.Cleanup(hub.Close)
 	server := httptest.NewServer(hub.Handler())
 	t.Cleanup(server.Close)
@@ -79,6 +82,49 @@ func TestAuthorizedKeyLoginAndSession(t *testing.T) {
 		t.Fatalf("replay status = %s, want 401", replay.Status)
 	}
 	replay.Body.Close()
+}
+
+func TestAuthenticationRequestUsesStrictJSON(t *testing.T) {
+	hub := NewHubWithLogger(map[string]string{}, nil)
+	t.Cleanup(func() { testutil.AssertNoGoroutineLeaks(t, "internal/hubauth.(*Hub).reapLoop") })
+	t.Cleanup(hub.Close)
+	server := httptest.NewServer(hub.Handler())
+	t.Cleanup(server.Close)
+
+	oversized := fmt.Sprintf(`{"id":"id","public_key":"key","signature":"signature"}%s`,
+		strings.Repeat(" ", 33<<10))
+	tests := []struct {
+		name   string
+		body   []byte
+		status int
+	}{
+		{name: "duplicate field", body: []byte(`{"id":"first","id":"second","public_key":"key","signature":"signature"}`), status: http.StatusBadRequest},
+		{name: "invalid UTF-8", body: []byte("{\"id\":\"\xff\",\"public_key\":\"key\",\"signature\":\"signature\"}"), status: http.StatusBadRequest},
+		{name: "incorrect field casing", body: []byte(`{"ID":"id","public_key":"key","signature":"signature"}`), status: http.StatusBadRequest},
+		{name: "trailing value", body: []byte(`{"id":"id","public_key":"key","signature":"signature"}{}`), status: http.StatusBadRequest},
+		{name: "unknown field", body: []byte(`{"id":"id","public_key":"key","signature":"signature","future":true}`), status: http.StatusUnauthorized},
+		{name: "oversized body", body: []byte(oversized), status: http.StatusBadRequest},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			response, err := http.Post(server.URL+"/api/v1/auth", "application/json", bytes.NewReader(tt.body))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer response.Body.Close()
+			if response.StatusCode != tt.status {
+				t.Fatalf("status = %d, want %d", response.StatusCode, tt.status)
+			}
+		})
+	}
+}
+
+func TestUnmarshalAuthResponseRejectsOversizedBody(t *testing.T) {
+	var value map[string]string
+	body := `{"status":"ok"}` + strings.Repeat(" ", maxAuthJSON)
+	if err := unmarshalAuthResponse(strings.NewReader(body), &value); err == nil {
+		t.Fatal("oversized authentication response accepted")
+	}
 }
 
 func TestLoadAuthorizedKeysIgnoresInvalidAndNonEd25519(t *testing.T) {
@@ -135,6 +181,7 @@ func TestClientUsesExplicitOpenSSHKeyAndCachesCredential(t *testing.T) {
 		t.Fatal(err)
 	}
 	hub := NewHubWithLogger(map[string]string{canonicalKey(sshPub): ssh.FingerprintSHA256(sshPub)}, nil)
+	t.Cleanup(func() { testutil.AssertNoGoroutineLeaks(t, "internal/hubauth.(*Hub).reapLoop") })
 	t.Cleanup(hub.Close)
 	server := httptest.NewServer(hub.Handler())
 	t.Cleanup(server.Close)
