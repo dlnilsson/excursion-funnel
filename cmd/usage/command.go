@@ -2,8 +2,10 @@
 package usage
 
 import (
+	"bytes"
 	"io"
 
+	"github.com/dlnilsson/excursion-funnel/cmd/loading"
 	"github.com/dlnilsson/excursion-funnel/cmd/reportflags"
 	appusage "github.com/dlnilsson/excursion-funnel/internal/usage"
 	"github.com/spf13/cobra"
@@ -60,9 +62,18 @@ func run(opts *options, today bool) func(*cobra.Command, []string) error {
 		runUsage := func(writer io.Writer) error {
 			return appusage.Run(ctx, writer, appOpts)
 		}
-		if !shouldAnimateUsage(appOpts.JSON, isTerminalWriter(out), isTerminalWriter(statusOut)) {
+		if !loading.ShouldAnimate(appOpts.JSON, loading.IsTerminalWriter(out), loading.IsTerminalWriter(statusOut)) {
 			return runUsage(out)
 		}
-		return runWithSpinner(ctx, out, statusOut, runUsage)
+		output, err := loading.Run(ctx, statusOut, "Loading usage…", func() ([]byte, error) {
+			var buffered bytes.Buffer
+			err := runUsage(&buffered)
+			return buffered.Bytes(), err
+		})
+		if err != nil {
+			return err
+		}
+		_, err = io.Copy(out, bytes.NewReader(output))
+		return err
 	}
 }
