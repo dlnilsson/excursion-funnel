@@ -21,7 +21,7 @@ func TestPrintJSONEmptyRowsIsArray(t *testing.T) {
 	}
 }
 
-func TestPrintRowsRendersUsageStyleTable(t *testing.T) {
+func TestPrintRowsRendersCommandOnlyTable(t *testing.T) {
 	rows := []report.ToolCallRow{{
 		StartedAt:   time.Date(2026, time.August, 20, 12, 34, 56, 0, time.Local),
 		Client:      "codex",
@@ -31,7 +31,7 @@ func TestPrintRowsRendersUsageStyleTable(t *testing.T) {
 		Command:     "rg --files",
 	}}
 	var output bytes.Buffer
-	if err := printRows(&output, rows); err != nil {
+	if err := printRows(&output, rows, false); err != nil {
 		t.Fatal(err)
 	}
 
@@ -44,7 +44,34 @@ func TestPrintRowsRendersUsageStyleTable(t *testing.T) {
 		!strings.HasPrefix(lines[len(lines)-1], "╰") || !strings.HasSuffix(lines[len(lines)-1], "╯") {
 		t.Fatalf("output does not have the expected compact rounded table shape:\n%s", text)
 	}
-	for _, want := range []string{"STARTED", "CLIENT", "MODEL", "TOOL", "DESCRIPTION", "COMMAND", "codex", "gpt-5.6-sol", "shell_command", "rg --files"} {
+	for _, want := range []string{"COMMAND", "rg --files"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("output missing %q:\n%s", want, text)
+		}
+	}
+	for _, unwanted := range []string{"STARTED", "CLIENT", "MODEL", "TOOL", "DESCRIPTION", "codex", "gpt-5.6-sol", "shell_command", "inspect files"} {
+		if strings.Contains(text, unwanted) {
+			t.Errorf("output unexpectedly contains %q:\n%s", unwanted, text)
+		}
+	}
+}
+
+func TestPrintRowsVerboseRendersToolCallMetadata(t *testing.T) {
+	rows := []report.ToolCallRow{{
+		StartedAt:   time.Date(2026, time.August, 20, 12, 34, 56, 0, time.Local),
+		Client:      "codex",
+		Model:       "gpt-5.6-sol",
+		Name:        "shell_command",
+		Description: "inspect files",
+		Command:     "rg --files",
+	}}
+	var output bytes.Buffer
+	if err := printRows(&output, rows, true); err != nil {
+		t.Fatal(err)
+	}
+
+	text := output.String()
+	for _, want := range []string{"STARTED", "CLIENT", "MODEL", "TOOL", "DESCRIPTION", "COMMAND", "codex", "gpt-5.6-sol", "shell_command", "inspect files", "rg --files"} {
 		if !strings.Contains(text, want) {
 			t.Errorf("output missing %q:\n%s", want, text)
 		}
@@ -57,7 +84,7 @@ func TestPrintRowsWrapsLongValuesWithinTableWidth(t *testing.T) {
 		{Client: "codex", Model: "gpt-5.6-sol", Name: "exec", Description: strings.Repeat("long description ", 20)},
 	}
 	var output bytes.Buffer
-	if err := printRows(&output, rows); err != nil {
+	if err := printRows(&output, rows, true); err != nil {
 		t.Fatal(err)
 	}
 
@@ -75,19 +102,26 @@ func TestPrintRowsWrapsLongValuesWithinTableWidth(t *testing.T) {
 	}
 }
 
-func TestPrintRowsEmptyRowsKeepsMessage(t *testing.T) {
+func TestPrintRowsEmptyRowsUsesCommandMessage(t *testing.T) {
 	var output bytes.Buffer
-	if err := printRows(&output, nil); err != nil {
+	if err := printRows(&output, nil, false); err != nil {
 		t.Fatal(err)
 	}
-	if got := output.String(); got != "no tool calls recorded today\n" {
+	if got := output.String(); got != "no commands recorded today\n" {
 		t.Fatalf("output = %q, want empty-state message", got)
+	}
+	output.Reset()
+	if err := printRows(&output, nil, true); err != nil {
+		t.Fatal(err)
+	}
+	if got := output.String(); got != "no commands recorded today\n" {
+		t.Fatalf("verbose output = %q, want empty-state message", got)
 	}
 }
 
 func TestPrintRowsPropagatesWriteErrors(t *testing.T) {
 	errWrite := errors.New("write failed")
-	if err := printRows(toolErrorWriter{err: errWrite}, []report.ToolCallRow{{Client: "codex"}}); !errors.Is(err, errWrite) {
+	if err := printRows(toolErrorWriter{err: errWrite}, []report.ToolCallRow{{Command: "pwd"}}, false); !errors.Is(err, errWrite) {
 		t.Fatalf("printRows() error = %v, want %v", err, errWrite)
 	}
 }

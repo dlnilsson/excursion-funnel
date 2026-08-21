@@ -281,6 +281,8 @@ type ToolCallOptions struct {
 	Since time.Time
 	Until time.Time
 	Limit int
+	// CommandsOnly excludes tool calls whose command is empty.
+	CommandsOnly bool
 }
 
 // Summary returns live usage totals for the selected interval.
@@ -521,7 +523,7 @@ func (r *Reporter) ToolCalls(ctx context.Context, opts ToolCallOptions) ([]ToolC
 		if err != nil {
 			return nil, err
 		}
-		out, err := r.joinRequestsToToolCalls(ctx, requests, limit)
+		out, err := r.joinRequestsToToolCalls(ctx, requests, limit, opts.CommandsOnly)
 		if err != nil {
 			return nil, err
 		}
@@ -567,7 +569,7 @@ ORDER BY started_at DESC LIMIT ?`, args...)
 	return out, nil
 }
 
-func (r *Reporter) joinRequestsToToolCalls(ctx context.Context, requests []toolCallRequest, limit int) ([]ToolCallRow, error) {
+func (r *Reporter) joinRequestsToToolCalls(ctx context.Context, requests []toolCallRequest, limit int, commandsOnly bool) ([]ToolCallRow, error) {
 	if len(requests) == 0 {
 		return nil, nil
 	}
@@ -579,9 +581,13 @@ func (r *Reporter) joinRequestsToToolCalls(ctx context.Context, requests []toolC
 		ids[i] = req.ID
 		placeholders[i] = "?"
 	}
-	rows, err := r.store.DB().QueryContext(ctx, `
+	query := `
 SELECT request_id, ordinal, COALESCE(tool_call_id, ''), name, COALESCE(command, ''), COALESCE(description, '')
-FROM tool_calls WHERE request_id IN (`+strings.Join(placeholders, ", ")+`)`, ids...)
+FROM tool_calls WHERE request_id IN (` + strings.Join(placeholders, ", ") + `)`
+	if commandsOnly {
+		query += ` AND COALESCE(command, '') <> ''`
+	}
+	rows, err := r.store.DB().QueryContext(ctx, query, ids...)
 	if err != nil {
 		return nil, fmt.Errorf("query tool calls for candidate requests: %w", err)
 	}

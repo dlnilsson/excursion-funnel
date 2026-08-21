@@ -18,18 +18,25 @@ const (
 	maxTableWidth     = 140
 )
 
-func printRows(out io.Writer, rows []report.ToolCallRow) error {
+func printRows(out io.Writer, rows []report.ToolCallRow, verbose bool) error {
 	if len(rows) == 0 {
-		_, err := fmt.Fprintln(out, "no tool calls recorded today")
-		return err
+		return printEmpty(out)
 	}
 
 	values := make([][]string, 0, len(rows))
 	for _, row := range rows {
-		values = append(values, []string{
-			reporting.LocalTimestamp(row.StartedAt), reporting.EmptyAsDash(row.Client), reporting.EmptyAsDash(row.Model),
-			reporting.EmptyAsDash(row.Name), reporting.EmptyAsDash(compactValue(row.Description)), reporting.EmptyAsDash(compactValue(row.Command)),
-		})
+		if verbose {
+			values = append(values, []string{
+				reporting.LocalTimestamp(row.StartedAt), reporting.EmptyAsDash(row.Client), reporting.EmptyAsDash(row.Model),
+				reporting.EmptyAsDash(row.Name), reporting.EmptyAsDash(compactValue(row.Description)), reporting.EmptyAsDash(compactValue(row.Command)),
+			})
+			continue
+		}
+		values = append(values, []string{compactValue(row.Command)})
+	}
+	headers := []string{"COMMAND"}
+	if verbose {
+		headers = []string{"STARTED", "CLIENT", "MODEL", "TOOL", "DESCRIPTION", "COMMAND"}
 	}
 
 	cellStyle := lipgloss.NewStyle().Padding(0, 1)
@@ -40,7 +47,7 @@ func printRows(out io.Writer, rows []report.ToolCallRow) error {
 		BorderRow(true).
 		Width(outputWidth(out)).
 		Wrap(true).
-		Headers("STARTED", "CLIENT", "MODEL", "TOOL", "DESCRIPTION", "COMMAND").
+		Headers(headers...).
 		Rows(values...).
 		StyleFunc(func(row, _ int) lipgloss.Style {
 			if row == table.HeaderRow {
@@ -50,6 +57,11 @@ func printRows(out io.Writer, rows []report.ToolCallRow) error {
 		})
 
 	_, err := lipgloss.Fprintln(out, toolsTable.Render())
+	return err
+}
+
+func printEmpty(out io.Writer) error {
+	_, err := fmt.Fprintln(out, "no commands recorded today")
 	return err
 }
 

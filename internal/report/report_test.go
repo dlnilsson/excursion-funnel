@@ -596,6 +596,63 @@ func TestToolCalls_OrdersAcrossRequestsAndExpandsWindow(t *testing.T) {
 	}
 }
 
+func TestToolCalls_CommandsOnlySkipsEmptyCommandsAndExpandsWindow(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "usage.duckdb")
+	st, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatalf("store.Open() error = %v", err)
+	}
+	base := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+	newEvent := func(id string, offset time.Duration, calls ...queue.ToolCall) queue.UsageEvent {
+		started := base.Add(offset)
+		return queue.UsageEvent{
+			RequestID:   id,
+			StartedAt:   started,
+			CompletedAt: started.Add(time.Second),
+			Method:      "POST",
+			Path:        "/v1/messages",
+			UpstreamURL: "https://api.anthropic.com/v1/messages",
+			ToolCalls:   calls,
+		}
+	}
+	events := []queue.UsageEvent{
+		newEvent("req-1", time.Minute, queue.ToolCall{Name: "Bash", Command: "older"}),
+		newEvent("req-2", 2*time.Minute),
+		newEvent("req-3", 3*time.Minute, queue.ToolCall{Name: "Bash", Command: "newer"}),
+		newEvent("req-4", 4*time.Minute, queue.ToolCall{Name: "Read", Description: "read file"}),
+		newEvent("req-5", 5*time.Minute, queue.ToolCall{Name: "Task", Description: "delegate work"}),
+	}
+	if err := st.InsertBatch(t.Context(), events); err != nil {
+		_ = st.Close()
+		t.Fatalf("InsertBatch() error = %v", err)
+	}
+	if err := st.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+
+	r, err := OpenWithHubKey(dbPath, "", "")
+	if err != nil {
+		t.Fatalf("OpenWithHubKey() error = %v", err)
+	}
+	t.Cleanup(func() { _ = r.Close() })
+
+	rows, err := r.ToolCalls(t.Context(), ToolCallOptions{Limit: 2, CommandsOnly: true})
+	if err != nil {
+		t.Fatalf("ToolCalls() error = %v", err)
+	}
+	if len(rows) != 2 || rows[0].Command != "newer" || rows[1].Command != "older" {
+		t.Fatalf("rows = %+v, want the two most recent non-empty commands", rows)
+	}
+
+	rows, err = r.ToolCalls(t.Context(), ToolCallOptions{Limit: 2})
+	if err != nil {
+		t.Fatalf("ToolCalls() unfiltered error = %v", err)
+	}
+	if len(rows) != 2 || rows[0].Name != "Task" || rows[1].Name != "Read" {
+		t.Fatalf("unfiltered rows = %+v, want metadata-only tool calls", rows)
+	}
+}
+
 func wantRequestFor(command string) string {
 	switch command {
 	case "five", "six":
