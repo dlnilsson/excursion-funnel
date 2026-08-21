@@ -27,11 +27,15 @@ func TestRejectsNonPositiveLimit(t *testing.T) {
 	}
 }
 
-func TestRequiresExactlyOneID(t *testing.T) {
-	if _, err := execute(t); err == nil {
-		t.Fatal("missing ID accepted")
+func TestAcceptsOptionalID(t *testing.T) {
+	cmd := New()
+	if err := cmd.Args(cmd, nil); err != nil {
+		t.Fatalf("no ID rejected: %v", err)
 	}
-	if _, err := execute(t, "one", "two"); err == nil {
+	if err := cmd.Args(cmd, []string{"one"}); err != nil {
+		t.Fatalf("one ID rejected: %v", err)
+	}
+	if err := cmd.Args(cmd, []string{"one", "two"}); err == nil {
 		t.Fatal("multiple IDs accepted")
 	}
 }

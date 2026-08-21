@@ -16,8 +16,9 @@ type Options struct {
 	Limit      int
 }
 
-// Run queries and writes requests matching id.
-func Run(ctx context.Context, out io.Writer, id string, opts Options) error {
+// Run opens a recent-request picker when id is empty, otherwise it queries and
+// writes requests matching id.
+func Run(ctx context.Context, in io.Reader, out io.Writer, id string, opts Options) error {
 	if opts.Limit <= 0 {
 		return fmt.Errorf("--limit must be positive, got %d", opts.Limit)
 	}
@@ -26,7 +27,28 @@ func Run(ctx context.Context, out io.Writer, id string, opts Options) error {
 		return fmt.Errorf("open database: %w", err)
 	}
 	defer reporter.Close()
-	rows, err := reporter.Inspect(ctx, id, opts.Limit+1)
+	if id == "" {
+		rows, err := reporter.RecentRequests(ctx, report.DefaultRecentRequestLimit)
+		if err != nil {
+			return err
+		}
+		if len(rows) == 0 {
+			_, err = fmt.Fprintln(out, "no requests recorded")
+			return err
+		}
+		if !shouldUseRequestList(isTerminalReader(in), isTerminalWriter(out)) {
+			return printRecentRows(out, rows)
+		}
+		id, err = runRequestList(ctx, in, out, rows)
+		if err != nil || id == "" {
+			return err
+		}
+	}
+	return printInspect(ctx, out, reporter, id, opts.Limit)
+}
+
+func printInspect(ctx context.Context, out io.Writer, reporter *report.Reporter, id string, limit int) error {
+	rows, err := reporter.Inspect(ctx, id, limit+1)
 	if err != nil {
 		return err
 	}
@@ -34,13 +56,13 @@ func Run(ctx context.Context, out io.Writer, id string, opts Options) error {
 		fmt.Fprintln(out, "no matching requests")
 		return nil
 	}
-	truncated := len(rows) > opts.Limit
+	truncated := len(rows) > limit
 	if truncated {
-		rows = rows[:opts.Limit]
+		rows = rows[:limit]
 	}
 	printRows(out, rows)
 	if truncated {
-		fmt.Fprintf(out, "\nshowing the %d most recent matches; pass --limit to see more\n", opts.Limit)
+		fmt.Fprintf(out, "\nshowing the %d most recent matches; pass --limit to see more\n", limit)
 	}
 	return nil
 }
