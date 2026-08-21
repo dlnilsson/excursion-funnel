@@ -2,6 +2,7 @@
 package tools
 
 import (
+	"github.com/dlnilsson/excursion-funnel/cmd/loading"
 	"github.com/dlnilsson/excursion-funnel/cmd/reportflags"
 	"github.com/dlnilsson/excursion-funnel/internal/report"
 	apptools "github.com/dlnilsson/excursion-funnel/internal/tools"
@@ -14,6 +15,8 @@ type options struct {
 	json       bool
 	verbose    bool
 }
+
+const loadingToolsText = "Loading tools…"
 
 // New creates the tools command and its today child command.
 func New() *cobra.Command {
@@ -28,12 +31,28 @@ func New() *cobra.Command {
 		Short: "Show tool calls recorded during the current local day",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return apptools.Run(cmd.Context(), cmd.InOrStdin(), cmd.OutOrStdout(), apptools.Options{
-				Connection: opts.connection.Resolve(cmd.Flags()),
-				Limit:      opts.limit,
-				JSON:       opts.json,
-				Verbose:    opts.verbose,
+			var (
+				ctx       = cmd.Context()
+				in        = cmd.InOrStdin()
+				out       = cmd.OutOrStdout()
+				statusOut = cmd.ErrOrStderr()
+				appOpts   = apptools.Options{
+					Connection: opts.connection.Resolve(cmd.Flags()),
+					Limit:      opts.limit,
+					JSON:       opts.json,
+					Verbose:    opts.verbose,
+				}
+			)
+			if !loading.ShouldAnimate(appOpts.JSON, loading.IsTerminalWriter(out), loading.IsTerminalWriter(statusOut)) {
+				return apptools.Run(ctx, in, out, appOpts)
+			}
+			rows, err := loading.Run(ctx, statusOut, loadingToolsText, func() ([]report.ToolCallRow, error) {
+				return apptools.Load(ctx, appOpts)
 			})
+			if err != nil {
+				return err
+			}
+			return apptools.Render(ctx, in, out, rows, appOpts)
 		},
 	})
 	return cmd

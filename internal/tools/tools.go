@@ -19,15 +19,15 @@ type Options struct {
 	Verbose    bool
 }
 
-// Run queries and writes today's tool calls.
-func Run(ctx context.Context, in io.Reader, out io.Writer, opts Options) error {
+// Load queries today's tool calls.
+func Load(ctx context.Context, opts Options) ([]report.ToolCallRow, error) {
 	if opts.Limit <= 0 {
-		return fmt.Errorf("--limit must be positive, got %d", opts.Limit)
+		return nil, fmt.Errorf("--limit must be positive, got %d", opts.Limit)
 	}
 	since := reporting.BeginningOfDay(time.Now())
 	reporter, err := report.OpenWithHubKey(opts.Connection.DBPath, opts.Connection.DefaultDBPath, opts.Connection.HubKey)
 	if err != nil {
-		return fmt.Errorf("open database: %w", err)
+		return nil, fmt.Errorf("open database: %w", err)
 	}
 	defer reporter.Close()
 	rows, err := reporter.ToolCalls(ctx, report.ToolCallOptions{
@@ -37,8 +37,13 @@ func Run(ctx context.Context, in io.Reader, out io.Writer, opts Options) error {
 		CommandsOnly: !opts.JSON,
 	})
 	if err != nil {
-		return err
+		return nil, err
 	}
+	return rows, nil
+}
+
+// Render writes loaded tool calls in the requested output format.
+func Render(ctx context.Context, in io.Reader, out io.Writer, rows []report.ToolCallRow, opts Options) error {
 	if opts.JSON {
 		return printJSON(out, rows)
 	}
@@ -49,4 +54,13 @@ func Run(ctx context.Context, in io.Reader, out io.Writer, opts Options) error {
 		return runCommandList(ctx, in, out, rows, opts.Verbose)
 	}
 	return printRows(out, rows, opts.Verbose)
+}
+
+// Run queries and writes today's tool calls.
+func Run(ctx context.Context, in io.Reader, out io.Writer, opts Options) error {
+	rows, err := Load(ctx, opts)
+	if err != nil {
+		return err
+	}
+	return Render(ctx, in, out, rows, opts)
 }

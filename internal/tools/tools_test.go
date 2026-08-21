@@ -110,3 +110,25 @@ func TestRequiresPositiveLimit(t *testing.T) {
 		t.Fatal("non-positive limit accepted")
 	}
 }
+
+func TestLoadThenRender(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "usage.duckdb")
+	seedToolCall(t, dbPath)
+	opts := Options{
+		Connection: reporting.Connection{DBPath: dbPath, DefaultDBPath: dbPath},
+		Limit:      report.DefaultRecentToolCallLimit,
+	}
+	rows, err := Load(t.Context(), opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var output bytes.Buffer
+	if err := Render(t.Context(), strings.NewReader(""), &output, rows, opts); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"COMMAND", "go test ./..."} {
+		if !strings.Contains(output.String(), want) {
+			t.Fatalf("output missing %q: %s", want, output.String())
+		}
+	}
+}
