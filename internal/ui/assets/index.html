@@ -763,7 +763,7 @@
   <details class="table-section" data-table-key="model-activity" open>
     <summary>Model activity table overall</summary>
     <table id="model-activity-table">
-      <thead><tr><th>Model</th><th>Total tokens</th><th>Requests</th><th>Avg tokens/request</th><th>Share</th></tr></thead>
+      <thead><tr><th>Model</th><th>Input tokens</th><th>Output tokens</th><th>Total tokens</th><th>Requests</th><th>Avg tokens/request</th><th>Share</th></tr></thead>
       <tbody></tbody>
     </table>
   </details>
@@ -1416,14 +1416,14 @@ function renderModelActivityTable(rows) {
   const total = modelRows.reduce((sum, r) => sum + r.Total, 0);
   const tbody = document.querySelector("#model-activity-table tbody");
   if (topRows.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="5" class="empty">No model history yet</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="7" class="empty">No model history yet</td></tr>';
     return;
   }
   tbody.innerHTML = topRows.map(r => {
     const average = r.Requests > 0 ? Math.round(r.Total / r.Requests) : 0;
     const share = total > 0 ? `${(100 * r.Total / total).toFixed(1)}%` : "0.0%";
     return `<tr>
-      <td>${escapeHTML(modelLabel(r))}</td>${tokenCell(r.Total)}
+      <td>${escapeHTML(modelLabel(r))}</td>${tokenCell(r.Input)}${tokenCell(r.Output)}${tokenCell(r.Total)}
       <td>${r.Requests.toLocaleString()}</td><td>${average.toLocaleString()}</td><td>${share}</td>
     </tr>`;
   }).join("");
@@ -1433,8 +1433,10 @@ function aggregateModelActivityRows(rows) {
   const byModel = new Map();
   for (const row of rows) {
     const model = modelLabel(row);
-    const aggregate = byModel.get(model) || { Model: model, Requests: 0, Total: 0 };
+    const aggregate = byModel.get(model) || { Model: model, Requests: 0, Input: 0, Output: 0, Total: 0 };
     aggregate.Requests += Number(row.Requests) || 0;
+    aggregate.Input += Number(row.Input) || 0;
+    aggregate.Output += Number(row.Output) || 0;
     aggregate.Total += Number(row.Total) || 0;
     byModel.set(model, aggregate);
   }

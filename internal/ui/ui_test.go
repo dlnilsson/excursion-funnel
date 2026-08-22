@@ -47,7 +47,11 @@ func TestHandleIndex_ServesDashboardHTML(t *testing.T) {
 		`renderTokenHeatmap(historyRows)`,
 		`id="history-stacked-chart"`,
 		`id="model-activity-table"`,
+		`<th>Input tokens</th>`,
+		`<th>Output tokens</th>`,
 		`aggregateModelActivityRows(rows)`,
+		`aggregate.Input += Number(row.Input) || 0`,
+		`aggregate.Output += Number(row.Output) || 0`,
 		`fetch("/ui/api/kpis")`,
 		`p50 latency`,
 		`Error rate today`,
@@ -387,8 +391,8 @@ func TestHandleSummary_ReturnsTodaysUsage(t *testing.T) {
 	for _, row := range rows {
 		if row.Provider == "openai" && row.Model == "gpt-5.3-codex" {
 			found = true
-			if row.Client != "Zed" || row.Requests != 1 || row.Input != 10 {
-				t.Fatalf("openai row = %+v, want client=Zed requests=1 input=10", row)
+			if row.Client != "Zed" || row.Requests != 1 || row.Input != 10 || row.Output != 4 || row.Total != 14 {
+				t.Fatalf("openai row = %+v, want client=Zed requests=1 input=10 output=4 total=14", row)
 			}
 		}
 	}
@@ -475,8 +479,8 @@ func TestHandleModelHistory_ReturnsLiveAggregates(t *testing.T) {
 	for _, row := range rows {
 		if row.Provider == "openai" && row.Model == "gpt-5.3-codex" {
 			found = true
-			if row.Client != "Zed" || row.Requests != 1 || row.Input != 10 {
-				t.Fatalf("openai row = %+v, want client=Zed requests=1 input=10", row)
+			if row.Client != "Zed" || row.Requests != 1 || row.Input != 10 || row.Output != 4 || row.Total != 14 {
+				t.Fatalf("openai row = %+v, want client=Zed requests=1 input=10 output=4 total=14", row)
 			}
 		}
 	}
@@ -514,8 +518,12 @@ func newTestHandler(t *testing.T) http.Handler {
 	}
 	t.Cleanup(func() { _ = st.Close() })
 
-	now := time.Now().UTC()
-	input := int64(10)
+	var (
+		now    = time.Now().UTC()
+		input  = int64(10)
+		output = int64(4)
+		total  = int64(14)
+	)
 	events := []queue.UsageEvent{
 		{
 			RequestID:     "req-ok-1",
@@ -532,7 +540,7 @@ func newTestHandler(t *testing.T) http.Handler {
 			UserAgent:     "codex-tui/0.146.0",
 			Originator:    "zed",
 			ClientName:    "Zed",
-			Usage:         queue.Usage{InputTokens: &input},
+			Usage:         queue.Usage{InputTokens: &input, OutputTokens: &output, TotalTokens: &total},
 			ToolCalls: []queue.ToolCall{{
 				ID:            "toolu-bash",
 				Name:          "Bash",
