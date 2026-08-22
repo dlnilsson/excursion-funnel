@@ -108,7 +108,7 @@ func TestProxy_CapturesProviderSessionHeaders(t *testing.T) {
 		otherValue string
 	}{
 		{name: "openai", path: "/v1/responses", body: `{"model":"gpt-test"}`, header: "session_id", sessionID: "openai-session", other: "x-session-id", otherValue: "wrong-anthropic"},
-		{name: "anthropic", path: "/v1/messages", body: `{"model":"claude-test"}`, header: "x-session-id", sessionID: "anthropic-session", other: "session_id", otherValue: "wrong-openai"},
+		{name: "anthropic", path: "/v1/messages", body: `{"model":"claude-test"}`, header: "X-Claude-Code-Session-Id", sessionID: "anthropic-session", other: "session_id", otherValue: "wrong-openai"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

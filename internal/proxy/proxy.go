@@ -402,9 +402,12 @@ func (p *Proxy) handleProxy(w http.ResponseWriter, r *http.Request) {
 			"bytes", n, "model", model, "stream", stream, "dur_ms", dur.Milliseconds())
 	}
 
+	// Codex sends session_id; Claude Code sends X-Claude-Code-Session-Id. Header
+	// lookup is case-insensitive, so the canonical spelling here matches whatever
+	// casing the client puts on the wire.
 	sessionID := r.Header.Get("session_id")
 	if provider == "anthropic" {
-		sessionID = r.Header.Get("x-session-id")
+		sessionID = r.Header.Get("X-Claude-Code-Session-Id")
 	}
 	ev := queue.UsageEvent{
 		RequestID:         reqID,
