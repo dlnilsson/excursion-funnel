@@ -4,6 +4,7 @@ package forward
 import (
 	"context"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/dlnilsson/excursion-funnel/internal/hubauth"
@@ -98,7 +99,13 @@ func (f *Forwarder) run(ctx context.Context) {
 				_ = remote.Close()
 				remote = nil
 			}
-			f.auth.Invalidate()
+			// Only discard the cached credential when the hub actually rejected
+			// it. A server-side failure (e.g. an insert error) leaves the
+			// credential valid, so invalidating here would force a needless
+			// re-login on every retry.
+			if isAuthError(err) {
+				f.auth.Invalidate()
+			}
 			if !wait(ctx, backoff) {
 				return
 			}
@@ -111,6 +118,14 @@ func (f *Forwarder) run(ctx context.Context) {
 		backoff = f.cfg.PollInterval
 		f.log.Debug("forwarded usage events to hub", "count", len(events))
 	}
+}
+
+// isAuthError reports whether err indicates the hub rejected our credential.
+// Quack surfaces credential rejection during ATTACH as an "Authentication
+// failed" input error; other failures (insert errors, connection resets) leave
+// the cached credential usable and must not trigger a re-login.
+func isAuthError(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "Authentication failed")
 }
 
 func wait(ctx context.Context, duration time.Duration) bool {

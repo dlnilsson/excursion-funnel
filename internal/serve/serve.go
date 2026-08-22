@@ -121,7 +121,7 @@ func remoteDashboard(cfg config.Config, log *slog.Logger) http.Handler {
 		reporter, err := report.OpenHubRemote(cfg.HubAddr, cfg.HubKey, cfg.HubInsecure)
 		if err != nil {
 			log.Warn("hub dashboard unavailable", "err", err)
-			http.Error(w, "hub unavailable; usage is still being spooled", http.StatusServiceUnavailable)
+			http.Error(w, "hub unavailable; usage is still being spooled: "+err.Error(), http.StatusServiceUnavailable)
 			return
 		}
 		defer reporter.Close()
