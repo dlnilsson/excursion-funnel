@@ -22,6 +22,8 @@ const recentToolCallsLimit = 50
 
 const recentWebRequestsLimit = 50
 
+const hourlyHistoryBuckets = 24
+
 // New builds the dashboard handler, rooted at /ui/.
 func New(rep *report.Reporter, log *slog.Logger) http.Handler {
 	staticAssets, err := fs.Sub(assets, "assets")
@@ -39,6 +41,7 @@ func New(rep *report.Reporter, log *slog.Logger) http.Handler {
 	mux.HandleFunc("GET /ui/api/directories", handleDirectories(rep, log))
 	mux.HandleFunc("GET /ui/api/history", handleHistory(rep, log))
 	mux.HandleFunc("GET /ui/api/history/models", handleModelHistory(rep, log))
+	mux.HandleFunc("GET /ui/api/history/hourly", handleHourlyHistory(rep, log))
 	mux.HandleFunc("GET /ui/api/errors", handleErrors(rep, log))
 	mux.HandleFunc("GET /ui/api/tools", handleToolCalls(rep, log))
 	mux.HandleFunc("GET /ui/api/web-requests", handleWebRequests(rep, log))
@@ -212,6 +215,23 @@ func handleModelHistory(rep *report.Reporter, log *slog.Logger) http.HandlerFunc
 	}
 }
 
+func handleHourlyHistory(rep *report.Reporter, log *slog.Logger) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		currentHour := beginningOfHour(time.Now())
+		rows, err := rep.HourlyTokens(r.Context(), report.HourlyTokenOptions{
+			Since:              currentHour.Add(-(hourlyHistoryBuckets - 1) * time.Hour),
+			Until:              currentHour.Add(time.Hour),
+			KnownProvidersOnly: true,
+		})
+		if err != nil {
+			log.Error("ui: query hourly history", "err", err)
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, rows)
+	}
+}
+
 func handleErrors(rep *report.Reporter, log *slog.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		since := beginningOfDay(time.Now())
@@ -290,6 +310,11 @@ func knownProviderRows(rows []report.SummaryRow) []report.SummaryRow {
 func beginningOfDay(t time.Time) time.Time {
 	y, m, d := t.Date()
 	return time.Date(y, m, d, 0, 0, 0, 0, t.Location())
+}
+
+func beginningOfHour(t time.Time) time.Time {
+	y, m, d := t.Date()
+	return time.Date(y, m, d, t.Hour(), 0, 0, 0, t.Location())
 }
 
 func beginningOfWeek(t time.Time) time.Time {

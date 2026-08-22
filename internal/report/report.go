@@ -147,6 +147,21 @@ type SummaryRow struct {
 	Total      int64
 }
 
+// HourlyTokenOptions controls an hourly token-activity query. Since is
+// inclusive and Until is exclusive.
+type HourlyTokenOptions struct {
+	Since              time.Time
+	Until              time.Time
+	KnownProvidersOnly bool
+}
+
+// HourlyTokenRow is one hour of fresh-input and output token activity.
+type HourlyTokenRow struct {
+	Hour       time.Time
+	FreshInput int64
+	Output     int64
+}
+
 // KPIOptions controls a dashboard KPI query. Since is inclusive and Until is
 // exclusive, matching the usage-reporting date range semantics.
 type KPIOptions struct {
@@ -340,6 +355,56 @@ func (r *Reporter) Summary(ctx context.Context, opts SummaryOptions) ([]SummaryR
 		where = appendWherePredicate(where, predicate)
 	}
 	return r.scanSummary(ctx, buildSummaryQuery(selectGroup, where, groupExpr, orderBy), args...)
+}
+
+// HourlyTokens returns zero-filled hourly token totals for the selected
+// interval. Fresh input excludes cached reads and Anthropic cache writes.
+func (r *Reporter) HourlyTokens(ctx context.Context, opts HourlyTokenOptions) ([]HourlyTokenRow, error) {
+	if opts.Since.IsZero() || opts.Until.IsZero() {
+		return nil, errors.New("hourly token range requires since and until")
+	}
+	if !opts.Since.Before(opts.Until) {
+		return nil, errors.New("hourly token range must have since before until")
+	}
+
+	where, args := timeRange("started_at", opts.Since, opts.Until)
+	if opts.KnownProvidersOnly {
+		where = appendWherePredicate(where, providerSQL("path")+" != 'unknown'")
+	}
+	rows, err := r.store.DB().QueryContext(ctx, `SELECT
+  date_trunc('hour', started_at) AS hour,
+  SUM(`+freshInputSQL()+`) AS fresh_input_tokens,
+  SUM(COALESCE(output_tokens, 0)) AS output_tokens
+FROM requests
+`+where+`
+GROUP BY hour
+ORDER BY hour`, args...)
+	if err != nil {
+		return nil, fmt.Errorf("query hourly tokens: %w", err)
+	}
+	defer rows.Close()
+
+	aggregated := make(map[int64]HourlyTokenRow)
+	for rows.Next() {
+		var row HourlyTokenRow
+		if err := rows.Scan(&row.Hour, &row.FreshInput, &row.Output); err != nil {
+			return nil, fmt.Errorf("scan hourly tokens: %w", err)
+		}
+		aggregated[row.Hour.Unix()] = row
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate hourly tokens: %w", err)
+	}
+
+	start := beginningOfHour(opts.Since)
+	bucketCount := int(opts.Until.Sub(start)/time.Hour) + 1
+	out := make([]HourlyTokenRow, 0, bucketCount)
+	for hour := start; hour.Before(opts.Until); hour = hour.Add(time.Hour) {
+		row := aggregated[hour.Unix()]
+		row.Hour = hour
+		out = append(out, row)
+	}
+	return out, nil
 }
 
 // KPIs returns operational request metrics for the selected interval. The
@@ -1057,11 +1122,7 @@ func buildSummaryQuery(selectGroup, whereSQL, groupExpr, orderBy string) string 
  COUNT(*) AS requests,
  SUM(CASE WHEN error_type IS NULL THEN 0 ELSE 1 END) AS errors,
 	SUM(COALESCE(input_tokens, 0)) AS input_tokens,
- SUM(GREATEST(
-   COALESCE(input_tokens, 0) - COALESCE(cached_input_tokens, 0) -
-   CASE WHEN ` + providerSQL("path") + ` = 'anthropic' THEN COALESCE(cache_write_tokens, 0) ELSE 0 END,
-   0
- )) AS fresh_input_tokens,
+ SUM(` + freshInputSQL() + `) AS fresh_input_tokens,
  SUM(COALESCE(cached_input_tokens, 0)) AS cached_input_tokens,
  SUM(COALESCE(cache_write_tokens, 0)) AS cache_write_tokens,
  SUM(COALESCE(output_tokens, 0)) AS output_tokens,
@@ -1071,6 +1132,14 @@ FROM requests
 ` + whereSQL + `
 GROUP BY ` + groupExpr + `
 ORDER BY ` + orderBy
+}
+
+func freshInputSQL() string {
+	return `GREATEST(
+   COALESCE(input_tokens, 0) - COALESCE(cached_input_tokens, 0) -
+   CASE WHEN ` + providerSQL("path") + ` = 'anthropic' THEN COALESCE(cache_write_tokens, 0) ELSE 0 END,
+   0
+ )`
 }
 
 func buildInspectQuery(whereClause, orderBy, sessionExpression string) string {
@@ -1094,6 +1163,11 @@ func groupSelect(day, provider, client, model, source, directory, gitBranch stri
 }
 
 func joinSQLExprs(exprs ...string) string { return strings.Join(exprs, ", ") }
+
+func beginningOfHour(t time.Time) time.Time {
+	year, month, day := t.Date()
+	return time.Date(year, month, day, t.Hour(), 0, 0, 0, t.Location())
+}
 
 func timeRange(column string, since, until time.Time) (string, []any) {
 	var where []string

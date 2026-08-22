@@ -45,6 +45,12 @@ func TestHandleIndex_ServesDashboardHTML(t *testing.T) {
 		`const heatmapWeeks = 53`,
 		`const heatmapWeekStart = 1`,
 		`renderTokenHeatmap(historyRows)`,
+		`id="hourly-token-chart"`,
+		`fetch("/ui/api/history/hourly")`,
+		`type: "line"`,
+		`label: "Fresh input tokens"`,
+		`label: "Output tokens"`,
+		`Fresh input excludes cached input tokens and Anthropic cache-write tokens.`,
 		`id="history-stacked-chart"`,
 		`id="model-activity-table"`,
 		`<th>Input tokens</th>`,
@@ -104,6 +110,9 @@ func TestHandleIndex_ServesDashboardHTML(t *testing.T) {
 		}
 	}
 	body := rec.Body.String()
+	if strings.Index(body, `id="hourly-token-chart"`) > strings.Index(body, `id="history-stacked-chart"`) {
+		t.Fatal("hourly token chart appears after model history, want it above")
+	}
 	if strings.Index(body, `id="token-heatmap"`) < strings.Index(body, `id="agent-config"`) {
 		t.Fatal("token heatmap appears before agent configuration, want it below")
 	}
@@ -514,10 +523,36 @@ func TestHandleModelHistory_ReturnsLiveAggregates(t *testing.T) {
 	}
 }
 
+func TestHandleHourlyHistory_ReturnsTwentyFourTokenBuckets(t *testing.T) {
+	h := newTestHandler(t)
+
+	rec := doRequest(t, h, http.MethodGet, "/ui/api/history/hourly")
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	var rows []report.HourlyTokenRow
+	if err := json.Unmarshal(rec.Body.Bytes(), &rows); err != nil {
+		t.Fatalf("decode body: %v: %s", err, rec.Body.String())
+	}
+	if len(rows) != hourlyHistoryBuckets {
+		t.Fatalf("rows len = %d, want %d: %+v", len(rows), hourlyHistoryBuckets, rows)
+	}
+	for i := 1; i < len(rows); i++ {
+		if !rows[i-1].Hour.Before(rows[i].Hour) {
+			t.Fatalf("rows are not chronologically ordered at %d: %+v", i, rows)
+		}
+	}
+	latest := rows[len(rows)-1]
+	if latest.FreshInput != 10 || latest.Output != 4 {
+		t.Fatalf("latest row = %+v, want fresh input 10 and output 4", latest)
+	}
+}
+
 func TestSummaryAndErrors_RejectNonGET(t *testing.T) {
 	h := newTestHandler(t)
 
-	for _, path := range []string{"/ui/api/kpis", "/ui/api/summary", "/ui/api/history", "/ui/api/history/models", "/ui/api/errors", "/ui/api/tools"} {
+	for _, path := range []string{"/ui/api/kpis", "/ui/api/summary", "/ui/api/history", "/ui/api/history/models", "/ui/api/history/hourly", "/ui/api/errors", "/ui/api/tools"} {
 		rec := doRequest(t, h, http.MethodPost, path)
 		if rec.Code != http.StatusMethodNotAllowed {
 			t.Fatalf("POST %s status = %d, want 405", path, rec.Code)

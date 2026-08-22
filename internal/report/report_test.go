@@ -626,6 +626,57 @@ func TestHistorical_ReadsLiveDuckDBAggregates(t *testing.T) {
 	}
 }
 
+func TestHourlyTokens_AggregatesFreshInputAndFillsEmptyHours(t *testing.T) {
+	dbPath := seedReportDB(t)
+
+	st, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatalf("store.Open() error = %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+
+	var (
+		started = time.Date(2026, 8, 1, 12, 30, 0, 0, time.UTC)
+		tokens  = int64(100)
+	)
+	if err := st.InsertBatch(t.Context(), []queue.UsageEvent{{
+		RequestID:   "req-unknown-with-tokens",
+		StartedAt:   started,
+		CompletedAt: started.Add(time.Second),
+		Method:      "GET",
+		Path:        "/health",
+		UpstreamURL: "http://localhost/health",
+		Usage:       queue.Usage{InputTokens: &tokens, OutputTokens: &tokens},
+	}}); err != nil {
+		t.Fatalf("InsertBatch() error = %v", err)
+	}
+
+	since := time.Date(2026, 8, 1, 11, 0, 0, 0, time.UTC)
+	rows, err := New(st).HourlyTokens(t.Context(), HourlyTokenOptions{
+		Since:              since,
+		Until:              since.Add(3 * time.Hour),
+		KnownProvidersOnly: true,
+	})
+	if err != nil {
+		t.Fatalf("HourlyTokens() error = %v", err)
+	}
+	if len(rows) != 3 {
+		t.Fatalf("HourlyTokens() returned %d rows, want 3: %+v", len(rows), rows)
+	}
+	for i, row := range rows {
+		wantHour := since.Add(time.Duration(i) * time.Hour)
+		if !row.Hour.Equal(wantHour) {
+			t.Fatalf("rows[%d].Hour = %s, want %s", i, row.Hour, wantHour)
+		}
+	}
+	if rows[0].FreshInput != 0 || rows[0].Output != 0 || rows[2].FreshInput != 0 || rows[2].Output != 0 {
+		t.Fatalf("empty hourly rows = %+v and %+v, want zero totals", rows[0], rows[2])
+	}
+	if rows[1].FreshInput != 29 || rows[1].Output != 26 {
+		t.Fatalf("usage hour = %+v, want fresh input 29 and output 26", rows[1])
+	}
+}
+
 func TestInspect_FindsByResponseID(t *testing.T) {
 	dbPath := seedReportDB(t)
 

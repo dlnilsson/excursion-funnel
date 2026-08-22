@@ -322,6 +322,13 @@
     width: 100%;
   }
 
+  .chart-note {
+    color: var(--text-muted);
+    font-size: 0.85rem;
+    margin: 0.5rem 0 0;
+    text-align: center;
+  }
+
   .history-layout {
     display: grid;
     gap: 1rem;
@@ -761,6 +768,16 @@
   </table>
 </details>
 
+<section aria-labelledby="hourly-token-heading">
+  <h2 id="hourly-token-heading">Token activity over the last 24 hours</h2>
+  <div class="charts">
+    <div class="chart-panel">
+      <canvas id="hourly-token-chart" role="img" aria-label="Fresh input and output token usage during the last 24 hours"></canvas>
+    </div>
+  </div>
+  <p class="chart-note">Fresh input excludes cached input tokens and Anthropic cache-write tokens.</p>
+</section>
+
 <h2>Model activity overall</h2>
 <div class="history-layout">
   <div class="history-actions">
@@ -863,8 +880,10 @@ requires_openai_auth = true</code></pre>
 <script>
 const themeStorageKey = "excursion-funnel-theme";
 const tableStateStorageKey = "excursion-funnel-table-state";
+let hourlyTokenChart;
 let historyStackedChart;
 let sessionHistoryChart;
+let latestHourlyTokenRows = [];
 let latestHistoryRows = [];
 let latestModelHistoryRows = [];
 let latestSessionStats = {};
@@ -902,6 +921,7 @@ function setTheme(theme) {
     localStorage.setItem(themeStorageKey, theme);
   } catch {
   }
+  renderHourlyTokenChart(latestHourlyTokenRows);
   renderHistoryCharts(latestHistoryRows, latestModelHistoryRows);
   renderSessionHistory(latestSessionStats);
 }
@@ -1029,12 +1049,13 @@ function setSessionPeriod(period) {
 }
 
 async function load() {
-  const [kpis, sessions, summary, sources, directories, history, modelHistory, errors, tools, webRequests] = await Promise.all([
+  const [kpis, sessions, summary, sources, directories, hourlyHistory, history, modelHistory, errors, tools, webRequests] = await Promise.all([
     fetch("/ui/api/kpis").then(r => r.json()),
     fetch("/ui/api/sessions").then(r => r.json()),
     fetch("/ui/api/summary").then(r => r.json()),
     fetch("/ui/api/sources").then(r => r.json()),
     fetch("/ui/api/directories").then(r => r.json()),
+    fetch("/ui/api/history/hourly").then(r => r.json()),
     fetch("/ui/api/history").then(r => r.json()),
     fetch("/ui/api/history/models").then(r => r.json()),
     fetch("/ui/api/errors").then(r => r.json()),
@@ -1046,6 +1067,7 @@ async function load() {
   renderSummary(summary);
   renderSources(sources);
   renderDirectories(directories);
+  renderHourlyTokenChart(hourlyHistory);
   renderHistoryCharts(history, modelHistory);
   renderErrors(errors);
   renderTools(tools);
@@ -1314,6 +1336,103 @@ function renderSummary(rows) {
     <td>${escapeHTML(clientLabel(r))}</td><td>${escapeHTML(r.Model)}</td><td>${r.Requests}</td><td>${r.Errors}</td>
     ${tokenCell(freshInput(r))}${tokenCell(r.Cached)}${tokenCell(r.CacheWrite)}${tokenCell(r.Output)}${tokenCell(r.Reasoning)}${tokenCell(r.Total)}
   </tr>`).join("");
+}
+
+function renderHourlyTokenChart(rows) {
+  latestHourlyTokenRows = Array.isArray(rows) ? rows : [];
+  const freshInputColor = modelPalette[1];
+  const outputColor = modelPalette[6];
+  const datasets = [
+    {
+      label: "Fresh input tokens",
+      data: latestHourlyTokenRows.map(row => Number(row.FreshInput) || 0),
+      borderColor: freshInputColor,
+      backgroundColor: freshInputColor,
+      borderWidth: 2,
+      fill: false,
+      pointRadius: 2,
+      pointHoverRadius: 5,
+      tension: 0.25,
+    },
+    {
+      label: "Output tokens",
+      data: latestHourlyTokenRows.map(row => Number(row.Output) || 0),
+      borderColor: outputColor,
+      backgroundColor: outputColor,
+      borderWidth: 2,
+      fill: false,
+      pointRadius: 2,
+      pointHoverRadius: 5,
+      tension: 0.25,
+    },
+  ];
+
+  if (hourlyTokenChart) {
+    hourlyTokenChart.destroy();
+  }
+  hourlyTokenChart = new Chart(document.getElementById("hourly-token-chart"), {
+    type: "line",
+    data: {
+      labels: latestHourlyTokenRows.map(row => hourlyTick(row.Hour)),
+      datasets,
+    },
+    options: hourlyTokenChartOptions(latestHourlyTokenRows),
+  });
+}
+
+function hourlyTokenChartOptions(rows) {
+  const textColor = chartColor("--text");
+  const muted = chartColor("--text-muted");
+  const grid = chartColor("--border-subtle");
+  return {
+    maintainAspectRatio: false,
+    interaction: { intersect: false, mode: "index" },
+    plugins: {
+      legend: {
+        labels: { color: textColor, usePointStyle: true },
+      },
+      tooltip: {
+        callbacks: {
+          title: items => hourlyTimestamp(rows[items[0]?.dataIndex]?.Hour),
+          label: ctx => `${ctx.dataset.label}: ${ctx.parsed.y.toLocaleString()} tokens`,
+        },
+      },
+    },
+    scales: {
+      x: {
+        ticks: { autoSkip: true, color: muted, maxRotation: 0, maxTicksLimit: 12 },
+        grid: { color: grid },
+      },
+      y: {
+        beginAtZero: true,
+        title: { color: textColor, display: true, text: "Tokens" },
+        ticks: { color: muted, precision: 0, callback: formatTokenCount },
+        grid: { color: grid },
+      },
+    },
+  };
+}
+
+function hourlyTick(value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return String(value || "");
+  }
+  return date.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+}
+
+function hourlyTimestamp(value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return String(value || "");
+  }
+  return date.toLocaleString(undefined, {
+    weekday: "short",
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
 }
 
 function renderHistoryCharts(historyRows, modelRows) {
