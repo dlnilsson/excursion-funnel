@@ -402,6 +402,10 @@ func (p *Proxy) handleProxy(w http.ResponseWriter, r *http.Request) {
 			"bytes", n, "model", model, "stream", stream, "dur_ms", dur.Milliseconds())
 	}
 
+	sessionID := r.Header.Get("session_id")
+	if provider == "anthropic" {
+		sessionID = r.Header.Get("x-session-id")
+	}
 	ev := queue.UsageEvent{
 		RequestID:         reqID,
 		Source:            p.source,
@@ -418,7 +422,7 @@ func (p *Proxy) handleProxy(w http.ResponseWriter, r *http.Request) {
 		UserAgent:         r.Header.Get("User-Agent"),
 		Originator:        r.Header.Get("Originator"),
 		ClientName:        clientName(r.Header),
-		CodexSessionID:    r.Header.Get("session_id"),
+		SessionID:         strings.TrimSpace(sessionID),
 		Directory:         firstNonEmpty(r.Header.Get("X-EF-Cwd"), directory),
 		GitBranch:         firstNonEmpty(r.Header.Get("X-EF-Git-Branch"), gitBranch),
 	}

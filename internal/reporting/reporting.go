@@ -16,6 +16,13 @@ func BeginningOfDay(value time.Time) time.Time {
 	return time.Date(year, month, day, 0, 0, 0, 0, value.Location())
 }
 
+// BeginningOfWeek returns Monday midnight in the input time's location.
+func BeginningOfWeek(value time.Time) time.Time {
+	day := BeginningOfDay(value)
+	daysSinceMonday := (int(day.Weekday()) + 6) % 7
+	return day.AddDate(0, 0, -daysSinceMonday)
+}
+
 // LocalTimestamp formats a timestamp in the process-local time zone.
 func LocalTimestamp(value time.Time) string {
 	return value.Local().Format("2006-01-02T15:04:05.000Z07:00")

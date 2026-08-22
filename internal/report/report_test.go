@@ -152,6 +152,169 @@ func TestKPIs_EmptyLedgerUsesNullLatenciesAndZeroCounts(t *testing.T) {
 	}
 }
 
+func TestSessions_CountsFirstSeenAndDistinctActivityByProvider(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "usage.duckdb"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	monday := time.Date(2026, 8, 3, 9, 0, 0, 0, time.Local)
+	events := []queue.UsageEvent{
+		{RequestID: "openai-a-1", SessionID: "shared-id", StartedAt: monday, Method: "POST", Path: "/v1/responses", UpstreamURL: "/"},
+		{RequestID: "openai-a-2", SessionID: "shared-id", StartedAt: monday.AddDate(0, 0, 1), Method: "POST", Path: "/v1/responses", UpstreamURL: "/"},
+		{RequestID: "anthropic-a", SessionID: "shared-id", StartedAt: monday.Add(time.Hour), Method: "POST", Path: "/v1/messages", UpstreamURL: "/"},
+		{RequestID: "openai-b", SessionID: "openai-b", StartedAt: monday.AddDate(0, 0, 6), Method: "POST", Path: "/v1/responses", UpstreamURL: "/"},
+		{RequestID: "openai-a-next-week", SessionID: "shared-id", StartedAt: monday.AddDate(0, 0, 7), Method: "POST", Path: "/v1/responses", UpstreamURL: "/"},
+		{RequestID: "missing", StartedAt: monday, Method: "POST", Path: "/v1/responses", UpstreamURL: "/"},
+	}
+	if err := st.InsertBatch(t.Context(), events); err != nil {
+		t.Fatal(err)
+	}
+	reporter := New(st)
+
+	daily, err := reporter.Sessions(t.Context(), SessionOptions{GroupBy: "day"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertSessionRow(t, daily, "2026-08-03", "openai", 1, 1)
+	assertSessionRow(t, daily, "2026-08-03", "anthropic", 1, 1)
+	assertSessionRow(t, daily, "2026-08-04", "openai", 0, 1)
+	assertSessionRow(t, daily, "2026-08-09", "openai", 1, 1)
+	assertSessionRow(t, daily, "2026-08-10", "openai", 0, 1)
+
+	weekly, err := reporter.Sessions(t.Context(), SessionOptions{GroupBy: "week"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertSessionRow(t, weekly, "2026-08-03", "openai", 2, 2)
+	assertSessionRow(t, weekly, "2026-08-03", "anthropic", 1, 1)
+	assertSessionRow(t, weekly, "2026-08-10", "openai", 0, 1)
+
+	currentWeek, err := reporter.Sessions(t.Context(), SessionOptions{
+		Since: monday.AddDate(0, 0, 7), Until: monday.AddDate(0, 0, 14), GroupBy: "week",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(currentWeek) != 1 {
+		t.Fatalf("current-week rows = %+v, want one", currentWeek)
+	}
+	assertSessionRow(t, currentWeek, "2026-08-10", "openai", 0, 1)
+	if _, err := reporter.Sessions(t.Context(), SessionOptions{GroupBy: "month"}); err == nil {
+		t.Fatal("unsupported session grouping succeeded")
+	}
+}
+
+func TestSessions_FallsBackToLegacyCodexRequestSchema(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "usage.duckdb"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	started := time.Date(2026, 8, 3, 9, 0, 0, 0, time.Local)
+	if err := st.InsertBatch(t.Context(), []queue.UsageEvent{
+		{RequestID: "legacy-first", CodexSessionID: "legacy-session", StartedAt: started, Method: "POST", Path: "/v1/responses", UpstreamURL: "/"},
+		{RequestID: "legacy-second", CodexSessionID: "legacy-session", StartedAt: started.AddDate(0, 0, 1), Method: "POST", Path: "/v1/responses", UpstreamURL: "/"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	downgradeSessionSchema(t, st)
+
+	rows, err := New(st).Sessions(t.Context(), SessionOptions{GroupBy: "day"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertSessionRow(t, rows, "2026-08-03", "openai", 1, 1)
+	assertSessionRow(t, rows, "2026-08-04", "openai", 0, 1)
+}
+
+func TestSessions_LegacySchemaThroughQuack(t *testing.T) {
+	if os.Getenv("EF_TEST_QUACK") == "" {
+		t.Skip("set EF_TEST_QUACK=1 to run the extension integration test")
+	}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	address := listener.Addr().String()
+	_ = listener.Close()
+
+	st, err := store.Open(filepath.Join(t.TempDir(), "usage.duckdb"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	started := time.Date(2026, 8, 3, 9, 0, 0, 0, time.Local)
+	if err := st.InsertBatch(t.Context(), []queue.UsageEvent{{
+		RequestID: "legacy-remote", CodexSessionID: "legacy-session", StartedAt: started,
+		Method: "POST", Path: "/v1/responses", UpstreamURL: "/", ErrorType: "legacy_error",
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	downgradeSessionSchema(t, st)
+	if _, err := st.StartQuack(t.Context(), address, "test-token", false); err != nil {
+		t.Fatal(err)
+	}
+	reporter, err := OpenRemote(address, "test-token", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = reporter.Close() })
+	rows, err := reporter.Sessions(t.Context(), SessionOptions{GroupBy: "week"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertSessionRow(t, rows, "2026-08-03", "openai", 1, 1)
+	inspected, err := reporter.Inspect(t.Context(), "legacy-remote", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(inspected) != 1 || inspected[0].SessionID != "legacy-session" {
+		t.Fatalf("legacy remote inspect = %+v, want session legacy-session", inspected)
+	}
+	errors, err := reporter.RecentErrorsWithin(t.Context(), time.Time{}, time.Time{}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(errors) != 1 || errors[0].SessionID != "legacy-session" {
+		t.Fatalf("legacy remote errors = %+v, want session legacy-session", errors)
+	}
+}
+
+func downgradeSessionSchema(t *testing.T, st *store.Store) {
+	t.Helper()
+	for _, query := range []string{
+		"DROP VIEW usage_by_day_model",
+		"DROP INDEX idx_requests_started_at",
+		"DROP INDEX idx_requests_model_requested",
+		"DROP INDEX idx_requests_response_id",
+		"DROP INDEX idx_requests_source",
+		"DROP INDEX idx_requests_directory",
+		"DROP INDEX idx_requests_git_branch",
+		"DROP INDEX idx_requests_session_id",
+		"ALTER TABLE requests DROP COLUMN session_id",
+		"DROP INDEX idx_sessions_first_seen_at",
+		"DROP TABLE sessions",
+	} {
+		if _, err := st.DB().Exec(query); err != nil {
+			t.Fatalf("%s: %v", query, err)
+		}
+	}
+}
+
+func assertSessionRow(t *testing.T, rows []SessionRow, period, provider string, started, used int64) {
+	t.Helper()
+	for _, row := range rows {
+		if row.Period == period && row.Provider == provider {
+			if row.Started != started || row.Used != used {
+				t.Fatalf("session row %s/%s = %+v, want started=%d used=%d", period, provider, row, started, used)
+			}
+			return
+		}
+	}
+	t.Fatalf("missing session row %s/%s in %+v", period, provider, rows)
+}
+
 func TestKPIs_PeakConcurrencyTreatsIntervalsAsHalfOpen(t *testing.T) {
 	st, err := store.Open(filepath.Join(t.TempDir(), "usage.duckdb"))
 	if err != nil {

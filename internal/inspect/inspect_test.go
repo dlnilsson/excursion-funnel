@@ -61,6 +61,7 @@ func TestRunWithoutIDReportsEmptyLedger(t *testing.T) {
 func TestRunWithIDPreservesDetailedInspectOutput(t *testing.T) {
 	dbPath := seedInspectDB(t, []queue.UsageEvent{{
 		RequestID:   "req-detail",
+		SessionID:   "anthropic-session",
 		StartedAt:   time.Date(2026, time.August, 20, 12, 0, 0, 0, time.UTC),
 		CompletedAt: time.Date(2026, time.August, 20, 12, 0, 1, 0, time.UTC),
 		Method:      "POST",
@@ -76,7 +77,7 @@ func TestRunWithIDPreservesDetailedInspectOutput(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
-	for _, want := range []string{"id: req-detail", "request: POST /v1/messages", "tokens:"} {
+	for _, want := range []string{"id: req-detail", "session_id: anthropic-session", "request: POST /v1/messages", "tokens:"} {
 		if !strings.Contains(output.String(), want) {
 			t.Fatalf("output missing %q:\n%s", want, output.String())
 		}

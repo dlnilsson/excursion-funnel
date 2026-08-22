@@ -6,6 +6,7 @@ import (
 	"github.com/dlnilsson/excursion-funnel/cmd/inspect"
 	"github.com/dlnilsson/excursion-funnel/cmd/requests"
 	"github.com/dlnilsson/excursion-funnel/cmd/serve"
+	"github.com/dlnilsson/excursion-funnel/cmd/sessions"
 	"github.com/dlnilsson/excursion-funnel/cmd/tools"
 	"github.com/dlnilsson/excursion-funnel/cmd/usage"
 	versioncmd "github.com/dlnilsson/excursion-funnel/cmd/version"
@@ -30,6 +31,7 @@ daemon through Quack, then fall back to a read-only DuckDB file when possible.`,
 		hub.New(),
 		versioncmd.New(),
 		usage.New(),
+		sessions.New(),
 		tools.New(),
 		requests.New(),
 		inspect.New(),

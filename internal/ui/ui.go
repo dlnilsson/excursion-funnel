@@ -33,6 +33,7 @@ func New(rep *report.Reporter, log *slog.Logger) http.Handler {
 	mux.HandleFunc("GET /ui/", handleIndex)
 	mux.Handle("GET /ui/assets/", http.StripPrefix("/ui/assets/", http.FileServerFS(staticAssets)))
 	mux.HandleFunc("GET /ui/api/kpis", handleKPIs(rep, log))
+	mux.HandleFunc("GET /ui/api/sessions", handleSessions(rep, log))
 	mux.HandleFunc("GET /ui/api/summary", handleSummary(rep, log))
 	mux.HandleFunc("GET /ui/api/sources", handleSources(rep, log))
 	mux.HandleFunc("GET /ui/api/directories", handleDirectories(rep, log))
@@ -42,6 +43,58 @@ func New(rep *report.Reporter, log *slog.Logger) http.Handler {
 	mux.HandleFunc("GET /ui/api/tools", handleToolCalls(rep, log))
 	mux.HandleFunc("GET /ui/api/web-requests", handleWebRequests(rep, log))
 	return mux
+}
+
+type sessionCounts struct {
+	Started int64
+	Used    int64
+}
+
+type sessionDashboard struct {
+	Today    sessionCounts
+	ThisWeek sessionCounts
+	Daily    []report.SessionRow
+	Weekly   []report.SessionRow
+}
+
+func handleSessions(rep *report.Reporter, log *slog.Logger) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		daily, err := rep.Sessions(r.Context(), report.SessionOptions{GroupBy: "day"})
+		if err != nil {
+			log.Error("ui: query daily sessions", "err", err)
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		weekly, err := rep.Sessions(r.Context(), report.SessionOptions{GroupBy: "week"})
+		if err != nil {
+			log.Error("ui: query weekly sessions", "err", err)
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		if daily == nil {
+			daily = []report.SessionRow{}
+		}
+		if weekly == nil {
+			weekly = []report.SessionRow{}
+		}
+		now := time.Now()
+		response := sessionDashboard{Daily: daily, Weekly: weekly,
+			Today:    sessionCountsForPeriod(daily, beginningOfDay(now).Format("2006-01-02")),
+			ThisWeek: sessionCountsForPeriod(weekly, beginningOfWeek(now).Format("2006-01-02"))}
+		writeJSON(w, response)
+	}
+}
+
+func sessionCountsForPeriod(rows []report.SessionRow, period string) sessionCounts {
+	var counts sessionCounts
+	for _, row := range rows {
+		if row.Period != period {
+			continue
+		}
+		counts.Started += row.Started
+		counts.Used += row.Used
+	}
+	return counts
 }
 
 func handleKPIs(rep *report.Reporter, log *slog.Logger) http.HandlerFunc {
@@ -237,4 +290,10 @@ func knownProviderRows(rows []report.SummaryRow) []report.SummaryRow {
 func beginningOfDay(t time.Time) time.Time {
 	y, m, d := t.Date()
 	return time.Date(y, m, d, 0, 0, 0, 0, t.Location())
+}
+
+func beginningOfWeek(t time.Time) time.Time {
+	day := beginningOfDay(t)
+	daysSinceMonday := (int(day.Weekday()) + 6) % 7
+	return day.AddDate(0, 0, -daysSinceMonday)
 }

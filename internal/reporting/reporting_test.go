@@ -15,3 +15,16 @@ func TestLocalTimestampConvertsToLocalZone(t *testing.T) {
 		t.Fatalf("LocalTimestamp() = %q, want %q", got, want)
 	}
 }
+
+func TestBeginningOfWeekUsesMondayInInputLocation(t *testing.T) {
+	location := time.FixedZone("test", 2*60*60)
+	for _, input := range []time.Time{
+		time.Date(2026, 8, 3, 15, 0, 0, 0, location),
+		time.Date(2026, 8, 9, 23, 59, 0, 0, location),
+	} {
+		want := time.Date(2026, 8, 3, 0, 0, 0, 0, location)
+		if got := BeginningOfWeek(input); !got.Equal(want) || got.Location() != location {
+			t.Fatalf("BeginningOfWeek(%v) = %v, want %v", input, got, want)
+		}
+	}
+}

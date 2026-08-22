@@ -184,6 +184,23 @@ type KPIStats struct {
 	Anthropic             AnthropicKPIStats
 }
 
+// SessionOptions controls session lifecycle aggregation. Since is inclusive
+// and Until is exclusive.
+type SessionOptions struct {
+	Since   time.Time
+	Until   time.Time
+	GroupBy string
+}
+
+// SessionRow contains distinct session lifecycle counts for one provider and
+// local calendar period.
+type SessionRow struct {
+	Period   string
+	Provider string
+	Started  int64
+	Used     int64
+}
+
 // RecentRequestRow is the lightweight request metadata used by the inspect
 // command's recent-request picker.
 type RecentRequestRow struct {
@@ -219,7 +236,7 @@ type InspectRow struct {
 	UserAgent         string
 	Originator        string
 	Client            string
-	CodexSessionID    string
+	SessionID         string
 	Directory         string
 	GitBranch         string
 	ErrorType         string
@@ -393,6 +410,155 @@ FROM requests
 	}
 	stats.PeakConcurrency = peak
 	return stats, nil
+}
+
+// Sessions returns distinct session starts and activity grouped by local
+// calendar day or Monday-based calendar week. Starts come from the persistent
+// registry while usage comes from retained request rows.
+func (r *Reporter) Sessions(ctx context.Context, opts SessionOptions) ([]SessionRow, error) {
+	groupBy := opts.GroupBy
+	if groupBy == "" {
+		groupBy = "day"
+	}
+	if groupBy != "day" && groupBy != "week" {
+		return nil, fmt.Errorf("unsupported session group-by %q (want day or week)", groupBy)
+	}
+
+	var (
+		periodFromFirstSeen = "CAST(CAST(date_trunc('" + groupBy + "', first_seen_at) AS DATE) AS VARCHAR)"
+		periodFromRequest   = "CAST(CAST(date_trunc('" + groupBy + "', started_at) AS DATE) AS VARCHAR)"
+		rowsByKey           = make(map[string]SessionRow)
+	)
+	schema, err := r.sessionSchema(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if schema.sessionExpression == "" {
+		return []SessionRow{}, nil
+	}
+	startedWhere, startedArgs := timeRange("first_seen_at", opts.Since, opts.Until)
+	startedQuery := `SELECT ` + periodFromFirstSeen + ` AS period, provider, COUNT(*)
+FROM sessions
+` + startedWhere + `
+GROUP BY period, provider`
+	if !schema.hasRegistry {
+		startedQuery = `SELECT ` + periodFromFirstSeen + ` AS period, provider, COUNT(*)
+FROM (
+  SELECT provider, session_id, MIN(started_at) AS first_seen_at
+  FROM (
+    SELECT ` + providerSQL("path") + ` AS provider, ` + schema.sessionExpression + ` AS session_id, started_at
+    FROM requests
+  ) observations
+  WHERE session_id IS NOT NULL AND session_id != '' AND provider != 'unknown'
+  GROUP BY provider, session_id
+) legacy_sessions
+` + startedWhere + `
+GROUP BY period, provider`
+	}
+	startedRows, err := r.store.DB().QueryContext(ctx, startedQuery, startedArgs...)
+	if err != nil {
+		return nil, fmt.Errorf("query sessions started: %w", err)
+	}
+	for startedRows.Next() {
+		var row SessionRow
+		if err := startedRows.Scan(&row.Period, &row.Provider, &row.Started); err != nil {
+			_ = startedRows.Close()
+			return nil, fmt.Errorf("scan sessions started: %w", err)
+		}
+		rowsByKey[sessionRowKey(row.Period, row.Provider)] = row
+	}
+	if err := startedRows.Err(); err != nil {
+		_ = startedRows.Close()
+		return nil, fmt.Errorf("iterate sessions started: %w", err)
+	}
+	if err := startedRows.Close(); err != nil {
+		return nil, fmt.Errorf("close sessions started: %w", err)
+	}
+
+	usedWhere, usedArgs := timeRange("started_at", opts.Since, opts.Until)
+	usedWhere = appendWherePredicate(usedWhere, schema.sessionExpression+" IS NOT NULL")
+	usedWhere = appendWherePredicate(usedWhere, providerSQL("path")+" != 'unknown'")
+	usedRows, err := r.store.DB().QueryContext(ctx, `SELECT `+periodFromRequest+` AS period, `+providerSQL("path")+` AS provider,
+  COUNT(DISTINCT `+schema.sessionExpression+`)
+FROM requests
+`+usedWhere+`
+GROUP BY period, provider`, usedArgs...)
+	if err != nil {
+		return nil, fmt.Errorf("query sessions used: %w", err)
+	}
+	defer usedRows.Close()
+	for usedRows.Next() {
+		var row SessionRow
+		if err := usedRows.Scan(&row.Period, &row.Provider, &row.Used); err != nil {
+			return nil, fmt.Errorf("scan sessions used: %w", err)
+		}
+		key := sessionRowKey(row.Period, row.Provider)
+		if existing, ok := rowsByKey[key]; ok {
+			row.Started = existing.Started
+		}
+		rowsByKey[key] = row
+	}
+	if err := usedRows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate sessions used: %w", err)
+	}
+
+	rows := make([]SessionRow, 0, len(rowsByKey))
+	for _, row := range rowsByKey {
+		rows = append(rows, row)
+	}
+	sort.Slice(rows, func(i, j int) bool {
+		if rows[i].Period != rows[j].Period {
+			return rows[i].Period < rows[j].Period
+		}
+		return rows[i].Provider < rows[j].Provider
+	})
+	return rows, nil
+}
+
+func sessionRowKey(period, provider string) string { return period + "\x00" + provider }
+
+type sessionSchema struct {
+	hasRegistry       bool
+	sessionExpression string
+}
+
+func (r *Reporter) sessionSchema(ctx context.Context) (sessionSchema, error) {
+	rows, err := r.store.DB().QueryContext(ctx, `SELECT table_name, column_name
+FROM information_schema.columns
+WHERE (table_name = 'requests' AND column_name IN ('session_id', 'codex_session_id'))
+   OR table_name = 'sessions'`)
+	if err != nil {
+		return sessionSchema{}, fmt.Errorf("inspect session schema: %w", err)
+	}
+	defer rows.Close()
+	var hasSessionID, hasCodexSessionID bool
+	schema := sessionSchema{}
+	for rows.Next() {
+		var tableName, columnName string
+		if err := rows.Scan(&tableName, &columnName); err != nil {
+			return sessionSchema{}, fmt.Errorf("scan session schema: %w", err)
+		}
+		switch {
+		case tableName == "sessions":
+			schema.hasRegistry = true
+		case columnName == "session_id":
+			hasSessionID = true
+		case columnName == "codex_session_id":
+			hasCodexSessionID = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return sessionSchema{}, fmt.Errorf("iterate session schema: %w", err)
+	}
+	switch {
+	case hasSessionID && hasCodexSessionID:
+		schema.sessionExpression = "COALESCE(NULLIF(session_id, ''), NULLIF(codex_session_id, ''))"
+	case hasSessionID:
+		schema.sessionExpression = "NULLIF(session_id, '')"
+	case hasCodexSessionID:
+		schema.sessionExpression = "NULLIF(codex_session_id, '')"
+	}
+	return schema, nil
 }
 
 func (r *Reporter) peakConcurrency(ctx context.Context, opts KPIOptions) (int64, error) {
@@ -759,7 +925,15 @@ FROM web_requests WHERE request_id IN (`+strings.Join(placeholders, ", ")+`)`, i
 }
 
 func (r *Reporter) queryInspectRows(ctx context.Context, whereClause, orderBy string, limit int, args ...any) ([]InspectRow, error) {
-	rows, err := r.store.DB().QueryContext(ctx, buildInspectQuery(whereClause, orderBy), append(args, limit)...)
+	schema, err := r.sessionSchema(ctx)
+	if err != nil {
+		return nil, err
+	}
+	sessionExpression := "''"
+	if schema.sessionExpression != "" {
+		sessionExpression = "COALESCE(" + schema.sessionExpression + ", '')"
+	}
+	rows, err := r.store.DB().QueryContext(ctx, buildInspectQuery(whereClause, orderBy, sessionExpression), append(args, limit)...)
 	if err != nil {
 		return nil, fmt.Errorf("query inspect: %w", err)
 	}
@@ -771,7 +945,7 @@ func (r *Reporter) queryInspectRows(ctx context.Context, whereClause, orderBy st
 			&row.ID, &row.ResponseID, &row.Source, &row.Host, &row.StartedAt, &row.CompletedAt,
 			&row.DurationMS, &row.Method, &row.Path, &row.Provider, &row.UpstreamURL,
 			&row.ModelRequested, &row.ModelReported, &row.Stream, &row.HTTPStatus,
-			&row.UpstreamRequestID, &row.UserAgent, &row.Originator, &row.Client, &row.CodexSessionID,
+			&row.UpstreamRequestID, &row.UserAgent, &row.Originator, &row.Client, &row.SessionID,
 			&row.Directory, &row.GitBranch,
 			&row.ErrorType, &row.ErrorMessage, &row.Input, &row.Cached, &row.CacheWrite,
 			&row.Output, &row.Reasoning, &row.Total, &row.UsageJSON,
@@ -899,12 +1073,12 @@ GROUP BY ` + groupExpr + `
 ORDER BY ` + orderBy
 }
 
-func buildInspectQuery(whereClause, orderBy string) string {
+func buildInspectQuery(whereClause, orderBy, sessionExpression string) string {
 	return `SELECT id, COALESCE(response_id, ''), COALESCE(source, 'unknown'), COALESCE(host, ''),
  started_at, completed_at, duration_ms, method, path, ` + providerSQL("path") + `, upstream_url,
  COALESCE(model_requested, ''), COALESCE(model_reported, ''), stream, http_status,
  COALESCE(upstream_request_id, ''), COALESCE(user_agent, ''), COALESCE(originator, ''), ` + clientSQL() + `,
- COALESCE(codex_session_id, ''), COALESCE(directory, ''), COALESCE(git_branch, ''),
+ ` + sessionExpression + `, COALESCE(directory, ''), COALESCE(git_branch, ''),
  COALESCE(error_type, ''), COALESCE(error_message, ''),
  input_tokens, cached_input_tokens, cache_write_tokens, output_tokens, reasoning_tokens, total_tokens,
  COALESCE(usage_json, '')

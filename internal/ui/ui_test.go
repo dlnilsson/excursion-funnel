@@ -53,6 +53,12 @@ func TestHandleIndex_ServesDashboardHTML(t *testing.T) {
 		`aggregate.Input += Number(row.Input) || 0`,
 		`aggregate.Output += Number(row.Output) || 0`,
 		`fetch("/ui/api/kpis")`,
+		`fetch("/ui/api/sessions")`,
+		`id="session-history-chart"`,
+		`id="session-day-toggle"`,
+		`id="session-week-toggle"`,
+		`Sessions used today`,
+		`Sessions started this week`,
 		`p50 latency`,
 		`Error rate today`,
 		`Cache-hit rate`,
@@ -125,6 +131,25 @@ func TestHandleKPIs_ReturnsTodaysOperationalMetrics(t *testing.T) {
 	}
 	if stats.Anthropic.Requests != 1 || stats.Anthropic.ThinkingReportedRequests != 0 || stats.Anthropic.CacheWriteReportedRequests != 0 {
 		t.Fatalf("Anthropic coverage = %+v, want one request with no detailed usage", stats.Anthropic)
+	}
+}
+
+func TestHandleSessions_ReturnsCurrentCountsAndHistory(t *testing.T) {
+	h := newTestHandler(t)
+
+	rec := doRequest(t, h, http.MethodGet, "/ui/api/sessions")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	var stats sessionDashboard
+	if err := json.Unmarshal(rec.Body.Bytes(), &stats); err != nil {
+		t.Fatalf("decode body: %v: %s", err, rec.Body.String())
+	}
+	if stats.Today.Started != 2 || stats.Today.Used != 2 || stats.ThisWeek.Started != 2 || stats.ThisWeek.Used != 2 {
+		t.Fatalf("current session counts = %+v/%+v, want 2/2 for both periods", stats.Today, stats.ThisWeek)
+	}
+	if len(stats.Daily) != 2 || len(stats.Weekly) != 2 {
+		t.Fatalf("session history lengths = %d/%d, want provider rows for both providers", len(stats.Daily), len(stats.Weekly))
 	}
 }
 
@@ -527,6 +552,7 @@ func newTestHandler(t *testing.T) http.Handler {
 	events := []queue.UsageEvent{
 		{
 			RequestID:     "req-ok-1",
+			SessionID:     "openai-session",
 			Source:        "alice",
 			Directory:     "/work/api",
 			GitBranch:     "main",
@@ -551,6 +577,7 @@ func newTestHandler(t *testing.T) http.Handler {
 		},
 		{
 			RequestID:    "req-error-1",
+			SessionID:    "anthropic-session",
 			Source:       "bob",
 			Directory:    "/work/web",
 			GitBranch:    "feature-x",

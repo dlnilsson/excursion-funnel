@@ -722,6 +722,21 @@
 
 <div class="stats" id="stats"></div>
 
+<h2>Session activity overall</h2>
+<div class="history-layout">
+  <div class="history-actions">
+    <div class="metric-toggle" aria-label="Session history period">
+      <button id="session-day-toggle" type="button" aria-pressed="true">Daily</button>
+      <button id="session-week-toggle" type="button" aria-pressed="false">Weekly</button>
+    </div>
+  </div>
+  <div class="charts">
+    <div class="chart-panel">
+      <canvas id="session-history-chart"></canvas>
+    </div>
+  </div>
+</div>
+
 <details class="table-section" data-table-key="summary" open>
   <summary>Requests by model today</summary>
   <table id="summary-table">
@@ -849,10 +864,13 @@ requires_openai_auth = true</code></pre>
 const themeStorageKey = "excursion-funnel-theme";
 const tableStateStorageKey = "excursion-funnel-table-state";
 let historyStackedChart;
+let sessionHistoryChart;
 let latestHistoryRows = [];
 let latestModelHistoryRows = [];
+let latestSessionStats = {};
 let latestToolRows = [];
 let selectedHistoryMetric = "tokens";
+let selectedSessionPeriod = "day";
 const heatmapWeeks = 53;
 const heatmapWeekStart = 1;
 const modelPalette = ["#5e81ac", "#88c0d0", "#a3be8c", "#ebcb8b", "#bf616a", "#b48ead", "#d08770", "#81a1c1", "#8fbcbb", "#d8dee9", "#4c566a", "#e5e9f0"];
@@ -885,6 +903,7 @@ function setTheme(theme) {
   } catch {
   }
   renderHistoryCharts(latestHistoryRows, latestModelHistoryRows);
+  renderSessionHistory(latestSessionStats);
 }
 
 function initTableCollapse() {
@@ -921,6 +940,8 @@ function initThemeToggle() {
 
   document.getElementById("tokens-toggle").addEventListener("click", () => setHistoryMetric("tokens"));
   document.getElementById("requests-toggle").addEventListener("click", () => setHistoryMetric("requests"));
+  document.getElementById("session-day-toggle").addEventListener("click", () => setSessionPeriod("day"));
+  document.getElementById("session-week-toggle").addEventListener("click", () => setSessionPeriod("week"));
   initAgentConfigTabs();
 }
 
@@ -1000,9 +1021,17 @@ function setHistoryMetric(metric) {
   renderHistoryCharts(latestHistoryRows, latestModelHistoryRows);
 }
 
+function setSessionPeriod(period) {
+  selectedSessionPeriod = period;
+  document.getElementById("session-day-toggle").setAttribute("aria-pressed", period === "day" ? "true" : "false");
+  document.getElementById("session-week-toggle").setAttribute("aria-pressed", period === "week" ? "true" : "false");
+  renderSessionHistory(latestSessionStats);
+}
+
 async function load() {
-  const [kpis, summary, sources, directories, history, modelHistory, errors, tools, webRequests] = await Promise.all([
+  const [kpis, sessions, summary, sources, directories, history, modelHistory, errors, tools, webRequests] = await Promise.all([
     fetch("/ui/api/kpis").then(r => r.json()),
+    fetch("/ui/api/sessions").then(r => r.json()),
     fetch("/ui/api/summary").then(r => r.json()),
     fetch("/ui/api/sources").then(r => r.json()),
     fetch("/ui/api/directories").then(r => r.json()),
@@ -1012,7 +1041,8 @@ async function load() {
     fetch("/ui/api/tools").then(r => r.json()),
     fetch("/ui/api/web-requests").then(r => r.json()),
   ]);
-  renderStats(summary, kpis);
+  renderStats(summary, kpis, sessions);
+  renderSessionHistory(sessions);
   renderSummary(summary);
   renderSources(sources);
   renderDirectories(directories);
@@ -1105,7 +1135,7 @@ function freshInput(r) {
   return Math.max(0, fresh);
 }
 
-function renderStats(rows, kpis) {
+function renderStats(rows, kpis, sessions) {
   // Token totals are kept per provider rather than summed into one figure:
   // Anthropic and Codex are billed and rate-limited separately, so a combined
   // total hides which one is driving usage. Input is normalized server-side to
@@ -1122,6 +1152,12 @@ function renderStats(rows, kpis) {
   }
 
   const cards = [{ label: "Requests today", value: (kpis?.Requests ?? requests).toLocaleString() }];
+  cards.push(
+    { label: "Sessions used today", value: (sessions?.Today?.Used || 0).toLocaleString() },
+    { label: "Sessions started today", value: (sessions?.Today?.Started || 0).toLocaleString() },
+    { label: "Sessions used this week", value: (sessions?.ThisWeek?.Used || 0).toLocaleString() },
+    { label: "Sessions started this week", value: (sessions?.ThisWeek?.Started || 0).toLocaleString() },
+  );
   for (const [provider, p] of [...byProvider].sort((a, b) => b[1].total - a[1].total)) {
     const share = p.input > 0 ? ` · ${(100 * p.cached / p.input).toFixed(1)}% cached` : "";
     cards.push({
@@ -1189,6 +1225,83 @@ function renderStats(rows, kpis) {
   document.getElementById("stats").innerHTML = cards
     .map(card => `<div class="stat"${card.title ? ` title="${escapeHTML(card.title)}"` : ""}><div class="value">${card.value}</div><div class="label">${card.label}${card.sub || ""}</div></div>`)
     .join("");
+}
+
+function renderSessionHistory(stats) {
+  latestSessionStats = stats || {};
+  const weekly = selectedSessionPeriod === "week";
+  const rows = weekly ? (latestSessionStats.Weekly || []) : (latestSessionStats.Daily || []);
+  const byPeriod = new Map();
+  for (const row of rows) {
+    const totals = byPeriod.get(row.Period) || { started: 0, used: 0 };
+    totals.started += Number(row.Started) || 0;
+    totals.used += Number(row.Used) || 0;
+    byPeriod.set(row.Period, totals);
+  }
+
+  const today = startOfCalendarDay(new Date());
+  const end = weekly ? addCalendarDays(today, -((today.getDay() + 6) % 7)) : today;
+  const knownPeriods = [...byPeriod.keys()].sort((a, b) => a.localeCompare(b));
+  let start = knownPeriods.length > 0 ? parseCalendarDay(knownPeriods[0]) : end;
+  if (!start || start > end) {
+    start = end;
+  }
+  const periods = [];
+  for (let date = start; date <= end; date = addCalendarDays(date, weekly ? 7 : 1)) {
+    periods.push(calendarDayKey(date));
+  }
+
+  if (sessionHistoryChart) {
+    sessionHistoryChart.destroy();
+  }
+  sessionHistoryChart = new Chart(document.getElementById("session-history-chart"), {
+    type: "line",
+    data: {
+      labels: periods.map(shortDate),
+      datasets: [
+        {
+          label: "Used",
+          data: periods.map(period => byPeriod.get(period)?.used || 0),
+          borderColor: chartColor("--accent"),
+          backgroundColor: chartColor("--accent", 0.18),
+          borderWidth: 2,
+          pointRadius: 2,
+          tension: 0.2,
+          fill: true,
+        },
+        {
+          label: "Started",
+          data: periods.map(period => byPeriod.get(period)?.started || 0),
+          borderColor: chartColor("--error"),
+          backgroundColor: chartColor("--error", 0.12),
+          borderWidth: 2,
+          pointRadius: 2,
+          tension: 0.2,
+          fill: false,
+        },
+      ],
+    },
+    options: sessionChartOptions(weekly ? "Weekly sessions" : "Daily sessions"),
+  });
+}
+
+function sessionChartOptions(title) {
+  const textColor = chartColor("--text");
+  const muted = chartColor("--text-muted");
+  const grid = chartColor("--border-subtle");
+  return {
+    maintainAspectRatio: false,
+    interaction: { intersect: false, mode: "index" },
+    plugins: {
+      legend: { labels: { color: textColor } },
+      title: { color: textColor, display: true, text: title },
+      tooltip: { callbacks: { label: ctx => `${ctx.dataset.label}: ${ctx.parsed.y.toLocaleString()}` } },
+    },
+    scales: {
+      x: { ticks: { color: muted, maxRotation: 50, minRotation: 50 }, grid: { color: grid } },
+      y: { beginAtZero: true, ticks: { color: muted, precision: 0 }, grid: { color: grid } },
+    },
+  };
 }
 
 function renderSummary(rows) {

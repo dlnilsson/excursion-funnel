@@ -82,7 +82,7 @@ func TestForwarderDrainsOutboxToQuackHub(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = outbox.Close() })
 	event := queue.UsageEvent{
-		RequestID: "forwarded-1", Source: "integration", StartedAt: time.Now(),
+		RequestID: "forwarded-1", Source: "integration", SessionID: "forwarded-session", StartedAt: time.Now(),
 		Method: "POST", Path: "/v1/responses", UpstreamURL: "/",
 		ToolCalls: []queue.ToolCall{{ID: "call-1", Name: "shell", Command: "echo ok"}},
 	}
@@ -113,5 +113,12 @@ func TestForwarderDrainsOutboxToQuackHub(t *testing.T) {
 	}
 	if toolCount != 1 {
 		t.Fatalf("tool calls = %d, want 1", toolCount)
+	}
+	var sessionCount int
+	if err := hub.DB().QueryRow(`SELECT COUNT(*) FROM sessions WHERE provider = 'openai' AND session_id = 'forwarded-session'`).Scan(&sessionCount); err != nil {
+		t.Fatal(err)
+	}
+	if sessionCount != 1 {
+		t.Fatalf("sessions = %d, want 1", sessionCount)
 	}
 }

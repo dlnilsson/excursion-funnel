@@ -261,6 +261,12 @@ ef usage --since 2026-08-01 --until 2026-08-07 --group-by provider
 # Usage broken down day by day.
 ef usage --since 2026-08-01 --group-by day
 
+# Sessions first seen and active each day or Monday-based calendar week.
+ef sessions today
+ef sessions week
+ef sessions --since 2026-08-01 --until 2026-08-31 --group-by week
+ef sessions --since 2026-08-01 --group-by day --json
+
 # Usage broken down by person/machine (team mode).
 ef usage --since 2026-08-01 --group-by source
 
@@ -290,6 +296,11 @@ Working directory and git branch are captured automatically from the client
 context sent by Claude Code or Codex. They remain unknown when the client does
 not send that context; `X-EF-Cwd` and `X-EF-Git-Branch` request headers can be
 used as explicit overrides.
+
+Session IDs are captured from Claude Code's `x-session-id` header and Codex's
+`session_id` header. The session registry preserves each session's first-seen
+timestamp even when request retention removes its older request rows; historical
+"used" counts still reflect only request rows retained in the ledger.
 
 If you've set `EF_HUB_ADDR` (team mode), these commands always read from the
 shared hub, so you always see live, up-to-date numbers rather than a

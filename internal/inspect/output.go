@@ -52,8 +52,8 @@ func printRows(out io.Writer, rows []report.InspectRow) {
 		if row.Originator != "" {
 			fmt.Fprintf(out, "originator: %s\n", row.Originator)
 		}
-		if row.CodexSessionID != "" {
-			fmt.Fprintf(out, "codex_session_id: %s\n", row.CodexSessionID)
+		if row.SessionID != "" {
+			fmt.Fprintf(out, "session_id: %s\n", row.SessionID)
 		}
 		if row.ErrorType != "" {
 			fmt.Fprintf(out, "error: %s %s\n", row.ErrorType, row.ErrorMessage)

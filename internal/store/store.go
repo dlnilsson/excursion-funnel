@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -25,10 +26,12 @@ const LocalQuackToken = "excursion-funnel-local"
 // Store is a DuckDB-backed usage ledger. A remote Store is a small in-memory
 // DuckDB client with a Quack catalog attached as its current database.
 type Store struct {
-	db            *sql.DB
-	quackConn     *sql.Conn
-	quackURI      string
-	remoteCatalog string
+	db                 *sql.DB
+	quackConn          *sql.Conn
+	quackURI           string
+	remoteCatalog      string
+	remoteHasSessionID bool
+	remoteHasSessions  bool
 }
 
 // QuackServer describes a running Quack listener.
@@ -115,7 +118,40 @@ func OpenRemote(ctx context.Context, address, token string, disableSSL bool) (*S
 		_ = db.Close()
 		return nil, fmt.Errorf("connect to Quack ledger %s: %w", uri, err)
 	}
-	return &Store{db: db, remoteCatalog: "quack_remote"}, nil
+	hasSessionID, hasSessions, err := inspectRemoteSessionSchema(ctx, db)
+	if err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("inspect Quack ledger schema %s: %w", uri, err)
+	}
+	return &Store{
+		db: db, remoteCatalog: "quack_remote",
+		remoteHasSessionID: hasSessionID, remoteHasSessions: hasSessions,
+	}, nil
+}
+
+func inspectRemoteSessionSchema(ctx context.Context, db *sql.DB) (bool, bool, error) {
+	rows, err := db.QueryContext(ctx, `SELECT table_name, column_name
+FROM information_schema.columns
+WHERE (table_name = 'requests' AND column_name = 'session_id')
+   OR table_name = 'sessions'`)
+	if err != nil {
+		return false, false, err
+	}
+	defer rows.Close()
+	var hasSessionID, hasSessions bool
+	for rows.Next() {
+		var tableName, columnName string
+		if err := rows.Scan(&tableName, &columnName); err != nil {
+			return false, false, err
+		}
+		if tableName == "sessions" {
+			hasSessions = true
+		}
+		if tableName == "requests" && columnName == "session_id" {
+			hasSessionID = true
+		}
+	}
+	return hasSessionID, hasSessions, rows.Err()
 }
 
 func openDuckDB(path string, readOnly bool) (*sql.DB, error) {
@@ -315,6 +351,7 @@ func ensureSchema(db *sql.DB) error {
   user_agent VARCHAR,
   originator VARCHAR,
   client_name VARCHAR,
+  session_id VARCHAR,
   codex_session_id VARCHAR,
   directory VARCHAR,
   git_branch VARCHAR,
@@ -333,6 +370,13 @@ CREATE INDEX IF NOT EXISTS idx_requests_started_at ON requests(started_at);
 CREATE INDEX IF NOT EXISTS idx_requests_model_requested ON requests(model_requested);
 CREATE INDEX IF NOT EXISTS idx_requests_response_id ON requests(response_id);
 CREATE INDEX IF NOT EXISTS idx_requests_source ON requests(source);
+CREATE TABLE IF NOT EXISTS sessions (
+  provider VARCHAR NOT NULL,
+  session_id VARCHAR NOT NULL,
+  first_seen_at TIMESTAMPTZ NOT NULL,
+  PRIMARY KEY (provider, session_id)
+);
+CREATE INDEX IF NOT EXISTS idx_sessions_first_seen_at ON sessions(first_seen_at);
 CREATE TABLE IF NOT EXISTS tool_calls (
   request_id VARCHAR NOT NULL,
   ordinal INTEGER NOT NULL,
@@ -362,6 +406,7 @@ CREATE INDEX IF NOT EXISTS idx_web_requests_request_id ON web_requests(request_i
 	}
 	for _, col := range []struct{ name, typ string }{
 		{"originator", "VARCHAR"}, {"client_name", "VARCHAR"},
+		{"session_id", "VARCHAR"},
 		{"directory", "VARCHAR"}, {"git_branch", "VARCHAR"},
 		{"source", "VARCHAR DEFAULT 'unknown'"}, {"host", "VARCHAR"},
 	} {
@@ -370,8 +415,27 @@ CREATE INDEX IF NOT EXISTS idx_web_requests_request_id ON web_requests(request_i
 		}
 	}
 	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_requests_directory ON requests(directory);
-CREATE INDEX IF NOT EXISTS idx_requests_git_branch ON requests(git_branch);`); err != nil {
+CREATE INDEX IF NOT EXISTS idx_requests_git_branch ON requests(git_branch);
+CREATE INDEX IF NOT EXISTS idx_requests_session_id ON requests(session_id);`); err != nil {
 		return fmt.Errorf("create project context indexes: %w", err)
+	}
+	if _, err := db.Exec(`UPDATE requests
+SET session_id = codex_session_id
+WHERE (session_id IS NULL OR session_id = '')
+  AND codex_session_id IS NOT NULL AND codex_session_id != '';
+INSERT INTO sessions (provider, session_id, first_seen_at)
+SELECT provider, session_id, MIN(started_at) AS first_seen_at
+FROM (
+  SELECT ` + ProviderSQL("path") + ` AS provider,
+    COALESCE(NULLIF(session_id, ''), NULLIF(codex_session_id, '')) AS session_id,
+    started_at
+  FROM requests
+) observations
+WHERE session_id IS NOT NULL AND provider != 'unknown'
+GROUP BY provider, session_id
+ON CONFLICT (provider, session_id) DO UPDATE
+SET first_seen_at = LEAST(sessions.first_seen_at, excluded.first_seen_at);`); err != nil {
+		return fmt.Errorf("backfill sessions: %w", err)
 	}
 	// Quack 1.5.x cannot reconstruct attached catalogs when a column default
 	// contains a bound expression such as current_timestamp. Supply the value
@@ -403,7 +467,7 @@ func validateSchema(db *sql.DB) error {
 		"id", "response_id", "source", "host", "started_at", "completed_at", "duration_ms",
 		"method", "path", "upstream_url", "model_requested", "model_reported",
 		"stream", "http_status", "upstream_request_id", "user_agent", "originator",
-		"client_name", "codex_session_id", "directory", "git_branch", "error_type", "error_message", "input_tokens",
+		"client_name", "session_id", "codex_session_id", "directory", "git_branch", "error_type", "error_message", "input_tokens",
 		"cached_input_tokens", "cache_write_tokens", "output_tokens", "reasoning_tokens",
 		"total_tokens", "usage_json", "created_at",
 	}
@@ -422,6 +486,9 @@ func validateSchema(db *sql.DB) error {
 	if _, err := tableColumns(db, "web_requests"); err != nil {
 		return err
 	}
+	if _, err := tableColumns(db, "sessions"); err != nil {
+		return err
+	}
 	var viewCount int
 	if err := db.QueryRow(`SELECT COUNT(*) FROM information_schema.views WHERE table_name = 'usage_by_day_model'`).Scan(&viewCount); err != nil {
 		return fmt.Errorf("validate live usage view: %w", err)
@@ -438,6 +505,24 @@ func ProviderSQL(column string) string {
 		"WHEN " + column + " LIKE '%/messages%' THEN 'anthropic' " +
 		"WHEN " + column + " LIKE '%/responses%' OR " + column + " LIKE '%/chat/completions%' THEN 'openai' " +
 		"ELSE 'unknown' END"
+}
+
+func providerForPath(path string) string {
+	switch {
+	case strings.Contains(path, "/messages"):
+		return "anthropic"
+	case strings.Contains(path, "/responses"), strings.Contains(path, "/chat/completions"):
+		return "openai"
+	default:
+		return "unknown"
+	}
+}
+
+func eventSessionID(event queue.UsageEvent) string {
+	if sessionID := strings.TrimSpace(event.SessionID); sessionID != "" {
+		return sessionID
+	}
+	return strings.TrimSpace(event.CodexSessionID)
 }
 
 // ClientSQL returns the shared display-client classification expression.
@@ -495,11 +580,16 @@ func tableColumns(db *sql.DB, table string) (map[string]bool, error) {
 const insertRequestSQL = `INSERT INTO requests (
   id, response_id, source, host, started_at, completed_at, duration_ms,
   method, path, upstream_url, model_requested, model_reported, stream, http_status,
-  upstream_request_id, user_agent, originator, client_name, codex_session_id,
+  upstream_request_id, user_agent, originator, client_name, session_id, codex_session_id,
   directory, git_branch, error_type, error_message, input_tokens, cached_input_tokens, cache_write_tokens,
   output_tokens, reasoning_tokens, total_tokens, usage_json, created_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, current_timestamp)
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, current_timestamp)
 ON CONFLICT (id) DO NOTHING`
+
+const upsertSessionSQL = `INSERT INTO sessions (provider, session_id, first_seen_at)
+VALUES (?, ?, ?)
+ON CONFLICT (provider, session_id) DO UPDATE
+SET first_seen_at = LEAST(sessions.first_seen_at, excluded.first_seen_at)`
 
 const insertToolCallSQL = `INSERT INTO tool_calls (
   request_id, ordinal, tool_call_id, name, command, description, arguments_json
@@ -529,6 +619,11 @@ func (s *Store) InsertBatch(ctx context.Context, events []queue.UsageEvent) erro
 		return fmt.Errorf("prepare insert: %w", err)
 	}
 	defer stmt.Close()
+	sessionStmt, err := tx.PrepareContext(ctx, upsertSessionSQL)
+	if err != nil {
+		return fmt.Errorf("prepare session upsert: %w", err)
+	}
+	defer sessionStmt.Close()
 	toolStmt, err := tx.PrepareContext(ctx, insertToolCallSQL)
 	if err != nil {
 		return fmt.Errorf("prepare tool call insert: %w", err)
@@ -555,15 +650,22 @@ func (s *Store) InsertBatch(ctx context.Context, events []queue.UsageEvent) erro
 		if source == "" {
 			source = "unknown"
 		}
+		sessionID := eventSessionID(ev)
 		if _, err := stmt.ExecContext(ctx,
 			ev.RequestID, nullableString(ev.ResponseID), source, nullableString(ev.Host), ev.StartedAt, completedAt, durationMS,
 			ev.Method, ev.Path, ev.UpstreamURL, nullableString(ev.ModelRequested), nullableString(ev.ModelReported), ev.Stream, ev.HTTPStatus,
-			nullableString(ev.UpstreamRequestID), nullableString(ev.UserAgent), nullableString(ev.Originator), nullableString(ev.ClientName), nullableString(ev.CodexSessionID),
+			nullableString(ev.UpstreamRequestID), nullableString(ev.UserAgent), nullableString(ev.Originator), nullableString(ev.ClientName), nullableString(sessionID), nullableString(ev.CodexSessionID),
 			nullableString(ev.Directory), nullableString(ev.GitBranch),
 			nullableString(ev.ErrorType), nullableString(ev.ErrorMessage), ev.Usage.InputTokens, ev.Usage.CachedInputTokens, ev.Usage.CacheWriteTokens,
 			ev.Usage.OutputTokens, ev.Usage.ReasoningTokens, ev.Usage.TotalTokens, usageJSON,
 		); err != nil {
 			return fmt.Errorf("insert request %s: %w", ev.RequestID, err)
+		}
+		provider := providerForPath(ev.Path)
+		if sessionID != "" && provider != "unknown" {
+			if _, err := sessionStmt.ExecContext(ctx, provider, sessionID, ev.StartedAt); err != nil {
+				return fmt.Errorf("upsert session for request %s: %w", ev.RequestID, err)
+			}
 		}
 		for ordinal, call := range ev.ToolCalls {
 			if call.Name == "" {
@@ -603,7 +705,12 @@ func (s *Store) InsertBatch(ctx context.Context, events []queue.UsageEvent) erro
 // same statement executes normally on the server. A replay after either query
 // is safe because both target keys use ON CONFLICT DO NOTHING.
 func (s *Store) insertRemoteBatch(ctx context.Context, events []queue.UsageEvent) error {
+	sessionColumns := "session_id, codex_session_id"
+	if !s.remoteHasSessionID {
+		sessionColumns = "codex_session_id"
+	}
 	requestRows := make([]string, 0, len(events))
+	sessionFirstSeen := make(map[string]time.Time)
 	toolRows := make([]string, 0)
 	webRows := make([]string, 0)
 	for _, ev := range events {
@@ -618,17 +725,36 @@ func (s *Store) insertRemoteBatch(ctx context.Context, events []queue.UsageEvent
 		if source == "" {
 			source = "unknown"
 		}
-		requestRows = append(requestRows, "("+strings.Join([]string{
+		sessionID := eventSessionID(ev)
+		requestValues := []string{
 			sqlString(ev.RequestID), sqlNullableString(ev.ResponseID), sqlString(source), sqlNullableString(ev.Host),
 			sqlTime(ev.StartedAt), completedAt, durationMS, sqlString(ev.Method), sqlString(ev.Path), sqlString(ev.UpstreamURL),
 			sqlNullableString(ev.ModelRequested), sqlNullableString(ev.ModelReported), strconv.FormatBool(ev.Stream), strconv.Itoa(ev.HTTPStatus),
 			sqlNullableString(ev.UpstreamRequestID), sqlNullableString(ev.UserAgent), sqlNullableString(ev.Originator), sqlNullableString(ev.ClientName),
-			sqlNullableString(ev.CodexSessionID), sqlNullableString(ev.Directory), sqlNullableString(ev.GitBranch),
+		}
+		if s.remoteHasSessionID {
+			requestValues = append(requestValues, sqlNullableString(sessionID), sqlNullableString(ev.CodexSessionID))
+		} else {
+			// Legacy hubs only have codex_session_id. Use it as the transport
+			// column for both providers; the hub's later migration classifies
+			// the session from the request path when it backfills session_id.
+			requestValues = append(requestValues, sqlNullableString(sessionID))
+		}
+		requestValues = append(requestValues,
+			sqlNullableString(ev.Directory), sqlNullableString(ev.GitBranch),
 			sqlNullableString(ev.ErrorType), sqlNullableString(ev.ErrorMessage),
 			sqlNullableInt64(ev.Usage.InputTokens), sqlNullableInt64(ev.Usage.CachedInputTokens), sqlNullableInt64(ev.Usage.CacheWriteTokens),
 			sqlNullableInt64(ev.Usage.OutputTokens), sqlNullableInt64(ev.Usage.ReasoningTokens), sqlNullableInt64(ev.Usage.TotalTokens),
 			sqlNullableString(string(ev.UsageJSON)), "current_timestamp",
-		}, ", ")+")")
+		)
+		requestRows = append(requestRows, "("+strings.Join(requestValues, ", ")+")")
+		provider := providerForPath(ev.Path)
+		if s.remoteHasSessions && sessionID != "" && provider != "unknown" {
+			key := provider + "\x00" + sessionID
+			if firstSeen, ok := sessionFirstSeen[key]; !ok || ev.StartedAt.Before(firstSeen) {
+				sessionFirstSeen[key] = ev.StartedAt
+			}
+		}
 		for ordinal, call := range ev.ToolCalls {
 			if call.Name == "" {
 				continue
@@ -651,12 +777,29 @@ func (s *Store) insertRemoteBatch(ctx context.Context, events []queue.UsageEvent
 	requestQuery := `INSERT INTO requests (
   id, response_id, source, host, started_at, completed_at, duration_ms,
   method, path, upstream_url, model_requested, model_reported, stream, http_status,
-  upstream_request_id, user_agent, originator, client_name, codex_session_id,
+  upstream_request_id, user_agent, originator, client_name, ` + sessionColumns + `,
   directory, git_branch, error_type, error_message, input_tokens, cached_input_tokens, cache_write_tokens,
   output_tokens, reasoning_tokens, total_tokens, usage_json, created_at
 ) VALUES ` + strings.Join(requestRows, ", ") + ` ON CONFLICT (id) DO NOTHING`
 	if err := s.execRemoteQuery(ctx, requestQuery); err != nil {
 		return fmt.Errorf("insert remote requests: %w", err)
+	}
+	if s.remoteHasSessions && len(sessionFirstSeen) > 0 {
+		sessionRows := make([]string, 0, len(sessionFirstSeen))
+		for key, firstSeen := range sessionFirstSeen {
+			provider, sessionID, _ := strings.Cut(key, "\x00")
+			sessionRows = append(sessionRows, "("+strings.Join([]string{
+				sqlString(provider), sqlString(sessionID), sqlTime(firstSeen),
+			}, ", ")+")")
+		}
+		slices.Sort(sessionRows)
+		sessionQuery := `INSERT INTO sessions (provider, session_id, first_seen_at)
+VALUES ` + strings.Join(sessionRows, ", ") + `
+ON CONFLICT (provider, session_id) DO UPDATE
+SET first_seen_at = LEAST(sessions.first_seen_at, excluded.first_seen_at)`
+		if err := s.execRemoteQuery(ctx, sessionQuery); err != nil {
+			return fmt.Errorf("upsert remote sessions: %w", err)
+		}
 	}
 	if len(toolRows) > 0 {
 		toolQuery := `INSERT INTO tool_calls (

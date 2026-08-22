@@ -243,9 +243,12 @@ type UsageEvent struct {
 	UserAgent         string
 	Originator        string
 	ClientName        string
-	CodexSessionID    string
-	Directory         string
-	GitBranch         string
+	SessionID         string
+	// CodexSessionID is retained for decoding events written by older outbox
+	// versions. New producers should set SessionID.
+	CodexSessionID string
+	Directory      string
+	GitBranch      string
 
 	ErrorType    string
 	ErrorMessage string

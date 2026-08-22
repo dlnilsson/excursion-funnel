@@ -97,6 +97,48 @@ data: {"type":"response.completed","response":{"id":"resp_context","model":"gpt-
 	}
 }
 
+func TestProxy_CapturesProviderSessionHeaders(t *testing.T) {
+	tests := []struct {
+		name       string
+		path       string
+		body       string
+		header     string
+		sessionID  string
+		other      string
+		otherValue string
+	}{
+		{name: "openai", path: "/v1/responses", body: `{"model":"gpt-test"}`, header: "session_id", sessionID: "openai-session", other: "x-session-id", otherValue: "wrong-anthropic"},
+		{name: "anthropic", path: "/v1/messages", body: `{"model":"claude-test"}`, header: "x-session-id", sessionID: "anthropic-session", other: "session_id", otherValue: "wrong-openai"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				if test.name == "openai" {
+					_, _ = io.WriteString(w, `{"id":"resp","model":"gpt-test","usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}`)
+					return
+				}
+				_, _ = io.WriteString(w, `{"id":"msg","model":"claude-test","usage":{"input_tokens":1,"output_tokens":1}}`)
+			}))
+			defer upstream.Close()
+
+			sink := &recordingSink{}
+			p := newTestProxy(t, upstream.URL, upstream.URL, sink)
+			req := httptest.NewRequest(http.MethodPost, test.path, bytes.NewBufferString(test.body))
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set(test.header, "  "+test.sessionID+"  ")
+			req.Header.Set(test.other, test.otherValue)
+			rec := httptest.NewRecorder()
+			p.Handler().ServeHTTP(rec, req)
+			_ = rec.Result().Body.Close()
+
+			if event := sink.one(t); event.SessionID != test.sessionID || event.CodexSessionID != "" {
+				t.Fatalf("session fields = %q/%q, want %q/empty", event.SessionID, event.CodexSessionID, test.sessionID)
+			}
+		})
+	}
+}
+
 // The ChatGPT Codex backend streams SSE with no Content-Type header. The proxy
 // must still classify a 2xx response to a stream=true request as SSE and parse
 // usage from the frames, rather than json-parsing "event: ..." as a JSON body.
