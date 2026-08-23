@@ -16,6 +16,7 @@ import (
 
 	duckdb "github.com/duckdb/duckdb-go/v2"
 
+	"github.com/dlnilsson/excursion-funnel/internal/pick"
 	"github.com/dlnilsson/excursion-funnel/internal/queue"
 )
 
@@ -260,8 +261,8 @@ func (s *Store) startQuack(ctx context.Context, address, token string, allowOthe
 	if err := rows.Err(); err != nil {
 		return closeOnError(fmt.Errorf("start Quack server: %w", err))
 	}
-	server.URI = firstNonEmpty(server.URI, uri)
-	server.Token = firstNonEmpty(server.Token, token)
+	server.URI = pick.First(server.URI, uri)
+	server.Token = pick.First(server.Token, token)
 	s.quackConn = conn
 	s.quackURI = uri
 	return server, nil
@@ -893,8 +894,8 @@ func (s *Store) insertRemoteBatch(ctx context.Context, events []queue.UsageEvent
 		}
 		sessionID := eventSessionID(ev)
 		requestValues := []string{
-			sqlString(ev.RequestID), sqlNullableString(ev.ResponseID), sqlString(source), sqlNullableString(ev.Host),
-			sqlTime(ev.StartedAt), completedAt, durationMS, sqlString(ev.Method), sqlString(ev.Path), sqlString(ev.UpstreamURL),
+			quoteLiteral(ev.RequestID), sqlNullableString(ev.ResponseID), quoteLiteral(source), sqlNullableString(ev.Host),
+			sqlTime(ev.StartedAt), completedAt, durationMS, quoteLiteral(ev.Method), quoteLiteral(ev.Path), quoteLiteral(ev.UpstreamURL),
 			sqlNullableString(ev.ModelRequested), sqlNullableString(ev.ModelReported), strconv.FormatBool(ev.Stream), strconv.Itoa(ev.HTTPStatus),
 			sqlNullableString(ev.UpstreamRequestID), sqlNullableString(ev.UserAgent), sqlNullableString(ev.Originator), sqlNullableString(ev.ClientName),
 			sqlNullableString(sessionID), sqlNullableString(ev.CodexSessionID),
@@ -917,7 +918,7 @@ func (s *Store) insertRemoteBatch(ctx context.Context, events []queue.UsageEvent
 				continue
 			}
 			toolRows = append(toolRows, "("+strings.Join([]string{
-				sqlString(ev.RequestID), strconv.Itoa(ordinal), sqlNullableString(call.ID), sqlString(call.Name),
+				quoteLiteral(ev.RequestID), strconv.Itoa(ordinal), sqlNullableString(call.ID), quoteLiteral(call.Name),
 				sqlNullableString(call.Command), sqlNullableString(call.Description), sqlNullableString(call.ArgumentsJSON),
 			}, ", ")+")")
 		}
@@ -926,7 +927,7 @@ func (s *Store) insertRemoteBatch(ctx context.Context, events []queue.UsageEvent
 				continue
 			}
 			webRows = append(webRows, "("+strings.Join([]string{
-				sqlString(ev.RequestID), strconv.Itoa(ordinal), sqlNullableString(request.ID), sqlString(request.Name),
+				quoteLiteral(ev.RequestID), strconv.Itoa(ordinal), sqlNullableString(request.ID), quoteLiteral(request.Name),
 				sqlNullableString(request.Query), sqlNullableString(request.URL), sqlNullableString(request.Domain), sqlNullableString(request.ArgumentsJSON),
 			}, ", ")+")")
 		}
@@ -939,7 +940,7 @@ func (s *Store) insertRemoteBatch(ctx context.Context, events []queue.UsageEvent
 		for key, firstSeen := range sessionFirstSeen {
 			provider, sessionID, _ := strings.Cut(key, "\x00")
 			sessionRows = append(sessionRows, "("+strings.Join([]string{
-				sqlString(provider), sqlString(sessionID), sqlTime(firstSeen),
+				quoteLiteral(provider), quoteLiteral(sessionID), sqlTime(firstSeen),
 			}, ", ")+")")
 		}
 		slices.Sort(sessionRows)
@@ -1037,13 +1038,11 @@ func QuackURI(address string) string {
 
 func quoteLiteral(value string) string { return "'" + strings.ReplaceAll(value, "'", "''") + "'" }
 
-func sqlString(value string) string { return quoteLiteral(value) }
-
 func sqlNullableString(value string) string {
 	if value == "" {
 		return "NULL"
 	}
-	return sqlString(value)
+	return quoteLiteral(value)
 }
 
 func sqlTime(value time.Time) string {
@@ -1062,13 +1061,4 @@ func nullableString(value string) any {
 		return nil
 	}
 	return value
-}
-
-func firstNonEmpty(values ...string) string {
-	for _, value := range values {
-		if value != "" {
-			return value
-		}
-	}
-	return ""
 }

@@ -12,6 +12,7 @@ import (
 
 	"github.com/dlnilsson/excursion-funnel/internal/queue"
 	"github.com/dlnilsson/excursion-funnel/internal/report"
+	"github.com/dlnilsson/excursion-funnel/internal/reporting"
 	"github.com/dlnilsson/excursion-funnel/internal/store"
 )
 
@@ -205,7 +206,7 @@ func TestHandleKPIs_ReturnsAnthropicUsageDetails(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = st.Close() })
 	var (
-		today      = beginningOfDay(time.Now())
+		today      = reporting.BeginningOfDay(time.Now())
 		output     = int64(100)
 		cacheWrite = int64(1000)
 	)
@@ -367,7 +368,7 @@ func TestHandleWebRequests_ReturnsTodaysRequests(t *testing.T) {
 		t.Fatalf("store.Open() error = %v", err)
 	}
 	t.Cleanup(func() { _ = st.Close() })
-	today := beginningOfDay(time.Now())
+	today := reporting.BeginningOfDay(time.Now())
 	if err := st.InsertBatch(t.Context(), []queue.UsageEvent{{
 		RequestID: "req-web-today", StartedAt: today.Add(time.Hour), CompletedAt: today.Add(time.Hour + time.Second),
 		Method: "POST", Path: "/v1/responses", UpstreamURL: "https://api.openai.com/v1/responses",
@@ -396,7 +397,7 @@ func TestHandleToolCalls_ExcludesEarlierCalls(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = st.Close() })
 
-	today := beginningOfDay(time.Now())
+	today := reporting.BeginningOfDay(time.Now())
 	events := []queue.UsageEvent{
 		{
 			RequestID:   "req-yesterday",

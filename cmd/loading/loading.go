@@ -10,12 +10,8 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
-	"github.com/charmbracelet/x/term"
+	"github.com/dlnilsson/excursion-funnel/internal/termio"
 )
-
-type descriptorWriter interface {
-	Fd() uintptr
-}
 
 type finishedMsg[T any] struct {
 	value T
@@ -84,8 +80,7 @@ func ShouldAnimate(json, stdoutTerminal, stderrTerminal bool) bool {
 
 // IsTerminalWriter reports whether writer is attached to a terminal.
 func IsTerminalWriter(writer io.Writer) bool {
-	descriptor, ok := writer.(descriptorWriter)
-	return ok && term.IsTerminal(descriptor.Fd())
+	return termio.IsTerminal(writer)
 }
 
 func renderLine(out io.Writer, view string) error {

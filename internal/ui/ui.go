@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/dlnilsson/excursion-funnel/internal/report"
+	"github.com/dlnilsson/excursion-funnel/internal/reporting"
 )
 
 //go:embed assets/index.html assets/vendor/*
@@ -83,8 +84,8 @@ func handleSessions(rep *report.Reporter, log *slog.Logger) http.HandlerFunc {
 		}
 		now := time.Now()
 		response := sessionDashboard{Daily: daily, Weekly: weekly,
-			Today:    sessionCountsForPeriod(daily, beginningOfDay(now).Format("2006-01-02")),
-			ThisWeek: sessionCountsForPeriod(weekly, beginningOfWeek(now).Format("2006-01-02"))}
+			Today:    sessionCountsForPeriod(daily, reporting.BeginningOfDay(now).Format("2006-01-02")),
+			ThisWeek: sessionCountsForPeriod(weekly, reporting.BeginningOfWeek(now).Format("2006-01-02"))}
 		writeJSON(w, response)
 	}
 }
@@ -103,7 +104,7 @@ func sessionCountsForPeriod(rows []report.SessionRow, period string) sessionCoun
 
 func handleKPIs(rep *report.Reporter, log *slog.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		since := beginningOfDay(time.Now())
+		since := reporting.BeginningOfDay(time.Now())
 		stats, err := rep.KPIs(r.Context(), report.KPIOptions{
 			Since:              since,
 			Until:              since.AddDate(0, 0, 1),
@@ -120,7 +121,7 @@ func handleKPIs(rep *report.Reporter, log *slog.Logger) http.HandlerFunc {
 
 func handleDirectories(rep *report.Reporter, log *slog.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		since := beginningOfDay(time.Now())
+		since := reporting.BeginningOfDay(time.Now())
 		rows, err := rep.Summary(r.Context(), report.SummaryOptions{
 			Since:              since,
 			Until:              since.AddDate(0, 0, 1),
@@ -141,7 +142,7 @@ func handleDirectories(rep *report.Reporter, log *slog.Logger) http.HandlerFunc 
 
 func handleSources(rep *report.Reporter, log *slog.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		since := beginningOfDay(time.Now())
+		since := reporting.BeginningOfDay(time.Now())
 		rows, err := rep.Summary(r.Context(), report.SummaryOptions{
 			Since:              since,
 			Until:              since.AddDate(0, 0, 1),
@@ -166,7 +167,7 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
 
 func handleSummary(rep *report.Reporter, log *slog.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		since := beginningOfDay(time.Now())
+		since := reporting.BeginningOfDay(time.Now())
 		rows, err := rep.Summary(r.Context(), report.SummaryOptions{
 			Since:              since,
 			Until:              since.AddDate(0, 0, 1),
@@ -218,7 +219,7 @@ func handleModelHistory(rep *report.Reporter, log *slog.Logger) http.HandlerFunc
 
 func handleHourlyHistory(rep *report.Reporter, log *slog.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		currentHour := beginningOfHour(time.Now())
+		currentHour := reporting.BeginningOfHour(time.Now())
 		rows, err := rep.HourlyTokens(r.Context(), report.HourlyTokenOptions{
 			Since:              currentHour.Add(-(hourlyHistoryBuckets - 1) * time.Hour),
 			Until:              currentHour.Add(time.Hour),
@@ -235,7 +236,7 @@ func handleHourlyHistory(rep *report.Reporter, log *slog.Logger) http.HandlerFun
 
 func handleErrors(rep *report.Reporter, log *slog.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		since := beginningOfDay(time.Now())
+		since := reporting.BeginningOfDay(time.Now())
 		rows, err := rep.RecentErrorsWithin(r.Context(), since, since.AddDate(0, 0, 1), recentErrorsLimit)
 		if err != nil {
 			log.Error("ui: query recent errors", "err", err)
@@ -251,7 +252,7 @@ func handleErrors(rep *report.Reporter, log *slog.Logger) http.HandlerFunc {
 
 func handleToolCalls(rep *report.Reporter, log *slog.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		since := beginningOfDay(time.Now())
+		since := reporting.BeginningOfDay(time.Now())
 		rows, err := rep.ToolCalls(r.Context(), report.ToolCallOptions{
 			Since: since,
 			Until: since.AddDate(0, 0, 1),
@@ -271,7 +272,7 @@ func handleToolCalls(rep *report.Reporter, log *slog.Logger) http.HandlerFunc {
 
 func handleWebRequests(rep *report.Reporter, log *slog.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		since := beginningOfDay(time.Now())
+		since := reporting.BeginningOfDay(time.Now())
 		rows, err := rep.WebRequests(r.Context(), report.ToolCallOptions{
 			Since: since,
 			Until: since.AddDate(0, 0, 1),
@@ -306,20 +307,4 @@ func knownProviderRows(rows []report.SummaryRow) []report.SummaryRow {
 		filtered = append(filtered, row)
 	}
 	return filtered
-}
-
-func beginningOfDay(t time.Time) time.Time {
-	y, m, d := t.Date()
-	return time.Date(y, m, d, 0, 0, 0, 0, t.Location())
-}
-
-func beginningOfHour(t time.Time) time.Time {
-	y, m, d := t.Date()
-	return time.Date(y, m, d, t.Hour(), 0, 0, 0, t.Location())
-}
-
-func beginningOfWeek(t time.Time) time.Time {
-	day := beginningOfDay(t)
-	daysSinceMonday := (int(day.Weekday()) + 6) % 7
-	return day.AddDate(0, 0, -daysSinceMonday)
 }

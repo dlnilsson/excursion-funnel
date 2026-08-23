@@ -11,6 +11,8 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+
+	"github.com/dlnilsson/excursion-funnel/internal/pick"
 )
 
 // Usage holds token counts extracted from a provider response. Fields are
@@ -63,19 +65,21 @@ func NewWebRequest(id, name string, input []byte) WebRequest {
 	if json.Unmarshal(input, &fields) != nil {
 		return request
 	}
-	request.Query = firstWebString(fields, "query", "search_query", "q")
-	request.URL = firstWebString(fields, "url", "uri", "href")
-	request.Domain = firstWebString(fields, "domain", "host")
+	webString := func(fields map[string]any) func(string) string {
+		return func(key string) string {
+			value, _ := fields[key].(string)
+			return value
+		}
+	}
+	top := webString(fields)
+	request.Query = pick.FirstFunc(top, "query", "search_query", "q")
+	request.URL = pick.FirstFunc(top, "url", "uri", "href")
+	request.Domain = pick.FirstFunc(top, "domain", "host")
 	if action, ok := fields["action"].(map[string]any); ok {
-		if request.Query == "" {
-			request.Query = firstWebString(action, "query", "search_query", "q")
-		}
-		if request.URL == "" {
-			request.URL = firstWebString(action, "url", "uri", "href")
-		}
-		if request.Domain == "" {
-			request.Domain = firstWebString(action, "domain", "host")
-		}
+		nested := webString(action)
+		request.Query = pick.First(request.Query, pick.FirstFunc(nested, "query", "search_query", "q"))
+		request.URL = pick.First(request.URL, pick.FirstFunc(nested, "url", "uri", "href"))
+		request.Domain = pick.First(request.Domain, pick.FirstFunc(nested, "domain", "host"))
 	}
 	return request
 }
@@ -94,15 +98,6 @@ func IsWebToolName(name string) bool {
 		strings.Contains(n, "web_fetch") ||
 		strings.Contains(n, "web-fetch") ||
 		strings.Contains(n, "webfetch")
-}
-
-func firstWebString(fields map[string]any, keys ...string) string {
-	for _, key := range keys {
-		if value, ok := fields[key].(string); ok && value != "" {
-			return value
-		}
-	}
-	return ""
 }
 
 // SanitizeWebArguments redacts credential-like fields from a provider web

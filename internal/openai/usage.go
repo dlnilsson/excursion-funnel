@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/dlnilsson/excursion-funnel/internal/pick"
 	"github.com/dlnilsson/excursion-funnel/internal/queue"
 	"github.com/dlnilsson/excursion-funnel/internal/sse"
 )
@@ -98,8 +99,8 @@ type responseUsage struct {
 
 func (u responseUsage) toUsage() queue.Usage {
 	usage := queue.Usage{
-		InputTokens:      firstNonNil(u.InputTokens, u.PromptTokens),
-		OutputTokens:     firstNonNil(u.OutputTokens, u.CompletionTokens),
+		InputTokens:      pick.First(u.InputTokens, u.PromptTokens),
+		OutputTokens:     pick.First(u.OutputTokens, u.CompletionTokens),
 		TotalTokens:      u.TotalTokens,
 		CacheWriteTokens: u.CacheWriteTokens,
 	}
@@ -124,15 +125,6 @@ func (u responseUsage) toUsage() queue.Usage {
 		usage.TotalTokens = queue.SumTokens(usage.InputTokens, usage.OutputTokens)
 	}
 	return usage
-}
-
-func firstNonNil(vals ...*int64) *int64 {
-	for _, v := range vals {
-		if v != nil {
-			return v
-		}
-	}
-	return nil
 }
 
 // ExtractCompleted parses a non-streaming Responses API or Chat Completions
@@ -167,14 +159,14 @@ func ExtractCompleted(body []byte) (CompletedResult, error) {
 func webRequestsFromResponseOutput(items []responseOutput) []queue.WebRequest {
 	var requests []queue.WebRequest
 	for _, item := range items {
-		if !isCodexWebSearchCall(item.Type, item.Name) {
+		if !isCodexWebSearchCall(item.Type) {
 			continue
 		}
 		input := responseOutputInput(item)
 		if len(input) == 0 {
 			input, _ = json.Marshal(item)
 		}
-		requests = append(requests, queue.NewWebRequest(firstNonEmpty(item.CallID, item.ID), "web_search_call", decodeToolInput(input)))
+		requests = append(requests, queue.NewWebRequest(pick.First(item.CallID, item.ID), "web_search_call", decodeToolInput(input)))
 	}
 	return requests
 }
@@ -182,7 +174,7 @@ func webRequestsFromResponseOutput(items []responseOutput) []queue.WebRequest {
 // isCodexWebSearchCall deliberately recognizes only the Responses API
 // web_search_call output item. Other web/browser tools are not part of the
 // Codex web-search activity ledger.
-func isCodexWebSearchCall(typ, name string) bool {
+func isCodexWebSearchCall(typ string) bool {
 	return strings.EqualFold(strings.TrimSpace(typ), "web_search_call")
 }
 
@@ -190,7 +182,7 @@ func toolCallsFromResponseOutput(items []responseOutput) []queue.ToolCall {
 	var calls []queue.ToolCall
 	for _, item := range items {
 		name := item.Name
-		if isCodexWebSearchCall(item.Type, item.Name) {
+		if isCodexWebSearchCall(item.Type) {
 			continue
 		}
 		if name == "" {
@@ -203,7 +195,7 @@ func toolCallsFromResponseOutput(items []responseOutput) []queue.ToolCall {
 			continue
 		}
 		input := responseOutputInput(item)
-		calls = append(calls, newCodexToolCall(firstNonEmpty(item.CallID, item.ID), name, decodeToolInput(input)))
+		calls = append(calls, newCodexToolCall(pick.First(item.CallID, item.ID), name, decodeToolInput(input)))
 	}
 	return calls
 }
@@ -281,15 +273,6 @@ func newCodexToolCall(id, name string, input []byte) queue.ToolCall {
 	call := queue.NewToolCall(id, name, input)
 	call.Command = queue.SanitizeToolArguments(call.ArgumentsJSON)
 	return call
-}
-
-func firstNonEmpty(values ...string) string {
-	for _, value := range values {
-		if value != "" {
-			return value
-		}
-	}
-	return ""
 }
 
 type errorPayload struct {
@@ -527,7 +510,7 @@ func (p *StreamParser) mergeCompletedToolCalls(calls []queue.ToolCall) {
 			continue
 		}
 		call := p.responseToolCall(incoming.ID, "", nil)
-		call.ID = firstNonEmpty(incoming.ID, call.ID)
+		call.ID = pick.First(incoming.ID, call.ID)
 		call.Name = incoming.Name
 		if incoming.ArgumentsJSON != "" {
 			call.Input = []byte(incoming.ArgumentsJSON)
@@ -594,7 +577,7 @@ func (p *StreamParser) mergeChatToolCalls(raw json.RawMessage) {
 			call.PartialInput = append(call.PartialInput, delta.Function.Arguments...)
 		}
 	}
-	p.syncChatToolCalls()
+	p.syncToolCalls()
 }
 
 func (p *StreamParser) chatToolCall(index int) *streamToolCall {
@@ -605,10 +588,6 @@ func (p *StreamParser) chatToolCall(index int) *streamToolCall {
 	}
 	p.chatToolCalls = append(p.chatToolCalls, streamToolCall{Index: index, HasIndex: true})
 	return &p.chatToolCalls[len(p.chatToolCalls)-1]
-}
-
-func (p *StreamParser) syncChatToolCalls() {
-	p.syncToolCalls()
 }
 
 // mergeResponseOutputItem captures the tool identity sent in the standard
@@ -631,11 +610,11 @@ func (p *StreamParser) mergeResponseOutputItem(raw json.RawMessage, outputIndex 
 	if name == "" {
 		return
 	}
-	web := isCodexWebSearchCall(item.Type, item.Name)
+	web := isCodexWebSearchCall(item.Type)
 	call := p.responseToolCall(item.ID, item.CallID, outputIndex)
-	call.ID = firstNonEmpty(item.ID, call.ID)
-	call.CallID = firstNonEmpty(item.CallID, call.CallID)
-	call.Type = firstNonEmpty(item.Type, call.Type)
+	call.ID = pick.First(item.ID, call.ID)
+	call.CallID = pick.First(item.CallID, call.CallID)
+	call.Type = pick.First(item.Type, call.Type)
 	call.Name = name
 	call.Web = web
 	input := responseOutputInput(item)
@@ -750,7 +729,7 @@ func (p *StreamParser) syncToolCalls() {
 		if len(call.PartialInput) > 0 {
 			input = call.PartialInput
 		}
-		calls = append(calls, newCodexToolCall(firstNonEmpty(call.CallID, call.ID), call.Name, input))
+		calls = append(calls, newCodexToolCall(pick.First(call.CallID, call.ID), call.Name, input))
 	}
 	for _, call := range p.chatToolCalls {
 		if call.Name != "" {
@@ -763,14 +742,14 @@ func (p *StreamParser) syncToolCalls() {
 func (p *StreamParser) syncWebRequests() {
 	var requests []queue.WebRequest
 	for _, call := range p.responseTools {
-		if !call.Web || !isCodexWebSearchCall(call.Type, call.Name) {
+		if !call.Web || !isCodexWebSearchCall(call.Type) {
 			continue
 		}
 		input := call.Input
 		if len(call.PartialInput) > 0 {
 			input = call.PartialInput
 		}
-		requests = append(requests, queue.NewWebRequest(firstNonEmpty(call.CallID, call.ID), call.Name, input))
+		requests = append(requests, queue.NewWebRequest(pick.First(call.CallID, call.ID), call.Name, input))
 	}
 	p.result.WebRequests = requests
 }

@@ -8,6 +8,7 @@ import (
 
 	"github.com/dlnilsson/excursion-funnel/internal/report"
 	"github.com/dlnilsson/excursion-funnel/internal/reporting"
+	"github.com/dlnilsson/excursion-funnel/internal/termio"
 )
 
 // Options controls an inspect execution.
@@ -36,7 +37,7 @@ func Run(ctx context.Context, in io.Reader, out io.Writer, id string, opts Optio
 			_, err = fmt.Fprintln(out, "no requests recorded")
 			return err
 		}
-		if !shouldUseRequestList(isTerminalReader(in), isTerminalWriter(out)) {
+		if !shouldUseRequestList(termio.IsTerminal(in), termio.IsTerminal(out)) {
 			return printRecentRows(out, rows)
 		}
 		id, err = runRequestList(ctx, in, out, rows)

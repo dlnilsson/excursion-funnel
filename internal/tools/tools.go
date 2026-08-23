@@ -9,6 +9,7 @@ import (
 
 	"github.com/dlnilsson/excursion-funnel/internal/report"
 	"github.com/dlnilsson/excursion-funnel/internal/reporting"
+	"github.com/dlnilsson/excursion-funnel/internal/termio"
 )
 
 // Options controls a tool-call report execution.
@@ -50,7 +51,7 @@ func Render(ctx context.Context, in io.Reader, out io.Writer, rows []report.Tool
 	if len(rows) == 0 {
 		return printEmpty(out)
 	}
-	if shouldUseCommandList(opts.JSON, isTerminalReader(in), isTerminalWriter(out)) {
+	if shouldUseCommandList(opts.JSON, termio.IsTerminal(in), termio.IsTerminal(out)) {
 		return runCommandList(ctx, in, out, rows, opts.Verbose)
 	}
 	return printRows(out, rows, opts.Verbose)

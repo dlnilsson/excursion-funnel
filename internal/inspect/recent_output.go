@@ -4,9 +4,6 @@ import (
 	"io"
 	"strings"
 
-	"charm.land/lipgloss/v2"
-	"charm.land/lipgloss/v2/table"
-	"github.com/charmbracelet/x/term"
 	"github.com/dlnilsson/excursion-funnel/internal/report"
 	"github.com/dlnilsson/excursion-funnel/internal/reporting"
 )
@@ -25,38 +22,16 @@ func printRecentRows(out io.Writer, rows []report.RecentRequestRow) error {
 			displayClient(row.Client),
 			displayValue(row.Model),
 			requestStatus(row.HTTPStatus.Valid, row.HTTPStatus.Int64),
-			strings.TrimSpace(row.Method + " " + compactValue(row.Path)),
+			strings.TrimSpace(row.Method + " " + reporting.CompactValue(row.Path)),
 			row.ID,
 		})
 	}
 
-	cellStyle := lipgloss.NewStyle().Padding(0, 1)
-	headerStyle := cellStyle.Bold(true).Foreground(lipgloss.Magenta)
-	recentTable := table.New().
-		Border(lipgloss.RoundedBorder()).
-		BorderStyle(lipgloss.NewStyle().Foreground(lipgloss.BrightBlack)).
-		BorderRow(true).
-		Width(recentOutputWidth(out)).
-		Wrap(true).
-		Headers("STARTED", "PROVIDER", "CLIENT", "MODEL", "STATUS", "REQUEST", "ID").
-		Rows(values...).
-		StyleFunc(func(row, _ int) lipgloss.Style {
-			if row == table.HeaderRow {
-				return headerStyle
-			}
-			return cellStyle
-		})
-
-	_, err := lipgloss.Fprintln(out, recentTable.Render())
-	return err
-}
-
-func recentOutputWidth(out io.Writer) int {
-	width := defaultRecentTableWidth
-	if file, ok := out.(terminalDescriptor); ok {
-		if terminalWidth, _, err := term.GetSize(file.Fd()); err == nil && terminalWidth > 1 {
-			width = terminalWidth - 1
-		}
-	}
-	return min(width, maxRecentTableWidth)
+	return reporting.RenderTable(out, reporting.Table{
+		Headers:   []string{"STARTED", "PROVIDER", "CLIENT", "MODEL", "STATUS", "REQUEST", "ID"},
+		Rows:      values,
+		BorderRow: true,
+		Width:     reporting.TerminalWidth(out, defaultRecentTableWidth, maxRecentTableWidth),
+		Wrap:      true,
+	})
 }

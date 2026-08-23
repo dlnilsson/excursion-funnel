@@ -16,6 +16,7 @@ import (
 
 	"github.com/dlnilsson/excursion-funnel/internal/hubauth"
 	"github.com/dlnilsson/excursion-funnel/internal/queue"
+	"github.com/dlnilsson/excursion-funnel/internal/reporting"
 	"github.com/dlnilsson/excursion-funnel/internal/store"
 )
 
@@ -396,7 +397,7 @@ ORDER BY hour`, args...)
 		return nil, fmt.Errorf("iterate hourly tokens: %w", err)
 	}
 
-	start := beginningOfHour(opts.Since)
+	start := reporting.BeginningOfHour(opts.Since)
 	bucketCount := int(opts.Until.Sub(start)/time.Hour) + 1
 	out := make([]HourlyTokenRow, 0, bucketCount)
 	for hour := start; hour.Before(opts.Until); hour = hour.Add(time.Hour) {
@@ -1163,11 +1164,6 @@ func groupSelect(day, provider, client, model, source, directory, gitBranch stri
 }
 
 func joinSQLExprs(exprs ...string) string { return strings.Join(exprs, ", ") }
-
-func beginningOfHour(t time.Time) time.Time {
-	year, month, day := t.Date()
-	return time.Date(year, month, day, t.Hour(), 0, 0, 0, t.Location())
-}
 
 func timeRange(column string, since, until time.Time) (string, []any) {
 	var where []string

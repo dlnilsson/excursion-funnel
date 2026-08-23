@@ -36,6 +36,7 @@ import (
 
 	"github.com/dlnilsson/excursion-funnel/internal/anthropic"
 	"github.com/dlnilsson/excursion-funnel/internal/openai"
+	"github.com/dlnilsson/excursion-funnel/internal/pick"
 	"github.com/dlnilsson/excursion-funnel/internal/queue"
 )
 
@@ -405,7 +406,7 @@ func (p *Proxy) handleProxy(w http.ResponseWriter, r *http.Request) {
 	// Select the session header by provider so an unrelated provider header cannot
 	// win when both are present. Codex sends session-id (with session_id retained
 	// for older clients); Claude Code sends X-Claude-Code-Session-Id.
-	sessionID := firstNonEmptyHeader(r.Header, "session-id", "session_id")
+	sessionID := pick.FirstFunc(r.Header.Get, "session-id", "session_id")
 	if provider == "anthropic" {
 		sessionID = r.Header.Get("X-Claude-Code-Session-Id")
 	}
@@ -421,13 +422,13 @@ func (p *Proxy) handleProxy(w http.ResponseWriter, r *http.Request) {
 		ModelRequested:    model,
 		Stream:            stream,
 		HTTPStatus:        resp.StatusCode,
-		UpstreamRequestID: firstNonEmptyHeader(resp.Header, "X-Request-Id", "Request-Id"),
+		UpstreamRequestID: pick.FirstFunc(resp.Header.Get, "X-Request-Id", "Request-Id"),
 		UserAgent:         r.Header.Get("User-Agent"),
 		Originator:        r.Header.Get("Originator"),
 		ClientName:        clientName(r.Header),
 		SessionID:         strings.TrimSpace(sessionID),
-		Directory:         firstNonEmpty(r.Header.Get("X-EF-Cwd"), directory),
-		GitBranch:         firstNonEmpty(r.Header.Get("X-EF-Git-Branch"), gitBranch),
+		Directory:         pick.First(r.Header.Get("X-EF-Cwd"), directory),
+		GitBranch:         pick.First(r.Header.Get("X-EF-Git-Branch"), gitBranch),
 	}
 	switch {
 	case !parseable:
@@ -558,18 +559,13 @@ func (p *Proxy) handleWebConnect(w http.ResponseWriter, r *http.Request) {
 		_, copyErr := io.Copy(clientConn, upstreamConn)
 		copyDone <- copyErr
 	}()
-	firstErr := <-copyDone
+	// Whichever direction ends first tears down both connections; the second
+	// copy then returns a use-of-closed-connection error that is expected, not
+	// a fault. Neither result is actionable, so both are drained and dropped.
+	<-copyDone
 	_ = clientConn.Close()
 	_ = upstreamConn.Close()
-	secondErr := <-copyDone
-	if firstErr == io.EOF {
-		firstErr = nil
-	}
-	if secondErr == io.EOF {
-		secondErr = nil
-	}
-	_ = firstErr
-	_ = secondErr
+	<-copyDone
 }
 
 // populateUsage extracts model/usage/error metadata from a captured
@@ -1066,26 +1062,6 @@ func clientName(h http.Header) string {
 	default:
 		return "Unknown"
 	}
-}
-
-// firstNonEmptyHeader returns the value of the first header in keys that is
-// present and non-empty, or "" if none match.
-func firstNonEmptyHeader(h http.Header, keys ...string) string {
-	for _, k := range keys {
-		if v := h.Get(k); v != "" {
-			return v
-		}
-	}
-	return ""
-}
-
-func firstNonEmpty(values ...string) string {
-	for _, value := range values {
-		if value != "" {
-			return value
-		}
-	}
-	return ""
 }
 
 func newRequestID() string {

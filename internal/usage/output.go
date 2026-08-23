@@ -1,14 +1,12 @@
 package usage
 
 import (
-	"encoding/json"
 	"fmt"
 	"io"
 	"strconv"
 
-	"charm.land/lipgloss/v2"
-	"charm.land/lipgloss/v2/table"
 	"github.com/dlnilsson/excursion-funnel/internal/report"
+	"github.com/dlnilsson/excursion-funnel/internal/reporting"
 )
 
 type summaryColumn struct {
@@ -18,10 +16,7 @@ type summaryColumn struct {
 }
 
 func printJSON(out io.Writer, rows []report.SummaryRow) error {
-	if rows == nil {
-		rows = []report.SummaryRow{}
-	}
-	return json.NewEncoder(out).Encode(rows)
+	return reporting.WriteJSONRows(out, rows)
 }
 
 func printRows(out io.Writer, rows []report.SummaryRow, groupBy string) error {
@@ -46,27 +41,11 @@ func printRows(out io.Writer, rows []report.SummaryRow, groupBy string) error {
 		values = append(values, cells)
 	}
 
-	cellStyle := lipgloss.NewStyle().Padding(0, 1)
-	headerStyle := cellStyle.Bold(true).Foreground(lipgloss.Magenta)
-	usageTable := table.New().
-		Border(lipgloss.RoundedBorder()).
-		BorderStyle(lipgloss.NewStyle().Foreground(lipgloss.BrightBlack)).
-		BorderRow(false).
-		Headers(headers...).
-		Rows(values...).
-		StyleFunc(func(row, column int) lipgloss.Style {
-			style := cellStyle
-			if row == table.HeaderRow {
-				style = headerStyle
-			}
-			if numeric[column] {
-				style = style.Align(lipgloss.Right)
-			}
-			return style
-		})
-
-	_, err := lipgloss.Fprintln(out, usageTable.Render())
-	return err
+	return reporting.RenderTable(out, reporting.Table{
+		Headers:    headers,
+		Rows:       values,
+		RightAlign: func(column int) bool { return numeric[column] },
+	})
 }
 
 func summaryColumns(groupBy string) []summaryColumn {

@@ -41,13 +41,13 @@ func Run(ctx context.Context, out io.Writer, opts Options) error {
 	} else {
 		var err error
 		if opts.Since != "" {
-			since, err = parseDate(opts.Since)
+			since, err = reporting.ParseDate(opts.Since)
 			if err != nil {
 				return fmt.Errorf("--since: %w", err)
 			}
 		}
 		if opts.Until != "" {
-			until, err = parseDate(opts.Until)
+			until, err = reporting.ParseDate(opts.Until)
 			if err != nil {
 				return fmt.Errorf("--until: %w", err)
 			}
@@ -72,12 +72,4 @@ func Run(ctx context.Context, out io.Writer, opts Options) error {
 		return printJSON(out, rows)
 	}
 	return printRows(out, rows, opts.Today)
-}
-
-func parseDate(value string) (time.Time, error) {
-	parsed, err := time.ParseInLocation("2006-01-02", value, time.Local)
-	if err != nil {
-		return time.Time{}, fmt.Errorf("expected YYYY-MM-DD: %w", err)
-	}
-	return parsed, nil
 }

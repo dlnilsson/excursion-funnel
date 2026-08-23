@@ -7,9 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"charm.land/bubbles/v2/list"
-	tea "charm.land/bubbletea/v2"
 	"github.com/dlnilsson/excursion-funnel/internal/report"
+	"github.com/dlnilsson/excursion-funnel/internal/termio"
 )
 
 func TestShouldUseRequestList(t *testing.T) {
@@ -30,12 +29,12 @@ func TestShouldUseRequestList(t *testing.T) {
 			}
 		})
 	}
-	if isTerminalReader(strings.NewReader("")) || isTerminalWriter(&bytes.Buffer{}) {
+	if termio.IsTerminal(strings.NewReader("")) || termio.IsTerminal(&bytes.Buffer{}) {
 		t.Fatal("buffered streams detected as terminals")
 	}
 }
 
-func TestRequestListItemEmphasizesModelAndMetadata(t *testing.T) {
+func TestRequestItemEmphasizesModelAndMetadata(t *testing.T) {
 	row := report.RecentRequestRow{
 		ID:         "req-1234567890abcdef",
 		ResponseID: "resp-full-value",
@@ -47,78 +46,18 @@ func TestRequestListItemEmphasizesModelAndMetadata(t *testing.T) {
 		Method:     "POST",
 		Path:       "/v1/responses",
 	}
-	model := newRequestListModel([]report.RecentRequestRow{row})
-	item, ok := model.list.Items()[0].(requestItem)
-	if !ok {
-		t.Fatalf("item type = %T, want requestItem", model.list.Items()[0])
-	}
-	if item.Title() != "gpt-5.6-sol · Codex CLI" {
-		t.Fatalf("title = %q", item.Title())
+	title, description, filterValue := renderRequestItem(row)
+	if title != "gpt-5.6-sol · Codex CLI" {
+		t.Fatalf("title = %q", title)
 	}
 	for _, want := range []string{"openai", "status=200", "POST /v1/responses", "id=req-12345678…"} {
-		if !strings.Contains(item.Description(), want) {
-			t.Fatalf("description missing %q: %s", want, item.Description())
+		if !strings.Contains(description, want) {
+			t.Fatalf("description missing %q: %s", want, description)
 		}
 	}
 	for _, want := range []string{row.ID, row.ResponseID, row.Model, row.Client, row.Path} {
-		if !strings.Contains(item.FilterValue(), want) {
-			t.Fatalf("filter value missing %q: %s", want, item.FilterValue())
+		if !strings.Contains(filterValue, want) {
+			t.Fatalf("filter value missing %q: %s", want, filterValue)
 		}
-	}
-}
-
-func TestRequestListEnterSelectsRequestAndQuits(t *testing.T) {
-	model := newRequestListModel([]report.RecentRequestRow{{ID: "req-1"}})
-	updated, cmd := model.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
-	got := updated.(requestListModel)
-	if got.selectedID != "req-1" {
-		t.Fatalf("selected ID = %q, want req-1", got.selectedID)
-	}
-	if cmd == nil {
-		t.Fatal("Enter did not return a quit command")
-	}
-	if _, ok := cmd().(tea.QuitMsg); !ok {
-		t.Fatalf("Enter command message = %T, want tea.QuitMsg", cmd())
-	}
-}
-
-func TestRequestListQuitDoesNotSelect(t *testing.T) {
-	model := newRequestListModel([]report.RecentRequestRow{{ID: "req-1"}})
-	updated, cmd := model.Update(tea.KeyPressMsg{Code: 'q', Text: "q"})
-	if updated.(requestListModel).selectedID != "" {
-		t.Fatalf("quit selected %q", updated.(requestListModel).selectedID)
-	}
-	if cmd == nil {
-		t.Fatal("q did not return a quit command")
-	}
-	if _, ok := cmd().(tea.QuitMsg); !ok {
-		t.Fatalf("q command message = %T, want tea.QuitMsg", cmd())
-	}
-}
-
-func TestRequestListEnterAppliesActiveFilterWithoutSelecting(t *testing.T) {
-	model := newRequestListModel([]report.RecentRequestRow{{ID: "req-1", Model: "gpt"}})
-	model.list.SetFilterText("gpt")
-	model.list.SetFilterState(list.Filtering)
-
-	updated, _ := model.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
-	got := updated.(requestListModel)
-	if got.selectedID != "" {
-		t.Fatalf("filter confirmation selected %q", got.selectedID)
-	}
-	if got.list.FilterState() == list.Filtering {
-		t.Fatal("Enter did not apply the active filter")
-	}
-}
-
-func TestRequestListResizesAndUsesAlternateScreen(t *testing.T) {
-	model := newRequestListModel([]report.RecentRequestRow{{ID: "req-1"}})
-	updated, _ := model.Update(tea.WindowSizeMsg{Width: 100, Height: 40})
-	resized := updated.(requestListModel)
-	if resized.list.Width() != 100 || resized.list.Height() != 40 {
-		t.Fatalf("list size = %dx%d, want 100x40", resized.list.Width(), resized.list.Height())
-	}
-	if !resized.View().AltScreen {
-		t.Fatal("request list does not request the alternate screen")
 	}
 }
