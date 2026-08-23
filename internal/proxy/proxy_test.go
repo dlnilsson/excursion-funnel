@@ -25,6 +25,16 @@ type recordingSink struct {
 	events []queue.UsageEvent
 }
 
+type hijackingRecorder struct {
+	*httptest.ResponseRecorder
+	conn net.Conn
+	rw   *bufio.ReadWriter
+}
+
+func (r *hijackingRecorder) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	return r.conn, r.rw, nil
+}
+
 func (s *recordingSink) Enqueue(ev queue.UsageEvent) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -384,6 +394,44 @@ func TestProxy_ForwardProxyCONNECTTunnel(t *testing.T) {
 	sink.mu.Unlock()
 	if n != 0 {
 		t.Fatalf("events len = %d, want no generic CONNECT event", n)
+	}
+}
+
+func TestProxy_ForwardProxyCONNECTDialUsesRequestContext(t *testing.T) {
+	p := newTestWebProxy(t, "https://openai.example", "https://anthropic.example", &recordingSink{})
+	client, server := net.Pipe()
+	readDone := make(chan struct{})
+	go func() {
+		_, _ = io.Copy(io.Discard, client)
+		close(readDone)
+	}()
+	t.Cleanup(func() {
+		_ = client.Close()
+		<-readDone
+	})
+
+	type contextKey struct{}
+	key := contextKey{}
+	want := "request context"
+	var got context.Context
+	p.dialContext = func(ctx context.Context, _, _ string) (net.Conn, error) {
+		got = ctx
+		return nil, context.Canceled
+	}
+	req := httptest.NewRequestWithContext(context.WithValue(t.Context(), key, want), http.MethodConnect, "http://target.test:443", nil)
+	req.Host = "target.test:443"
+	rec := &hijackingRecorder{
+		ResponseRecorder: httptest.NewRecorder(),
+		conn:             server,
+		rw:               bufio.NewReadWriter(bufio.NewReader(server), bufio.NewWriter(server)),
+	}
+
+	p.handleWebConnect(rec, req)
+	if got == nil {
+		t.Fatal("dial context was not received")
+	}
+	if value := got.Value(key); value != want {
+		t.Fatalf("dial context value = %v, want %q", value, want)
 	}
 }
 

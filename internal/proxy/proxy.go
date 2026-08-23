@@ -110,7 +110,7 @@ type Proxy struct {
 	anthropic        *url.URL // upstream root for Anthropic Messages traffic
 	client           *http.Client
 	webClient        *http.Client
-	dialer           *net.Dialer
+	dialContext      func(context.Context, string, string) (net.Conn, error)
 	sink             EventSink
 	log              *slog.Logger
 	idleWriteTimeout time.Duration
@@ -184,7 +184,7 @@ func NewWithOptions(openaiUpstream, anthropicUpstream string, sink EventSink, lo
 				return http.ErrUseLastResponse
 			},
 		},
-		dialer:           dialer,
+		dialContext:      dialer.DialContext,
 		sink:             sink,
 		log:              log,
 		idleWriteTimeout: opts.IdleWriteTimeout,
@@ -540,7 +540,7 @@ func (p *Proxy) handleWebConnect(w http.ResponseWriter, r *http.Request) {
 	}
 	defer clientConn.Close()
 
-	upstreamConn, err := p.dialer.DialContext(context.Background(), "tcp", target)
+	upstreamConn, err := p.dialContext(r.Context(), "tcp", target)
 	if err != nil {
 		_, _ = clientRW.WriteString("HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n")
 		_ = clientRW.Flush()
