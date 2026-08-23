@@ -10,7 +10,6 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
-	"strconv"
 	"strings"
 	"time"
 
@@ -344,70 +343,6 @@ WHERE request_id IN (SELECT id FROM requests WHERE started_at < ?)`, cutoff); er
 	return n, nil
 }
 
-// Column definitions shared by the indexed ledger tables and their
-// constraint-free staging mirrors. Only constant defaults appear here; Quack
-// 1.5.x cannot reconstruct attached catalogs whose column defaults contain a
-// bound expression such as current_timestamp.
-const (
-	requestColumnsDDL = `id VARCHAR,
-  response_id VARCHAR,
-  source VARCHAR NOT NULL DEFAULT 'unknown',
-  host VARCHAR,
-  started_at TIMESTAMPTZ NOT NULL,
-  completed_at TIMESTAMPTZ,
-  duration_ms BIGINT,
-  method VARCHAR NOT NULL,
-  path VARCHAR NOT NULL,
-  upstream_url VARCHAR NOT NULL,
-  model_requested VARCHAR,
-  model_reported VARCHAR,
-  stream BOOLEAN NOT NULL DEFAULT false,
-  http_status INTEGER,
-  upstream_request_id VARCHAR,
-  user_agent VARCHAR,
-  originator VARCHAR,
-  client_name VARCHAR,
-  session_id VARCHAR,
-  codex_session_id VARCHAR,
-  directory VARCHAR,
-  git_branch VARCHAR,
-  error_type VARCHAR,
-  error_message VARCHAR,
-  input_tokens BIGINT,
-  cached_input_tokens BIGINT,
-  cache_write_tokens BIGINT,
-  output_tokens BIGINT,
-  reasoning_tokens BIGINT,
-  total_tokens BIGINT,
-  usage_json VARCHAR,
-  created_at TIMESTAMPTZ NOT NULL`
-	sessionColumnsDDL = `provider VARCHAR NOT NULL,
-  session_id VARCHAR NOT NULL,
-  first_seen_at TIMESTAMPTZ NOT NULL`
-	toolCallColumnsDDL = `request_id VARCHAR NOT NULL,
-  ordinal INTEGER NOT NULL,
-  tool_call_id VARCHAR,
-  name VARCHAR NOT NULL,
-  command VARCHAR,
-  description VARCHAR,
-  arguments_json VARCHAR`
-	webRequestColumnsDDL = `request_id VARCHAR NOT NULL,
-  ordinal INTEGER NOT NULL,
-  web_request_id VARCHAR,
-  name VARCHAR NOT NULL,
-  query VARCHAR,
-  url VARCHAR,
-  domain VARCHAR,
-  arguments_json VARCHAR`
-)
-
-// Column name lists for staging inserts and staged-to-ledger merges.
-const (
-	requestColumnNames    = `id, response_id, source, host, started_at, completed_at, duration_ms, method, path, upstream_url, model_requested, model_reported, stream, http_status, upstream_request_id, user_agent, originator, client_name, session_id, codex_session_id, directory, git_branch, error_type, error_message, input_tokens, cached_input_tokens, cache_write_tokens, output_tokens, reasoning_tokens, total_tokens, usage_json, created_at`
-	toolCallColumnNames   = `request_id, ordinal, tool_call_id, name, command, description, arguments_json`
-	webRequestColumnNames = `request_id, ordinal, web_request_id, name, query, url, domain, arguments_json`
-)
-
 func ensureSchema(db *sql.DB) error { return ensureLedgerSchema(db) }
 
 // ensureHubSchema prepares the shared hub ledger. The hub keeps the fully
@@ -428,22 +363,13 @@ func ensureHubSchema(db *sql.DB) error {
 }
 
 func ensureLedgerSchema(db *sql.DB) error {
-	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS requests (
-  ` + requestColumnsDDL + `,
-  PRIMARY KEY (id)
-);
-CREATE TABLE IF NOT EXISTS sessions (
-  ` + sessionColumnsDDL + `,
-  PRIMARY KEY (provider, session_id)
-);
-CREATE TABLE IF NOT EXISTS tool_calls (
-  ` + toolCallColumnsDDL + `,
-  PRIMARY KEY (request_id, ordinal)
-);
-CREATE TABLE IF NOT EXISTS web_requests (
-  ` + webRequestColumnsDDL + `,
-  PRIMARY KEY (request_id, ordinal)
-);`); err != nil {
+	create := strings.Join([]string{
+		requestsTable.createSQL(),
+		sessionsTable.createSQL(),
+		toolCallsTable.createSQL(),
+		webRequestsTable.createSQL(),
+	}, "\n")
+	if _, err := db.Exec(create); err != nil {
 		return fmt.Errorf("create schema: %w", err)
 	}
 	for _, col := range []struct{ name, typ string }{
@@ -499,18 +425,13 @@ GROUP BY day, model`); err != nil {
 // that remote clients write into. Their absence of an ART index is exactly what
 // keeps Quack's remote-write path from crashing.
 func ensureStagingSchema(db *sql.DB) error {
-	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS staging_requests (
-  ` + requestColumnsDDL + `
-);
-CREATE TABLE IF NOT EXISTS staging_sessions (
-  ` + sessionColumnsDDL + `
-);
-CREATE TABLE IF NOT EXISTS staging_tool_calls (
-  ` + toolCallColumnsDDL + `
-);
-CREATE TABLE IF NOT EXISTS staging_web_requests (
-  ` + webRequestColumnsDDL + `
-);`); err != nil {
+	create := strings.Join([]string{
+		requestsTable.createStagingSQL(),
+		sessionsTable.createStagingSQL(),
+		toolCallsTable.createStagingSQL(),
+		webRequestsTable.createStagingSQL(),
+	}, "\n")
+	if _, err := db.Exec(create); err != nil {
 		return fmt.Errorf("create staging schema: %w", err)
 	}
 	return nil
@@ -546,27 +467,27 @@ SET first_seen_at = LEAST(sessions.first_seen_at, excluded.first_seen_at)`); err
 // copied into a fresh constrained one. Tables that do not yet exist are left for
 // ensureLedgerSchema to create constrained.
 func repairLedgerPrimaryKeys(db *sql.DB) error {
-	for _, t := range []struct{ table, columnsDDL, primaryKey string }{
-		{"requests", requestColumnsDDL, "id"},
-		{"sessions", sessionColumnsDDL, "provider, session_id"},
-		{"tool_calls", toolCallColumnsDDL, "request_id, ordinal"},
-		{"web_requests", webRequestColumnsDDL, "request_id, ordinal"},
+	for _, t := range []struct{ name, columnsDDL, primaryKey string }{
+		{requestsTable.name, requestsTable.columnsDDL(), requestsTable.primaryKey},
+		{sessionsTable.name, sessionsTable.columnsDDL(), sessionsTable.primaryKey},
+		{toolCallsTable.name, toolCallsTable.columnsDDL(), toolCallsTable.primaryKey},
+		{webRequestsTable.name, webRequestsTable.columnsDDL(), webRequestsTable.primaryKey},
 	} {
-		exists, err := tableExists(db, t.table)
+		exists, err := tableExists(db, t.name)
 		if err != nil {
 			return err
 		}
 		if !exists {
 			continue
 		}
-		hasPK, err := tableHasPrimaryKey(db, t.table)
+		hasPK, err := tableHasPrimaryKey(db, t.name)
 		if err != nil {
 			return err
 		}
 		if hasPK {
 			continue
 		}
-		if err := rebuildWithPrimaryKey(db, t.table, t.columnsDDL, t.primaryKey); err != nil {
+		if err := rebuildWithPrimaryKey(db, t.name, t.columnsDDL, t.primaryKey); err != nil {
 			return err
 		}
 	}
@@ -640,15 +561,8 @@ func scanStrings(db *sql.DB, query string, args ...any) ([]string, error) {
 }
 
 func validateSchema(db *sql.DB) error {
-	requiredColumns := []string{
-		"id", "response_id", "source", "host", "started_at", "completed_at", "duration_ms",
-		"method", "path", "upstream_url", "model_requested", "model_reported",
-		"stream", "http_status", "upstream_request_id", "user_agent", "originator",
-		"client_name", "session_id", "codex_session_id", "directory", "git_branch", "error_type", "error_message", "input_tokens",
-		"cached_input_tokens", "cache_write_tokens", "output_tokens", "reasoning_tokens",
-		"total_tokens", "usage_json", "created_at",
-	}
-	cols, err := tableColumns(db, "requests")
+	requiredColumns := requestsTable.names()
+	cols, err := tableColumns(db, requestsTable.name)
 	if err != nil {
 		return err
 	}
@@ -712,31 +626,20 @@ func tableColumns(db *sql.DB, table string) (map[string]bool, error) {
 	return cols, nil
 }
 
-// created_at is explicit because Quack 1.5.x cannot attach catalogs that
-// contain expression-backed column defaults.
-const insertRequestSQL = `INSERT INTO requests (
-  id, response_id, source, host, started_at, completed_at, duration_ms,
-  method, path, upstream_url, model_requested, model_reported, stream, http_status,
-  upstream_request_id, user_agent, originator, client_name, session_id, codex_session_id,
-  directory, git_branch, error_type, error_message, input_tokens, cached_input_tokens, cache_write_tokens,
-  output_tokens, reasoning_tokens, total_tokens, usage_json, created_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, current_timestamp)
-ON CONFLICT (id) DO NOTHING`
+// created_at is supplied explicitly on every insert because Quack 1.5.x cannot
+// attach catalogs that contain expression-backed column defaults.
+var (
+	insertRequestSQL    = requestsTable.insertSQL()
+	insertToolCallSQL   = toolCallsTable.insertSQL()
+	insertWebRequestSQL = webRequestsTable.insertSQL()
+)
 
+// The session registry upserts rather than ignoring conflicts, so it does not
+// use the generated insert.
 const upsertSessionSQL = `INSERT INTO sessions (provider, session_id, first_seen_at)
 VALUES (?, ?, ?)
 ON CONFLICT (provider, session_id) DO UPDATE
 SET first_seen_at = LEAST(sessions.first_seen_at, excluded.first_seen_at)`
-
-const insertToolCallSQL = `INSERT INTO tool_calls (
-  request_id, ordinal, tool_call_id, name, command, description, arguments_json
-) VALUES (?, ?, ?, ?, ?, ?, ?)
-ON CONFLICT (request_id, ordinal) DO NOTHING`
-
-const insertWebRequestSQL = `INSERT INTO web_requests (
-	request_id, ordinal, web_request_id, name, query, url, domain, arguments_json
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-ON CONFLICT (request_id, ordinal) DO NOTHING`
 
 // InsertBatch writes events idempotently in one transaction.
 func (s *Store) InsertBatch(ctx context.Context, events []queue.UsageEvent) error {
@@ -774,58 +677,23 @@ func (s *Store) InsertBatch(ctx context.Context, events []queue.UsageEvent) erro
 	defer webStmt.Close()
 
 	for _, ev := range events {
-		var completedAt, durationMS any
-		if !ev.CompletedAt.IsZero() {
-			completedAt = ev.CompletedAt
-			durationMS = ev.CompletedAt.Sub(ev.StartedAt).Milliseconds()
-		}
-		var usageJSON any
-		if len(ev.UsageJSON) > 0 {
-			usageJSON = string(ev.UsageJSON)
-		}
-		source := ev.Source
-		if source == "" {
-			source = "unknown"
-		}
-		sessionID := eventSessionID(ev)
-		if _, err := stmt.ExecContext(ctx,
-			ev.RequestID, nullableString(ev.ResponseID), source, nullableString(ev.Host), ev.StartedAt, completedAt, durationMS,
-			ev.Method, ev.Path, ev.UpstreamURL, nullableString(ev.ModelRequested), nullableString(ev.ModelReported), ev.Stream, ev.HTTPStatus,
-			nullableString(ev.UpstreamRequestID), nullableString(ev.UserAgent), nullableString(ev.Originator), nullableString(ev.ClientName), nullableString(sessionID), nullableString(ev.CodexSessionID),
-			nullableString(ev.Directory), nullableString(ev.GitBranch),
-			nullableString(ev.ErrorType), nullableString(ev.ErrorMessage), ev.Usage.InputTokens, ev.Usage.CachedInputTokens, ev.Usage.CacheWriteTokens,
-			ev.Usage.OutputTokens, ev.Usage.ReasoningTokens, ev.Usage.TotalTokens, usageJSON,
-		); err != nil {
+		row := newRequestRow(ev)
+		if _, err := stmt.ExecContext(ctx, requestsTable.args(row)...); err != nil {
 			return fmt.Errorf("insert request %s: %w", ev.RequestID, err)
 		}
 		requestProvider := provider.ForPath(ev.Path)
-		if sessionID != "" && requestProvider != provider.Unknown {
-			if _, err := sessionStmt.ExecContext(ctx, requestProvider, sessionID, ev.StartedAt); err != nil {
+		if row.sessionID != "" && requestProvider != provider.Unknown {
+			if _, err := sessionStmt.ExecContext(ctx, requestProvider, row.sessionID, ev.StartedAt); err != nil {
 				return fmt.Errorf("upsert session for request %s: %w", ev.RequestID, err)
 			}
 		}
-		for ordinal, call := range ev.ToolCalls {
-			if call.Name == "" {
-				continue
-			}
-			if _, err := toolStmt.ExecContext(ctx, ev.RequestID, ordinal, nullableString(call.ID), call.Name,
-				nullableString(call.Command), nullableString(call.Description), nullableString(call.ArgumentsJSON)); err != nil {
+		for _, child := range toolCallRows(ev) {
+			if _, err := toolStmt.ExecContext(ctx, toolCallsTable.args(child)...); err != nil {
 				return fmt.Errorf("insert tool call for request %s: %w", ev.RequestID, err)
 			}
 		}
-		for ordinal, request := range ev.WebRequests {
-			// The activity ledger records provider web-tool calls from both
-			// providers (Codex's web_search_call and Claude Code's client-side
-			// WebSearch/WebFetch). Generic forward-proxy traffic is not a
-			// web-tool call, so IsWebToolName keeps it out.
-			if !provider.IsWebToolName(request.Name) {
-				continue
-			}
-			if _, err := webStmt.ExecContext(ctx,
-				ev.RequestID, ordinal, nullableString(request.ID), request.Name,
-				nullableString(request.Query), nullableString(request.URL), nullableString(request.Domain),
-				nullableString(request.ArgumentsJSON),
-			); err != nil {
+		for _, child := range webRequestRows(ev) {
+			if _, err := webStmt.ExecContext(ctx, webRequestsTable.args(child)...); err != nil {
 				return fmt.Errorf("insert web request for request %s: %w", ev.RequestID, err)
 			}
 		}
@@ -847,89 +715,64 @@ func (s *Store) insertRemoteBatch(ctx context.Context, events []queue.UsageEvent
 	if !s.remoteHasStaging {
 		return errors.New("hub is missing staging tables; upgrade the hub to a build with staging support")
 	}
-	requestRows := make([]string, 0, len(events))
-	sessionFirstSeen := make(map[string]time.Time)
-	toolRows := make([]string, 0)
-	webRows := make([]string, 0)
+	var (
+		requestTuples    = make([]string, 0, len(events))
+		toolTuples       []string
+		webTuples        []string
+		sessionFirstSeen = make(map[string]time.Time)
+	)
 	for _, ev := range events {
-		var completedAt, durationMS string
-		if ev.CompletedAt.IsZero() {
-			completedAt, durationMS = "NULL", "NULL"
-		} else {
-			completedAt = sqlTime(ev.CompletedAt)
-			durationMS = strconv.FormatInt(ev.CompletedAt.Sub(ev.StartedAt).Milliseconds(), 10)
-		}
-		source := ev.Source
-		if source == "" {
-			source = "unknown"
-		}
-		sessionID := eventSessionID(ev)
-		requestValues := []string{
-			quoteLiteral(ev.RequestID), sqlNullableString(ev.ResponseID), quoteLiteral(source), sqlNullableString(ev.Host),
-			sqlTime(ev.StartedAt), completedAt, durationMS, quoteLiteral(ev.Method), quoteLiteral(ev.Path), quoteLiteral(ev.UpstreamURL),
-			sqlNullableString(ev.ModelRequested), sqlNullableString(ev.ModelReported), strconv.FormatBool(ev.Stream), strconv.Itoa(ev.HTTPStatus),
-			sqlNullableString(ev.UpstreamRequestID), sqlNullableString(ev.UserAgent), sqlNullableString(ev.Originator), sqlNullableString(ev.ClientName),
-			sqlNullableString(sessionID), sqlNullableString(ev.CodexSessionID),
-			sqlNullableString(ev.Directory), sqlNullableString(ev.GitBranch),
-			sqlNullableString(ev.ErrorType), sqlNullableString(ev.ErrorMessage),
-			sqlNullableInt64(ev.Usage.InputTokens), sqlNullableInt64(ev.Usage.CachedInputTokens), sqlNullableInt64(ev.Usage.CacheWriteTokens),
-			sqlNullableInt64(ev.Usage.OutputTokens), sqlNullableInt64(ev.Usage.ReasoningTokens), sqlNullableInt64(ev.Usage.TotalTokens),
-			sqlNullableString(string(ev.UsageJSON)), "current_timestamp",
-		}
-		requestRows = append(requestRows, "("+strings.Join(requestValues, ", ")+")")
+		row := newRequestRow(ev)
+		requestTuples = append(requestTuples, requestsTable.valuesTuple(row))
 		requestProvider := provider.ForPath(ev.Path)
-		if sessionID != "" && requestProvider != provider.Unknown {
-			key := requestProvider + "\x00" + sessionID
+		if row.sessionID != "" && requestProvider != provider.Unknown {
+			key := requestProvider + "\x00" + row.sessionID
 			if firstSeen, ok := sessionFirstSeen[key]; !ok || ev.StartedAt.Before(firstSeen) {
 				sessionFirstSeen[key] = ev.StartedAt
 			}
 		}
-		for ordinal, call := range ev.ToolCalls {
-			if call.Name == "" {
-				continue
-			}
-			toolRows = append(toolRows, "("+strings.Join([]string{
-				quoteLiteral(ev.RequestID), strconv.Itoa(ordinal), sqlNullableString(call.ID), quoteLiteral(call.Name),
-				sqlNullableString(call.Command), sqlNullableString(call.Description), sqlNullableString(call.ArgumentsJSON),
-			}, ", ")+")")
+		for _, child := range toolCallRows(ev) {
+			toolTuples = append(toolTuples, toolCallsTable.valuesTuple(child))
 		}
-		for ordinal, request := range ev.WebRequests {
-			if !provider.IsWebToolName(request.Name) {
-				continue
-			}
-			webRows = append(webRows, "("+strings.Join([]string{
-				quoteLiteral(ev.RequestID), strconv.Itoa(ordinal), sqlNullableString(request.ID), quoteLiteral(request.Name),
-				sqlNullableString(request.Query), sqlNullableString(request.URL), sqlNullableString(request.Domain), sqlNullableString(request.ArgumentsJSON),
-			}, ", ")+")")
+		for _, child := range webRequestRows(ev) {
+			webTuples = append(webTuples, webRequestsTable.valuesTuple(child))
 		}
 	}
-	if err := s.execRemoteQuery(ctx, `INSERT INTO staging_requests (`+requestColumnNames+`) VALUES `+strings.Join(requestRows, ", ")); err != nil {
+
+	if err := s.stageRemote(ctx, requestsTable.name, requestsTable.columnNames(), requestTuples); err != nil {
 		return fmt.Errorf("stage remote requests: %w", err)
 	}
 	if len(sessionFirstSeen) > 0 {
-		sessionRows := make([]string, 0, len(sessionFirstSeen))
+		sessionTuples := make([]string, 0, len(sessionFirstSeen))
 		for key, firstSeen := range sessionFirstSeen {
-			provider, sessionID, _ := strings.Cut(key, "\x00")
-			sessionRows = append(sessionRows, "("+strings.Join([]string{
-				quoteLiteral(provider), quoteLiteral(sessionID), sqlTime(firstSeen),
-			}, ", ")+")")
+			providerName, sessionID, _ := strings.Cut(key, "\x00")
+			sessionTuples = append(sessionTuples, sessionsTable.valuesTuple(sessionRow{
+				provider: providerName, sessionID: sessionID, firstSeen: firstSeen,
+			}))
 		}
-		slices.Sort(sessionRows)
-		if err := s.execRemoteQuery(ctx, `INSERT INTO staging_sessions (provider, session_id, first_seen_at) VALUES `+strings.Join(sessionRows, ", ")); err != nil {
+		// Map iteration order is random; sort so a retried batch produces
+		// byte-identical SQL.
+		slices.Sort(sessionTuples)
+		if err := s.stageRemote(ctx, sessionsTable.name, sessionsTable.columnNames(), sessionTuples); err != nil {
 			return fmt.Errorf("stage remote sessions: %w", err)
 		}
 	}
-	if len(toolRows) > 0 {
-		if err := s.execRemoteQuery(ctx, `INSERT INTO staging_tool_calls (`+toolCallColumnNames+`) VALUES `+strings.Join(toolRows, ", ")); err != nil {
-			return fmt.Errorf("stage remote tool calls: %w", err)
-		}
+	if err := s.stageRemote(ctx, toolCallsTable.name, toolCallsTable.columnNames(), toolTuples); err != nil {
+		return fmt.Errorf("stage remote tool calls: %w", err)
 	}
-	if len(webRows) > 0 {
-		if err := s.execRemoteQuery(ctx, `INSERT INTO staging_web_requests (`+webRequestColumnNames+`) VALUES `+strings.Join(webRows, ", ")); err != nil {
-			return fmt.Errorf("stage remote web requests: %w", err)
-		}
+	if err := s.stageRemote(ctx, webRequestsTable.name, webRequestsTable.columnNames(), webTuples); err != nil {
+		return fmt.Errorf("stage remote web requests: %w", err)
 	}
 	return nil
+}
+
+// stageRemote appends value tuples to a staging table. An empty batch is a
+// no-op rather than an INSERT with no VALUES.
+func (s *Store) stageRemote(ctx context.Context, table, columns string, tuples []string) error {
+	if len(tuples) == 0 {
+		return nil
+	}
+	return s.execRemoteQuery(ctx, "INSERT INTO staging_"+table+" ("+columns+") VALUES "+strings.Join(tuples, ", "))
 }
 
 // MergeStaging folds the constraint-free staging tables that remote clients
@@ -946,9 +789,7 @@ func (s *Store) MergeStaging(ctx context.Context) (int64, error) {
 		return 0, fmt.Errorf("begin merge: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
-	res, err := tx.ExecContext(ctx, `INSERT INTO requests (`+requestColumnNames+`)
-SELECT `+requestColumnNames+` FROM staging_requests
-ON CONFLICT (id) DO NOTHING`)
+	res, err := tx.ExecContext(ctx, requestsTable.mergeStagingSQL())
 	if err != nil {
 		return 0, fmt.Errorf("merge staged requests: %w", err)
 	}
@@ -956,6 +797,8 @@ ON CONFLICT (id) DO NOTHING`)
 	if err != nil {
 		return 0, fmt.Errorf("merge staged requests: %w", err)
 	}
+	// Sessions merge with an upsert rather than ON CONFLICT DO NOTHING: the
+	// earliest first_seen_at across every staged duplicate has to win.
 	if _, err := tx.ExecContext(ctx, `INSERT INTO sessions (provider, session_id, first_seen_at)
 SELECT provider, session_id, MIN(first_seen_at) AS first_seen_at FROM staging_sessions
 GROUP BY provider, session_id
@@ -963,14 +806,10 @@ ON CONFLICT (provider, session_id) DO UPDATE
 SET first_seen_at = LEAST(sessions.first_seen_at, excluded.first_seen_at)`); err != nil {
 		return 0, fmt.Errorf("merge staged sessions: %w", err)
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO tool_calls (`+toolCallColumnNames+`)
-SELECT `+toolCallColumnNames+` FROM staging_tool_calls
-ON CONFLICT (request_id, ordinal) DO NOTHING`); err != nil {
+	if _, err := tx.ExecContext(ctx, toolCallsTable.mergeStagingSQL()); err != nil {
 		return 0, fmt.Errorf("merge staged tool calls: %w", err)
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO web_requests (`+webRequestColumnNames+`)
-SELECT `+webRequestColumnNames+` FROM staging_web_requests
-ON CONFLICT (request_id, ordinal) DO NOTHING`); err != nil {
+	if _, err := tx.ExecContext(ctx, webRequestsTable.mergeStagingSQL()); err != nil {
 		return 0, fmt.Errorf("merge staged web requests: %w", err)
 	}
 	for _, staging := range []string{"staging_requests", "staging_sessions", "staging_tool_calls", "staging_web_requests"} {
@@ -1009,22 +848,8 @@ func QuackURI(address string) string {
 
 func quoteLiteral(value string) string { return "'" + strings.ReplaceAll(value, "'", "''") + "'" }
 
-func sqlNullableString(value string) string {
-	if value == "" {
-		return "NULL"
-	}
-	return quoteLiteral(value)
-}
-
 func sqlTime(value time.Time) string {
 	return quoteLiteral(value.Format(time.RFC3339Nano)) + "::TIMESTAMPTZ"
-}
-
-func sqlNullableInt64(value *int64) string {
-	if value == nil {
-		return "NULL"
-	}
-	return strconv.FormatInt(*value, 10)
 }
 
 func nullableString(value string) any {
