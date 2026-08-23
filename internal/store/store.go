@@ -500,19 +500,43 @@ func rebuildWithPrimaryKey(db *sql.DB, table, columnsDDL, primaryKey string) err
 		return err
 	}
 	colList := strings.Join(cols, ", ")
-	tmp := table + "_ef_rebuild"
-	for _, stmt := range []string{
-		"DROP TABLE IF EXISTS " + tmp,
-		"CREATE TABLE " + tmp + " (\n  " + columnsDDL + ",\n  PRIMARY KEY (" + primaryKey + ")\n)",
-		fmt.Sprintf("INSERT INTO %s (%s) SELECT %s FROM %s", tmp, colList, colList, table),
-		"DROP TABLE " + table,
-		"ALTER TABLE " + tmp + " RENAME TO " + table,
-	} {
-		if _, err := db.Exec(stmt); err != nil {
-			return fmt.Errorf("restore primary key on %s: %w", table, err)
+	if err := withTransaction(db, func(tx *sql.Tx) error {
+		for _, stmt := range primaryKeyRebuildStatements(table, columnsDDL, primaryKey, colList) {
+			if _, err := tx.Exec(stmt); err != nil {
+				return err
+			}
 		}
+		return nil
+	}); err != nil {
+		return fmt.Errorf("restore primary key on %s: %w", table, err)
 	}
 	return nil
+}
+
+// withTransaction commits run's work only when it completes successfully.
+// The deferred rollback is a no-op after commit and restores every prior DDL
+// statement when a migration fails midway through.
+func withTransaction(db *sql.DB, run func(*sql.Tx) error) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := run(tx); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func primaryKeyRebuildStatements(table, columnsDDL, primaryKey, columns string) []string {
+	tmp := table + "_ef_rebuild"
+	return []string{
+		"DROP TABLE IF EXISTS " + tmp,
+		"CREATE TABLE " + tmp + " (\n  " + columnsDDL + ",\n  PRIMARY KEY (" + primaryKey + ")\n)",
+		fmt.Sprintf("INSERT INTO %s (%s) SELECT %s FROM %s", tmp, columns, columns, table),
+		"DROP TABLE " + table,
+		"ALTER TABLE " + tmp + " RENAME TO " + table,
+	}
 }
 
 func tableExists(db *sql.DB, table string) (bool, error) {

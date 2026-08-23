@@ -1,6 +1,8 @@
 package store
 
 import (
+	"database/sql"
+	"errors"
 	"path/filepath"
 	"testing"
 	"time"
@@ -102,6 +104,64 @@ func TestOpenHubRestoresDroppedPrimaryKey(t *testing.T) {
 	}
 	if count != 1 {
 		t.Fatalf("row lost during PK repair: count = %d", count)
+	}
+}
+
+func TestPrimaryKeyRebuildRollsBackAfterDroppingOriginalTable(t *testing.T) {
+	db, err := openDuckDB(filepath.Join(t.TempDir(), "rollback.duckdb"), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	if _, err := db.Exec(`CREATE TABLE repair_test (id VARCHAR, value VARCHAR);
+INSERT INTO repair_test VALUES ('row-1', 'kept')`); err != nil {
+		t.Fatal(err)
+	}
+
+	interrupted := errors.New("injected interruption after dropping original table")
+	err = withTransaction(db, func(tx *sql.Tx) error {
+		statements := primaryKeyRebuildStatements("repair_test", "id VARCHAR, value VARCHAR", "id", "id, value")
+		for index, statement := range statements {
+			if _, err := tx.Exec(statement); err != nil {
+				return err
+			}
+			if index == 3 {
+				return interrupted
+			}
+		}
+		return nil
+	})
+	if !errors.Is(err, interrupted) {
+		t.Fatalf("withTransaction() error = %v, want injected interruption", err)
+	}
+
+	exists, err := tableExists(db, "repair_test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !exists {
+		t.Fatal("original table was not restored after rollback")
+	}
+	hasPK, err := tableHasPrimaryKey(db, "repair_test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hasPK {
+		t.Fatal("rollback left the rebuilt primary key in place")
+	}
+	var value string
+	if err := db.QueryRow(`SELECT value FROM repair_test WHERE id = 'row-1'`).Scan(&value); err != nil {
+		t.Fatal(err)
+	}
+	if value != "kept" {
+		t.Fatalf("restored row value = %q, want kept", value)
+	}
+	tmpExists, err := tableExists(db, "repair_test_ef_rebuild")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tmpExists {
+		t.Fatal("rollback left the rebuild table in place")
 	}
 }
 
