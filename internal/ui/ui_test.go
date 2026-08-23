@@ -60,9 +60,6 @@ func TestHandleIndex_ServesDashboardHTML(t *testing.T) {
 		`aggregate.Output += Number(row.Output) || 0`,
 		`fetch("/ui/api/kpis")`,
 		`fetch("/ui/api/sessions")`,
-		`id="session-history-chart"`,
-		`id="session-day-toggle"`,
-		`id="session-week-toggle"`,
 		`Sessions used today`,
 		`Sessions started this week`,
 		`p50 latency`,
@@ -104,9 +101,15 @@ func TestHandleIndex_ServesDashboardHTML(t *testing.T) {
 		"Requests by git branch",
 		`data-table-key="branches"`,
 		`fetch("/ui/api/branches")`,
+		`Session activity overall`,
+		`id="session-history-chart"`,
+		`id="session-day-toggle"`,
+		`id="session-week-toggle"`,
+		`renderSessionHistory`,
+		`sessionChartOptions`,
 	} {
 		if strings.Contains(rec.Body.String(), removed) {
-			t.Fatalf("body contains removed branch UI marker %q", removed)
+			t.Fatalf("body contains removed dashboard marker %q", removed)
 		}
 	}
 	body := rec.Body.String()
