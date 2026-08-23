@@ -84,6 +84,14 @@ func TestHandleIndex_ServesDashboardHTML(t *testing.T) {
 		`data-table-key="errors"`,
 		`data-table-key="tools"`,
 		`excursion-funnel-table-state`,
+		`data-section-key="kpis" open`,
+		`data-section-key="token-activity" open`,
+		`data-section-key="model-activity-chart" open`,
+		`data-section-key="token-heatmap" open`,
+		`excursion-funnel-section-state`,
+		`initDashboardSectionCollapse();`,
+		`hourlyTokenChart.resize();`,
+		`historyStackedChart.resize();`,
 		`fetch("/ui/api/history/models")`,
 		`fetch("/ui/api/sources")`,
 		`fetch("/ui/api/directories")`,
@@ -121,6 +129,11 @@ func TestHandleIndex_ServesDashboardHTML(t *testing.T) {
 		}
 	}
 	body := rec.Body.String()
+	modelChartStart := strings.Index(body, `data-section-key="model-activity-chart"`)
+	modelChartEnd := modelChartStart + strings.Index(body[modelChartStart:], "</details>")
+	if modelTable := strings.Index(body, `data-table-key="model-activity"`); modelTable < modelChartEnd {
+		t.Fatal("model activity table appears inside collapsible chart, want it independently visible")
+	}
 	if strings.Index(body, `id="hourly-token-chart"`) > strings.Index(body, `id="history-stacked-chart"`) {
 		t.Fatal("hourly token chart appears after model history, want it above")
 	}

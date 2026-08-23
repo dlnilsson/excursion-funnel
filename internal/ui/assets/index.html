@@ -97,11 +97,14 @@
   }
 
   .topbar {
-    align-items: center;
-    display: flex;
-    gap: 1rem;
-    justify-content: space-between;
     min-width: 0;
+    position: relative;
+  }
+
+  .topbar .theme-toggle {
+    position: absolute;
+    right: 0;
+    top: 0;
   }
 
   h1 {
@@ -143,6 +146,59 @@
     gap: 1rem;
     grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr));
     margin: 1.5rem 0 2rem;
+  }
+
+  .dashboard-section {
+    margin-top: 2rem;
+  }
+
+  .dashboard-section.kpi-section {
+    margin-top: 0;
+  }
+
+  .dashboard-section > summary {
+    align-items: center;
+    color: var(--heading-secondary);
+    cursor: pointer;
+    display: flex;
+    font-size: 1rem;
+    font-weight: 700;
+    gap: 0.65rem;
+    list-style: none;
+  }
+
+  .dashboard-section.kpi-section > summary {
+    padding-right: 3rem;
+  }
+
+  .dashboard-section > summary::-webkit-details-marker {
+    display: none;
+  }
+
+  .dashboard-section > summary::before {
+    border: solid var(--text-muted);
+    border-width: 0 2px 2px 0;
+    content: "";
+    flex: 0 0 auto;
+    height: 0.45rem;
+    margin: 0.1rem 0.2rem 0.1rem 0.1rem;
+    transform: rotate(-45deg);
+    transition: transform 150ms ease;
+    width: 0.45rem;
+  }
+
+  .dashboard-section[open] > summary::before {
+    transform: rotate(45deg);
+  }
+
+  .dashboard-section > summary h1,
+  .dashboard-section > summary h2 {
+    margin: 0;
+  }
+
+  .dashboard-section > .history-layout,
+  .dashboard-section > .heatmap-panel {
+    margin-top: 0.75rem;
   }
 
   .stat {
@@ -463,18 +519,6 @@
     justify-content: flex-end;
   }
 
-  .token-activity-heading {
-    align-items: center;
-    display: flex;
-    gap: 1rem;
-    justify-content: space-between;
-    margin: 2rem 0 0.75rem;
-  }
-
-  .token-activity-heading h2 {
-    margin: 0;
-  }
-
   .metric-toggle {
     background: var(--surface);
     border: 1px solid var(--border);
@@ -655,20 +699,9 @@
       padding: 1rem;
     }
 
-    .topbar {
-      align-items: stretch;
-      flex-direction: column;
-    }
-
-    .theme-toggle,
     .history-actions,
     .metric-toggle {
       width: 100%;
-    }
-
-    .token-activity-heading {
-      align-items: stretch;
-      flex-direction: column;
     }
 
     .history-actions {
@@ -740,11 +773,12 @@
 </head>
 <body>
 <header class="topbar">
-  <h1>usage today</h1>
+  <details class="dashboard-section kpi-section" data-section-key="kpis" open>
+    <summary><h1>usage today</h1></summary>
+    <div class="stats" id="stats"></div>
+  </details>
   <button class="theme-toggle" id="theme-toggle" type="button"></button>
 </header>
-
-<div class="stats" id="stats"></div>
 
 <details class="table-section" data-table-key="summary" open>
   <summary>Requests by model today</summary>
@@ -770,44 +804,49 @@
   </table>
 </details>
 
-<section aria-labelledby="hourly-token-heading">
-  <div class="token-activity-heading">
-    <h2 id="hourly-token-heading">Token activity over the last 24 hours</h2>
-    <div class="metric-toggle" aria-label="Token activity range">
-      <button id="token-activity-last-24-toggle" type="button" aria-controls="hourly-token-chart" aria-pressed="true">Last 24 hours</button>
-      <button id="token-activity-all-time-toggle" type="button" aria-controls="hourly-token-chart" aria-pressed="false">All time</button>
+<details class="dashboard-section" data-section-key="token-activity" open>
+  <summary><h2 id="hourly-token-heading">Token activity over the last 24 hours</h2></summary>
+  <div class="history-layout">
+    <div class="history-actions">
+      <div class="metric-toggle" aria-label="Token activity range">
+        <button id="token-activity-last-24-toggle" type="button" aria-controls="hourly-token-chart" aria-pressed="true">Last 24 hours</button>
+        <button id="token-activity-all-time-toggle" type="button" aria-controls="hourly-token-chart" aria-pressed="false">All time</button>
+      </div>
     </div>
-  </div>
-  <div class="charts">
-    <div class="chart-panel">
-      <canvas id="hourly-token-chart" role="img" aria-label="Fresh input and output token usage during the last 24 hours"></canvas>
+    <div class="charts">
+      <div class="chart-panel">
+        <canvas id="hourly-token-chart" role="img" aria-label="Fresh input and output token usage during the last 24 hours"></canvas>
+      </div>
     </div>
+    <p class="chart-note">Fresh input excludes cached input tokens and Anthropic cache-write tokens.</p>
   </div>
-  <p class="chart-note">Fresh input excludes cached input tokens and Anthropic cache-write tokens.</p>
-</section>
+</details>
 
-<h2>Model activity overall</h2>
-<div class="history-layout">
-  <div class="history-actions">
-    <div class="metric-toggle" aria-label="History metric">
-      <button id="tokens-toggle" type="button" aria-pressed="true">Total Tokens</button>
-      <button id="requests-toggle" type="button" aria-pressed="false">Requests</button>
+<details class="dashboard-section" data-section-key="model-activity-chart" open>
+  <summary><h2>Model activity overall</h2></summary>
+  <div class="history-layout">
+    <div class="history-actions">
+      <div class="metric-toggle" aria-label="History metric">
+        <button id="tokens-toggle" type="button" aria-pressed="true">Total Tokens</button>
+        <button id="requests-toggle" type="button" aria-pressed="false">Requests</button>
+      </div>
     </div>
-  </div>
-  <div class="charts">
-    <div class="chart-panel">
-      <canvas id="history-stacked-chart"></canvas>
+    <div class="charts">
+      <div class="chart-panel">
+        <canvas id="history-stacked-chart"></canvas>
+      </div>
     </div>
+    <div class="history-legend" id="history-legend"></div>
   </div>
-  <div class="history-legend" id="history-legend"></div>
-  <details class="table-section" data-table-key="model-activity" open>
-    <summary>Model activity table overall</summary>
-    <table id="model-activity-table">
-      <thead><tr><th>Model</th><th>Input tokens</th><th>Output tokens</th><th>Total tokens</th><th>Requests</th><th>Avg tokens/request</th><th>Share</th></tr></thead>
-      <tbody></tbody>
-    </table>
-  </details>
-</div>
+</details>
+
+<details class="table-section" data-table-key="model-activity" open>
+  <summary>Model activity table overall</summary>
+  <table id="model-activity-table">
+    <thead><tr><th>Model</th><th>Input tokens</th><th>Output tokens</th><th>Total tokens</th><th>Requests</th><th>Avg tokens/request</th><th>Share</th></tr></thead>
+    <tbody></tbody>
+  </table>
+</details>
 
 <details class="table-section" data-table-key="errors" open>
   <summary>Recent errors today</summary>
@@ -863,24 +902,26 @@ requires_openai_auth = true</code></pre>
     </div>
   </details>
 
-  <h2>Token activity over the last 12 months</h2>
-  <section class="heatmap-panel" aria-label="Token activity over the last 12 months">
-    <div class="heatmap-scroll" id="token-heatmap-scroll">
-      <div class="heatmap-calendar" id="token-heatmap" role="img" aria-label="Daily token usage calendar"></div>
-    </div>
-    <div class="heatmap-footer">
-      <span id="token-heatmap-summary">No token activity in the last 12 months</span>
-      <div class="heatmap-legend" id="token-heatmap-legend" aria-label="Token usage intensity from less to more">
-        <span>Less</span>
-        <span class="heatmap-legend-swatch"></span>
-        <span class="heatmap-legend-swatch heatmap-level-1"></span>
-        <span class="heatmap-legend-swatch heatmap-level-2"></span>
-        <span class="heatmap-legend-swatch heatmap-level-3"></span>
-        <span class="heatmap-legend-swatch heatmap-level-4"></span>
-        <span>More</span>
+  <details class="dashboard-section" data-section-key="token-heatmap" open>
+    <summary><h2>Token activity over the last 12 months</h2></summary>
+    <section class="heatmap-panel" aria-label="Token activity over the last 12 months">
+      <div class="heatmap-scroll" id="token-heatmap-scroll">
+        <div class="heatmap-calendar" id="token-heatmap" role="img" aria-label="Daily token usage calendar"></div>
       </div>
-    </div>
-  </section>
+      <div class="heatmap-footer">
+        <span id="token-heatmap-summary">No token activity in the last 12 months</span>
+        <div class="heatmap-legend" id="token-heatmap-legend" aria-label="Token usage intensity from less to more">
+          <span>Less</span>
+          <span class="heatmap-legend-swatch"></span>
+          <span class="heatmap-legend-swatch heatmap-level-1"></span>
+          <span class="heatmap-legend-swatch heatmap-level-2"></span>
+          <span class="heatmap-legend-swatch heatmap-level-3"></span>
+          <span class="heatmap-legend-swatch heatmap-level-4"></span>
+          <span>More</span>
+        </div>
+      </div>
+    </section>
+  </details>
 </footer>
 
 <script src="/ui/assets/vendor/chart.umd.min.js"></script>
@@ -888,6 +929,7 @@ requires_openai_auth = true</code></pre>
 <script>
 const themeStorageKey = "excursion-funnel-theme";
 const tableStateStorageKey = "excursion-funnel-table-state";
+const sectionStateStorageKey = "excursion-funnel-section-state";
 let hourlyTokenChart;
 let historyStackedChart;
 let latestHourlyTokenRows = [];
@@ -952,6 +994,42 @@ function initTableCollapse() {
         localStorage.setItem(tableStateStorageKey, JSON.stringify(storedState));
       } catch {
       }
+    });
+  }
+}
+
+function initDashboardSectionCollapse() {
+  let storedState = {};
+  try {
+    const parsed = JSON.parse(localStorage.getItem(sectionStateStorageKey) || "{}");
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      storedState = parsed;
+    }
+  } catch {
+  }
+
+  for (const section of document.querySelectorAll(".dashboard-section[data-section-key]")) {
+    const key = section.dataset.sectionKey;
+    if (typeof storedState[key] === "boolean") {
+      section.open = storedState[key];
+    }
+    section.addEventListener("toggle", () => {
+      storedState[key] = section.open;
+      try {
+        localStorage.setItem(sectionStateStorageKey, JSON.stringify(storedState));
+      } catch {
+      }
+      if (!section.open) {
+        return;
+      }
+      window.requestAnimationFrame(() => {
+        if (key === "token-activity" && hourlyTokenChart) {
+          hourlyTokenChart.resize();
+        }
+        if (key === "model-activity-chart" && historyStackedChart) {
+          historyStackedChart.resize();
+        }
+      });
     });
   }
 }
@@ -1810,6 +1888,7 @@ function escapeHTML(s) {
 }
 
 initTableCollapse();
+initDashboardSectionCollapse();
 initThemeToggle();
 initToolCopy();
 load();
