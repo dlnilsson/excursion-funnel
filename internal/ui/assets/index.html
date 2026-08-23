@@ -463,6 +463,18 @@
     justify-content: flex-end;
   }
 
+  .token-activity-heading {
+    align-items: center;
+    display: flex;
+    gap: 1rem;
+    justify-content: space-between;
+    margin: 2rem 0 0.75rem;
+  }
+
+  .token-activity-heading h2 {
+    margin: 0;
+  }
+
   .metric-toggle {
     background: var(--surface);
     border: 1px solid var(--border);
@@ -654,6 +666,11 @@
       width: 100%;
     }
 
+    .token-activity-heading {
+      align-items: stretch;
+      flex-direction: column;
+    }
+
     .history-actions {
       justify-content: stretch;
     }
@@ -754,7 +771,13 @@
 </details>
 
 <section aria-labelledby="hourly-token-heading">
-  <h2 id="hourly-token-heading">Token activity over the last 24 hours</h2>
+  <div class="token-activity-heading">
+    <h2 id="hourly-token-heading">Token activity over the last 24 hours</h2>
+    <div class="metric-toggle" aria-label="Token activity range">
+      <button id="token-activity-last-24-toggle" type="button" aria-controls="hourly-token-chart" aria-pressed="true">Last 24 hours</button>
+      <button id="token-activity-all-time-toggle" type="button" aria-controls="hourly-token-chart" aria-pressed="false">All time</button>
+    </div>
+  </div>
   <div class="charts">
     <div class="chart-panel">
       <canvas id="hourly-token-chart" role="img" aria-label="Fresh input and output token usage during the last 24 hours"></canvas>
@@ -872,6 +895,7 @@ let latestHistoryRows = [];
 let latestModelHistoryRows = [];
 let latestToolRows = [];
 let selectedHistoryMetric = "tokens";
+let selectedTokenActivityRange = "24h";
 const heatmapWeeks = 53;
 const heatmapWeekStart = 1;
 const modelPalette = ["#5e81ac", "#88c0d0", "#a3be8c", "#ebcb8b", "#bf616a", "#b48ead", "#d08770", "#81a1c1", "#8fbcbb", "#d8dee9", "#4c566a", "#e5e9f0"];
@@ -903,7 +927,7 @@ function setTheme(theme) {
     localStorage.setItem(themeStorageKey, theme);
   } catch {
   }
-  renderHourlyTokenChart(latestHourlyTokenRows);
+  renderTokenActivityChart();
   renderHistoryCharts(latestHistoryRows, latestModelHistoryRows);
 }
 
@@ -941,6 +965,8 @@ function initThemeToggle() {
 
   document.getElementById("tokens-toggle").addEventListener("click", () => setHistoryMetric("tokens"));
   document.getElementById("requests-toggle").addEventListener("click", () => setHistoryMetric("requests"));
+  document.getElementById("token-activity-last-24-toggle").addEventListener("click", () => setTokenActivityRange("24h"));
+  document.getElementById("token-activity-all-time-toggle").addEventListener("click", () => setTokenActivityRange("all"));
   initAgentConfigTabs();
 }
 
@@ -1020,6 +1046,13 @@ function setHistoryMetric(metric) {
   renderHistoryCharts(latestHistoryRows, latestModelHistoryRows);
 }
 
+function setTokenActivityRange(range) {
+  selectedTokenActivityRange = range;
+  document.getElementById("token-activity-last-24-toggle").setAttribute("aria-pressed", range === "24h" ? "true" : "false");
+  document.getElementById("token-activity-all-time-toggle").setAttribute("aria-pressed", range === "all" ? "true" : "false");
+  renderTokenActivityChart();
+}
+
 async function load() {
   const [kpis, sessions, summary, sources, directories, hourlyHistory, history, modelHistory, errors, tools, webRequests] = await Promise.all([
     fetch("/ui/api/kpis").then(r => r.json()),
@@ -1038,7 +1071,9 @@ async function load() {
   renderSummary(summary);
   renderSources(sources);
   renderDirectories(directories);
-  renderHourlyTokenChart(hourlyHistory);
+  latestHourlyTokenRows = Array.isArray(hourlyHistory) ? hourlyHistory : [];
+  latestHistoryRows = Array.isArray(history) ? history : [];
+  renderTokenActivityChart();
   renderHistoryCharts(history, modelHistory);
   renderErrors(errors);
   renderTools(tools);
@@ -1232,14 +1267,22 @@ function renderSummary(rows) {
   </tr>`).join("");
 }
 
-function renderHourlyTokenChart(rows) {
-  latestHourlyTokenRows = Array.isArray(rows) ? rows : [];
+function renderTokenActivityChart() {
+  const allTime = selectedTokenActivityRange === "all";
+  const rows = allTime ? aggregateDailyTokenRows(latestHistoryRows) : latestHourlyTokenRows;
+  const key = allTime ? "Day" : "Hour";
+  const heading = document.getElementById("hourly-token-heading");
+  const canvas = document.getElementById("hourly-token-chart");
   const freshInputColor = modelPalette[1];
   const outputColor = modelPalette[6];
+  heading.textContent = allTime ? "Token activity over all time" : "Token activity over the last 24 hours";
+  canvas.setAttribute("aria-label", allTime
+    ? "Daily fresh input and output token usage over all time"
+    : "Fresh input and output token usage during the last 24 hours");
   const datasets = [
     {
       label: "Fresh input tokens",
-      data: latestHourlyTokenRows.map(row => Number(row.FreshInput) || 0),
+      data: rows.map(row => Number(row.FreshInput) || 0),
       borderColor: freshInputColor,
       backgroundColor: freshInputColor,
       borderWidth: 2,
@@ -1250,7 +1293,7 @@ function renderHourlyTokenChart(rows) {
     },
     {
       label: "Output tokens",
-      data: latestHourlyTokenRows.map(row => Number(row.Output) || 0),
+      data: rows.map(row => Number(row.Output) || 0),
       borderColor: outputColor,
       backgroundColor: outputColor,
       borderWidth: 2,
@@ -1264,17 +1307,44 @@ function renderHourlyTokenChart(rows) {
   if (hourlyTokenChart) {
     hourlyTokenChart.destroy();
   }
-  hourlyTokenChart = new Chart(document.getElementById("hourly-token-chart"), {
+  hourlyTokenChart = new Chart(canvas, {
     type: "line",
     data: {
-      labels: latestHourlyTokenRows.map(row => hourlyTick(row.Hour)),
+      labels: rows.map(row => allTime ? dailyTick(row[key]) : hourlyTick(row[key])),
       datasets,
     },
-    options: hourlyTokenChartOptions(latestHourlyTokenRows),
+    options: hourlyTokenChartOptions(rows, key, allTime),
   });
 }
 
-function hourlyTokenChartOptions(rows) {
+function aggregateDailyTokenRows(rows) {
+  const byDay = new Map();
+  for (const row of rows) {
+    const date = parseCalendarDay(row.Day);
+    if (!date) {
+      continue;
+    }
+    const aggregate = byDay.get(row.Day) || { Day: row.Day, FreshInput: 0, Output: 0 };
+    aggregate.FreshInput += Number(row.FreshInput) || 0;
+    aggregate.Output += Number(row.Output) || 0;
+    byDay.set(row.Day, aggregate);
+  }
+  if (byDay.size === 0) {
+    return [];
+  }
+
+  const days = [...byDay.keys()].sort((a, b) => a.localeCompare(b));
+  const firstDay = parseCalendarDay(days[0]);
+  const today = startOfCalendarDay(new Date());
+  const daily = [];
+  for (let day = firstDay; day <= today; day = addCalendarDays(day, 1)) {
+    const key = calendarDayKey(day);
+    daily.push(byDay.get(key) || { Day: key, FreshInput: 0, Output: 0 });
+  }
+  return daily;
+}
+
+function hourlyTokenChartOptions(rows, key, allTime) {
   const textColor = chartColor("--text");
   const muted = chartColor("--text-muted");
   const grid = chartColor("--border-subtle");
@@ -1287,7 +1357,9 @@ function hourlyTokenChartOptions(rows) {
       },
       tooltip: {
         callbacks: {
-          title: items => hourlyTimestamp(rows[items[0]?.dataIndex]?.Hour),
+          title: items => allTime
+            ? dailyTimestamp(rows[items[0]?.dataIndex]?.[key])
+            : hourlyTimestamp(rows[items[0]?.dataIndex]?.[key]),
           label: ctx => `${ctx.dataset.label}: ${ctx.parsed.y.toLocaleString()} tokens`,
         },
       },
@@ -1326,6 +1398,27 @@ function hourlyTimestamp(value) {
     day: "numeric",
     hour: "2-digit",
     minute: "2-digit",
+  });
+}
+
+function dailyTick(value) {
+  const date = parseCalendarDay(value);
+  if (!date) {
+    return String(value || "");
+  }
+  return date.toLocaleDateString(undefined, { year: "2-digit", month: "short", day: "numeric" });
+}
+
+function dailyTimestamp(value) {
+  const date = parseCalendarDay(value);
+  if (!date) {
+    return String(value || "");
+  }
+  return date.toLocaleDateString(undefined, {
+    weekday: "short",
+    year: "numeric",
+    month: "short",
+    day: "numeric",
   });
 }
 

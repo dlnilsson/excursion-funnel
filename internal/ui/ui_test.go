@@ -46,6 +46,14 @@ func TestHandleIndex_ServesDashboardHTML(t *testing.T) {
 		`const heatmapWeekStart = 1`,
 		`renderTokenHeatmap(historyRows)`,
 		`id="hourly-token-chart"`,
+		`id="token-activity-last-24-toggle"`,
+		`id="token-activity-all-time-toggle"`,
+		`aria-label="Token activity range"`,
+		`let selectedTokenActivityRange = "24h"`,
+		`setTokenActivityRange("all")`,
+		`aggregateDailyTokenRows(latestHistoryRows)`,
+		`aggregate.FreshInput += Number(row.FreshInput) || 0`,
+		`aggregate.Output += Number(row.Output) || 0`,
 		`fetch("/ui/api/history/hourly")`,
 		`type: "line"`,
 		`label: "Fresh input tokens"`,
@@ -482,8 +490,8 @@ func TestHandleHistory_ReturnsLiveAggregates(t *testing.T) {
 	for _, row := range rows {
 		if row.Provider == "openai" && row.Model == "gpt-5.3-codex" {
 			found = true
-			if row.Client != "Zed" || row.Requests != 1 || row.Input != 10 {
-				t.Fatalf("openai row = %+v, want client=Zed requests=1 input=10", row)
+			if row.Client != "Zed" || row.Requests != 1 || row.Input != 10 || row.FreshInput != 10 || row.Output != 4 {
+				t.Fatalf("openai row = %+v, want client=Zed requests=1 input=10 fresh-input=10 output=4", row)
 			}
 		}
 	}
