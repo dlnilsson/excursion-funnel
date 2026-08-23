@@ -402,10 +402,10 @@ func (p *Proxy) handleProxy(w http.ResponseWriter, r *http.Request) {
 			"bytes", n, "model", model, "stream", stream, "dur_ms", dur.Milliseconds())
 	}
 
-	// Codex sends session_id; Claude Code sends X-Claude-Code-Session-Id. Header
-	// lookup is case-insensitive, so the canonical spelling here matches whatever
-	// casing the client puts on the wire.
-	sessionID := r.Header.Get("session_id")
+	// Select the session header by provider so an unrelated provider header cannot
+	// win when both are present. Codex sends session-id (with session_id retained
+	// for older clients); Claude Code sends X-Claude-Code-Session-Id.
+	sessionID := firstNonEmptyHeader(r.Header, "session-id", "session_id")
 	if provider == "anthropic" {
 		sessionID = r.Header.Get("X-Claude-Code-Session-Id")
 	}
