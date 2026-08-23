@@ -38,15 +38,34 @@ func New(rep *report.Reporter, log *slog.Logger) http.Handler {
 	mux.Handle("GET /ui/assets/", http.StripPrefix("/ui/assets/", http.FileServerFS(staticAssets)))
 	mux.HandleFunc("GET /ui/api/kpis", handleKPIs(rep, log))
 	mux.HandleFunc("GET /ui/api/sessions", handleSessions(rep, log))
-	mux.HandleFunc("GET /ui/api/summary", handleSummary(rep, log))
-	mux.HandleFunc("GET /ui/api/sources", handleSources(rep, log))
-	mux.HandleFunc("GET /ui/api/directories", handleDirectories(rep, log))
-	mux.HandleFunc("GET /ui/api/history", handleHistory(rep, log))
-	mux.HandleFunc("GET /ui/api/history/models", handleModelHistory(rep, log))
+	mux.HandleFunc("GET /ui/api/summary", handleSummaryFor(rep, log, "summary", "model"))
+	mux.HandleFunc("GET /ui/api/sources", handleSummaryFor(rep, log, "sources", "source"))
+	mux.HandleFunc("GET /ui/api/directories", handleSummaryFor(rep, log, "directories", "directory"))
+	mux.HandleFunc("GET /ui/api/history", rowsHandler(log, "history", func(r *http.Request) ([]report.SummaryRow, error) {
+		rows, err := rep.HistoricalByDay(r.Context())
+		return knownProviderRows(rows), err
+	}))
+	mux.HandleFunc("GET /ui/api/history/models", rowsHandler(log, "model history", func(r *http.Request) ([]report.SummaryRow, error) {
+		rows, err := rep.HistoricalByModel(r.Context())
+		return knownProviderRows(rows), err
+	}))
 	mux.HandleFunc("GET /ui/api/history/hourly", handleHourlyHistory(rep, log))
-	mux.HandleFunc("GET /ui/api/errors", handleErrors(rep, log))
-	mux.HandleFunc("GET /ui/api/tools", handleToolCalls(rep, log))
-	mux.HandleFunc("GET /ui/api/web-requests", handleWebRequests(rep, log))
+	mux.HandleFunc("GET /ui/api/errors", rowsHandler(log, "recent errors", func(r *http.Request) ([]report.InspectRow, error) {
+		since, until := today()
+		return rep.RecentErrorsWithin(r.Context(), since, until, recentErrorsLimit)
+	}))
+	mux.HandleFunc("GET /ui/api/tools", rowsHandler(log, "recent tool calls", func(r *http.Request) ([]report.ToolCallRow, error) {
+		since, until := today()
+		return rep.ToolCalls(r.Context(), report.ToolCallOptions{
+			Since: since, Until: until, Limit: recentToolCallsLimit,
+		})
+	}))
+	mux.HandleFunc("GET /ui/api/web-requests", rowsHandler(log, "web requests", func(r *http.Request) ([]report.WebRequestRow, error) {
+		since, until := today()
+		return rep.WebRequests(r.Context(), report.ToolCallOptions{
+			Since: since, Until: until, Limit: recentWebRequestsLimit,
+		})
+	}))
 	return mux
 }
 
@@ -104,10 +123,10 @@ func sessionCountsForPeriod(rows []report.SessionRow, period string) sessionCoun
 
 func handleKPIs(rep *report.Reporter, log *slog.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		since := reporting.BeginningOfDay(time.Now())
+		since, until := today()
 		stats, err := rep.KPIs(r.Context(), report.KPIOptions{
 			Since:              since,
-			Until:              since.AddDate(0, 0, 1),
+			Until:              until,
 			KnownProvidersOnly: true,
 		})
 		if err != nil {
@@ -119,102 +138,44 @@ func handleKPIs(rep *report.Reporter, log *slog.Logger) http.HandlerFunc {
 	}
 }
 
-func handleDirectories(rep *report.Reporter, log *slog.Logger) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		since := reporting.BeginningOfDay(time.Now())
-		rows, err := rep.Summary(r.Context(), report.SummaryOptions{
-			Since:              since,
-			Until:              since.AddDate(0, 0, 1),
-			GroupBy:            "directory",
-			KnownProvidersOnly: true,
-		})
-		if err != nil {
-			log.Error("ui: query directories", "err", err)
-			http.Error(w, "internal error", http.StatusInternalServerError)
-			return
-		}
-		if rows == nil {
-			rows = []report.SummaryRow{}
-		}
-		writeJSON(w, rows)
-	}
-}
-
-func handleSources(rep *report.Reporter, log *slog.Logger) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		since := reporting.BeginningOfDay(time.Now())
-		rows, err := rep.Summary(r.Context(), report.SummaryOptions{
-			Since:              since,
-			Until:              since.AddDate(0, 0, 1),
-			GroupBy:            "source",
-			KnownProvidersOnly: true,
-		})
-		if err != nil {
-			log.Error("ui: query sources", "err", err)
-			http.Error(w, "internal error", http.StatusInternalServerError)
-			return
-		}
-		if rows == nil {
-			rows = []report.SummaryRow{}
-		}
-		writeJSON(w, rows)
-	}
-}
-
 func handleIndex(w http.ResponseWriter, r *http.Request) {
 	http.ServeFileFS(w, r, assets, "assets/index.html")
 }
 
-func handleSummary(rep *report.Reporter, log *slog.Logger) http.HandlerFunc {
+func rowsHandler[T any](log *slog.Logger, label string, query func(*http.Request) ([]T, error)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		since := reporting.BeginningOfDay(time.Now())
+		rows, err := query(r)
+		if err != nil {
+			log.Error("ui: query "+label, "err", err)
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		if rows == nil {
+			rows = []T{}
+		}
+		writeJSON(w, rows)
+	}
+}
+
+func today() (since, until time.Time) {
+	since = reporting.BeginningOfDay(time.Now())
+	return since, since.AddDate(0, 0, 1)
+}
+
+func handleSummaryFor(rep *report.Reporter, log *slog.Logger, label, groupBy string) http.HandlerFunc {
+	return rowsHandler(log, label, func(r *http.Request) ([]report.SummaryRow, error) {
+		since, until := today()
 		rows, err := rep.Summary(r.Context(), report.SummaryOptions{
 			Since:              since,
-			Until:              since.AddDate(0, 0, 1),
-			GroupBy:            "model",
+			Until:              until,
+			GroupBy:            groupBy,
 			KnownProvidersOnly: true,
 		})
 		if err != nil {
-			log.Error("ui: query summary", "err", err)
-			http.Error(w, "internal error", http.StatusInternalServerError)
-			return
+			return nil, err
 		}
-		if rows == nil {
-			rows = []report.SummaryRow{}
-		}
-		writeJSON(w, knownProviderRows(rows))
-	}
-}
-
-// handleHistory serves live all-time per-day usage totals from DuckDB.
-func handleHistory(rep *report.Reporter, log *slog.Logger) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		rows, err := rep.HistoricalByDay(r.Context())
-		if err != nil {
-			log.Error("ui: query history", "err", err)
-			http.Error(w, "internal error", http.StatusInternalServerError)
-			return
-		}
-		if rows == nil {
-			rows = []report.SummaryRow{}
-		}
-		writeJSON(w, knownProviderRows(rows))
-	}
-}
-
-func handleModelHistory(rep *report.Reporter, log *slog.Logger) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		rows, err := rep.HistoricalByModel(r.Context())
-		if err != nil {
-			log.Error("ui: query model history", "err", err)
-			http.Error(w, "internal error", http.StatusInternalServerError)
-			return
-		}
-		if rows == nil {
-			rows = []report.SummaryRow{}
-		}
-		writeJSON(w, knownProviderRows(rows))
-	}
+		return knownProviderRows(rows), nil
+	})
 }
 
 func handleHourlyHistory(rep *report.Reporter, log *slog.Logger) http.HandlerFunc {
@@ -229,62 +190,6 @@ func handleHourlyHistory(rep *report.Reporter, log *slog.Logger) http.HandlerFun
 			log.Error("ui: query hourly history", "err", err)
 			http.Error(w, "internal error", http.StatusInternalServerError)
 			return
-		}
-		writeJSON(w, rows)
-	}
-}
-
-func handleErrors(rep *report.Reporter, log *slog.Logger) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		since := reporting.BeginningOfDay(time.Now())
-		rows, err := rep.RecentErrorsWithin(r.Context(), since, since.AddDate(0, 0, 1), recentErrorsLimit)
-		if err != nil {
-			log.Error("ui: query recent errors", "err", err)
-			http.Error(w, "internal error", http.StatusInternalServerError)
-			return
-		}
-		if rows == nil {
-			rows = []report.InspectRow{}
-		}
-		writeJSON(w, rows)
-	}
-}
-
-func handleToolCalls(rep *report.Reporter, log *slog.Logger) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		since := reporting.BeginningOfDay(time.Now())
-		rows, err := rep.ToolCalls(r.Context(), report.ToolCallOptions{
-			Since: since,
-			Until: since.AddDate(0, 0, 1),
-			Limit: recentToolCallsLimit,
-		})
-		if err != nil {
-			log.Error("ui: query recent tool calls", "err", err)
-			http.Error(w, "internal error", http.StatusInternalServerError)
-			return
-		}
-		if rows == nil {
-			rows = []report.ToolCallRow{}
-		}
-		writeJSON(w, rows)
-	}
-}
-
-func handleWebRequests(rep *report.Reporter, log *slog.Logger) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		since := reporting.BeginningOfDay(time.Now())
-		rows, err := rep.WebRequests(r.Context(), report.ToolCallOptions{
-			Since: since,
-			Until: since.AddDate(0, 0, 1),
-			Limit: recentWebRequestsLimit,
-		})
-		if err != nil {
-			log.Error("ui: query web requests", "err", err)
-			http.Error(w, "internal error", http.StatusInternalServerError)
-			return
-		}
-		if rows == nil {
-			rows = []report.WebRequestRow{}
 		}
 		writeJSON(w, rows)
 	}

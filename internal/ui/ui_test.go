@@ -2,6 +2,7 @@ package ui
 
 import (
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -15,6 +16,38 @@ import (
 	"github.com/dlnilsson/excursion-funnel/internal/reporting"
 	"github.com/dlnilsson/excursion-funnel/internal/store"
 )
+
+func TestRowsHandler(t *testing.T) {
+	t.Run("writes an empty JSON array for nil rows", func(t *testing.T) {
+		h := rowsHandler(slog.New(slog.DiscardHandler), "test", func(*http.Request) ([]int, error) {
+			return nil, nil
+		})
+
+		rec := doRequest(t, h, http.MethodGet, "/")
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+		}
+		if got := rec.Body.String(); got != "[]\n" {
+			t.Fatalf("body = %q, want empty JSON array", got)
+		}
+	})
+
+	t.Run("returns an internal error when the query fails", func(t *testing.T) {
+		h := rowsHandler(slog.New(slog.DiscardHandler), "test", func(*http.Request) ([]int, error) {
+			return nil, errors.New("query failed")
+		})
+
+		rec := doRequest(t, h, http.MethodGet, "/")
+
+		if rec.Code != http.StatusInternalServerError {
+			t.Fatalf("status = %d, want %d", rec.Code, http.StatusInternalServerError)
+		}
+		if got := rec.Body.String(); got != "internal error\n" {
+			t.Fatalf("body = %q, want generic error", got)
+		}
+	})
+}
 
 func TestNew_RedirectsUIPath(t *testing.T) {
 	h := New(nil, slog.New(slog.DiscardHandler))
