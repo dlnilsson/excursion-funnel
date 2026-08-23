@@ -37,11 +37,11 @@ import (
 	"github.com/dlnilsson/excursion-funnel/internal/anthropic"
 	"github.com/dlnilsson/excursion-funnel/internal/openai"
 	"github.com/dlnilsson/excursion-funnel/internal/pick"
+	"github.com/dlnilsson/excursion-funnel/internal/provider"
 	"github.com/dlnilsson/excursion-funnel/internal/queue"
 )
 
 var (
-	claudeSDKUserAgent = regexp.MustCompile(`\bsdk-ts\b.*\bagent-sdk/\d+(?:\.\d+)*\b`)
 	workingDirectoryRE = regexp.MustCompile(`(?mi)^[ \t]*(?:-[ \t]*)?Working directory:[ \t]*([^\r\n]+?)[ \t]*$`)
 	currentBranchRE    = regexp.MustCompile(`(?mi)^[ \t]*(?:-[ \t]*)?Current branch:[ \t]*([^\r\n]+?)[ \t]*$`)
 	codexCwdRE         = regexp.MustCompile(`(?is)<cwd>[ \t\r\n]*(.*?)[ \t\r\n]*</cwd>`)
@@ -215,12 +215,12 @@ func (p *Proxy) handleHealth(w http.ResponseWriter, _ *http.Request) {
 // route selects the upstream root and provider name from the request path. The
 // OpenAI Responses and Anthropic Messages endpoints both live under /v1 but are
 // distinctly named, so the endpoint alone is an unambiguous discriminator.
-func (p *Proxy) route(path string) (base *url.URL, provider string, ok bool) {
+func (p *Proxy) route(path string) (base *url.URL, providerName string, ok bool) {
 	switch {
 	case strings.Contains(path, "/messages"):
-		return p.anthropic, "anthropic", true
+		return p.anthropic, provider.Anthropic, true
 	case strings.Contains(path, "/responses"), strings.Contains(path, "/chat/completions"):
-		return p.openai, "openai", true
+		return p.openai, provider.OpenAI, true
 	default:
 		// TODO: ambiguous endpoints like /v1/models are not routed yet.
 		return nil, "", false
@@ -247,7 +247,7 @@ func (p *Proxy) handleProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	base, provider, ok := p.route(r.URL.Path)
+	base, providerName, ok := p.route(r.URL.Path)
 	if !ok {
 		if !p.webProxyEnabled {
 			p.log.Warn("unroutable request", "req_id", reqID, "method", r.Method, "path", r.URL.Path)
@@ -260,7 +260,7 @@ func (p *Proxy) handleProxy(w http.ResponseWriter, r *http.Request) {
 
 	// Join the (provider-normalized) client path onto the provider root.
 	target := *base
-	target.Path = singleJoiningSlash(base.Path, upstreamPath(provider, r.URL.Path))
+	target.Path = singleJoiningSlash(base.Path, upstreamPath(providerName, r.URL.Path))
 	target.RawQuery = r.URL.RawQuery
 
 	// Read the body fully so we can forward it unchanged and cheaply peek at
@@ -298,12 +298,12 @@ func (p *Proxy) handleProxy(w http.ResponseWriter, r *http.Request) {
 	upReq.ContentLength = int64(len(body))
 
 	p.log.Info("proxy start",
-		"req_id", reqID, "provider", provider, "method", r.Method, "path", r.URL.Path,
+		"req_id", reqID, "provider", providerName, "method", r.Method, "path", r.URL.Path,
 		"model", model, "stream", stream)
 
 	resp, err := p.client.Do(upReq)
 	if err != nil {
-		p.log.Error("upstream request failed", "req_id", reqID, "provider", provider, "err", err)
+		p.log.Error("upstream request failed", "req_id", reqID, "provider", providerName, "err", err)
 		http.Error(w, "upstream request failed", http.StatusBadGateway)
 		return
 	}
@@ -325,7 +325,7 @@ func (p *Proxy) handleProxy(w http.ResponseWriter, r *http.Request) {
 	}
 	var capture bodyCapture
 	if isSSE {
-		capture = newStreamCapture(provider, maxCaptureBytes)
+		capture = newStreamCapture(providerName, maxCaptureBytes)
 	} else {
 		capture = newTeeCapture(maxCaptureBytes)
 	}
@@ -339,7 +339,7 @@ func (p *Proxy) handleProxy(w http.ResponseWriter, r *http.Request) {
 	sink, parseable, finishCapture := newCaptureSink(contentEncoding, capture)
 	if !parseable {
 		p.log.Warn("usage capture skipped: undecodable content-encoding",
-			"req_id", reqID, "provider", provider, "content_encoding", contentEncoding)
+			"req_id", reqID, "provider", providerName, "content_encoding", contentEncoding)
 	}
 
 	var onChunk func()
@@ -378,7 +378,7 @@ func (p *Proxy) handleProxy(w http.ResponseWriter, r *http.Request) {
 		// Nothing worth recording: the client hung up before the response
 		// finished, so there is no completed request to attribute usage to.
 		p.log.Warn("proxy client disconnected",
-			"req_id", reqID, "provider", provider, "status", resp.StatusCode,
+			"req_id", reqID, "provider", providerName, "status", resp.StatusCode,
 			"bytes", n, "dur_ms", dur.Milliseconds(), "err", cerr)
 		return
 	case cerr != nil && streamComplete:
@@ -387,19 +387,19 @@ func (p *Proxy) handleProxy(w http.ResponseWriter, r *http.Request) {
 		// let the parser below supply the full usage.
 		cerr = nil
 		p.log.Info("proxy done (client disconnected after completion)",
-			"req_id", reqID, "provider", provider, "status", resp.StatusCode,
+			"req_id", reqID, "provider", providerName, "status", resp.StatusCode,
 			"bytes", n, "model", model, "stream", stream, "dur_ms", dur.Milliseconds())
 	case cerr != nil:
 		// The upstream broke mid-response. Tokens were spent, so this still
 		// gets a row — marked stream_interrupted, carrying whatever usage the
 		// parser had accumulated by then.
 		p.log.Warn("proxy upstream stream interrupted",
-			"req_id", reqID, "provider", provider, "status", resp.StatusCode,
+			"req_id", reqID, "provider", providerName, "status", resp.StatusCode,
 			"bytes", n, "model", model, "stream", stream,
 			"dur_ms", dur.Milliseconds(), "err", cerr)
 	default:
 		p.log.Info("proxy done",
-			"req_id", reqID, "provider", provider, "status", resp.StatusCode,
+			"req_id", reqID, "provider", providerName, "status", resp.StatusCode,
 			"bytes", n, "model", model, "stream", stream, "dur_ms", dur.Milliseconds())
 	}
 
@@ -407,7 +407,7 @@ func (p *Proxy) handleProxy(w http.ResponseWriter, r *http.Request) {
 	// win when both are present. Codex sends session-id (with session_id retained
 	// for older clients); Claude Code sends X-Claude-Code-Session-Id.
 	sessionID := pick.FirstFunc(r.Header.Get, "session-id", "session_id")
-	if provider == "anthropic" {
+	if providerName == provider.Anthropic {
 		sessionID = r.Header.Get("X-Claude-Code-Session-Id")
 	}
 	ev := queue.UsageEvent{
@@ -425,7 +425,7 @@ func (p *Proxy) handleProxy(w http.ResponseWriter, r *http.Request) {
 		UpstreamRequestID: pick.FirstFunc(resp.Header.Get, "X-Request-Id", "Request-Id"),
 		UserAgent:         r.Header.Get("User-Agent"),
 		Originator:        r.Header.Get("Originator"),
-		ClientName:        clientName(r.Header),
+		ClientName:        provider.ClientName(r.Header),
 		SessionID:         strings.TrimSpace(sessionID),
 		Directory:         pick.First(r.Header.Get("X-EF-Cwd"), directory),
 		GitBranch:         pick.First(r.Header.Get("X-EF-Git-Branch"), gitBranch),
@@ -452,16 +452,16 @@ func (p *Proxy) handleProxy(w http.ResponseWriter, r *http.Request) {
 			// report a misleading parse_error instead of the real cause.
 			ev.ErrorType, ev.ErrorMessage = errStreamInterrupted, cerr.Error()
 		} else {
-			populateUsage(&ev, provider, resp.StatusCode, c.Bytes())
+			populateUsage(&ev, providerName, resp.StatusCode, c.Bytes())
 		}
 	}
 	if ev.ErrorType == errParseError {
 		p.log.Warn("usage parse failed",
-			"req_id", reqID, "provider", provider, "stream", stream,
+			"req_id", reqID, "provider", providerName, "stream", stream,
 			"content_encoding", contentEncoding, "err", ev.ErrorMessage)
 	} else {
 		p.log.Debug("usage parsed",
-			"req_id", reqID, "provider", provider, "stream", stream,
+			"req_id", reqID, "provider", providerName, "stream", stream,
 			"model_reported", ev.ModelReported, "error_type", ev.ErrorType)
 	}
 	p.sink.Enqueue(ev)
@@ -573,11 +573,11 @@ func (p *Proxy) handleWebConnect(w http.ResponseWriter, r *http.Request) {
 // the corresponding UsageEvent fields. Parse failures are recorded as
 // parse_error on the event but never returned to the caller — a malformed
 // or truncated capture must not affect the already-sent proxy response.
-func populateUsage(ev *queue.UsageEvent, provider string, httpStatus int, body []byte) {
+func populateUsage(ev *queue.UsageEvent, providerName string, httpStatus int, body []byte) {
 	isSuccess := httpStatus >= 200 && httpStatus < 300
 
-	switch provider {
-	case "openai":
+	switch providerName {
+	case provider.OpenAI:
 		if isSuccess {
 			result, err := openai.ExtractCompleted(body)
 			if err != nil {
@@ -590,7 +590,7 @@ func populateUsage(ev *queue.UsageEvent, provider string, httpStatus int, body [
 		if errType, errMessage, ok := openai.ExtractError(body); ok {
 			ev.ErrorType, ev.ErrorMessage = errType, errMessage
 		}
-	case "anthropic":
+	case provider.Anthropic:
 		if isSuccess {
 			result, err := anthropic.ExtractCompleted(body)
 			if err != nil {
@@ -619,8 +619,8 @@ const (
 // populateStreamUsage fills event fields from a completed SSE parser. Any
 // malformed or prematurely-ended stream is recorded as parse_error.
 func populateStreamUsage(ev *queue.UsageEvent, capture *streamCapture) {
-	switch capture.provider {
-	case "openai":
+	switch capture.providerName {
+	case provider.OpenAI:
 		result, err := capture.openai.Result()
 		if err != nil {
 			ev.ToolCalls = capture.openai.PartialResult().ToolCalls
@@ -636,7 +636,7 @@ func populateStreamUsage(ev *queue.UsageEvent, capture *streamCapture) {
 		ev.WebRequests = result.WebRequests
 		ev.ErrorType = result.ErrorType
 		ev.ErrorMessage = result.ErrorMessage
-	case "anthropic":
+	case provider.Anthropic:
 		result, err := capture.anthropic.Result()
 		if err != nil {
 			ev.ToolCalls = capture.anthropic.PartialResult().ToolCalls
@@ -755,27 +755,27 @@ type teeCapture struct {
 }
 
 type streamCapture struct {
-	provider  string
-	openai    *openai.StreamParser
-	anthropic *anthropic.StreamParser
+	providerName string
+	openai       *openai.StreamParser
+	anthropic    *anthropic.StreamParser
 }
 
-func newStreamCapture(provider string, limit int) *streamCapture {
-	c := &streamCapture{provider: provider}
-	switch provider {
-	case "openai":
+func newStreamCapture(providerName string, limit int) *streamCapture {
+	c := &streamCapture{providerName: providerName}
+	switch providerName {
+	case provider.OpenAI:
 		c.openai = openai.NewStreamParser(limit)
-	case "anthropic":
+	case provider.Anthropic:
 		c.anthropic = anthropic.NewStreamParser(limit)
 	}
 	return c
 }
 
 func (s *streamCapture) Write(p []byte) {
-	switch s.provider {
-	case "openai":
+	switch s.providerName {
+	case provider.OpenAI:
 		s.openai.Feed(p)
-	case "anthropic":
+	case provider.Anthropic:
 		s.anthropic.Feed(p)
 	}
 }
@@ -784,10 +784,10 @@ func (s *streamCapture) Write(p []byte) {
 // terminal SSE event. When true, a client disconnect mid-copy still represents
 // a complete, billable response rather than an abandoned request.
 func (s *streamCapture) terminated() bool {
-	switch s.provider {
-	case "openai":
+	switch s.providerName {
+	case provider.OpenAI:
 		return s.openai.Terminated()
-	case "anthropic":
+	case provider.Anthropic:
 		return s.anthropic.Terminated()
 	}
 	return false
@@ -796,11 +796,11 @@ func (s *streamCapture) terminated() bool {
 // partial returns the metadata accumulated so far, without requiring the
 // stream to have reached a terminal event.
 func (s *streamCapture) partial() (responseID, model string, usage queue.Usage, usageJSON json.RawMessage, toolCalls []queue.ToolCall, webRequests []queue.WebRequest) {
-	switch s.provider {
-	case "openai":
+	switch s.providerName {
+	case provider.OpenAI:
 		r := s.openai.PartialResult()
 		return r.ResponseID, r.Model, r.Usage, r.UsageJSON, r.ToolCalls, r.WebRequests
-	case "anthropic":
+	case provider.Anthropic:
 		r := s.anthropic.PartialResult()
 		return r.ResponseID, r.Model, r.Usage, r.UsageJSON, r.ToolCalls, r.WebRequests
 	}
@@ -1036,34 +1036,6 @@ func scanClientContext(text, directory, branch string) (string, string) {
 	return directory, branch
 }
 
-// clientName returns a stable, display-ready client label from safe request
-// headers. Raw details stay in user_agent/originator for inspect output.
-func clientName(h http.Header) string {
-	ua := strings.TrimSpace(h.Get("User-Agent"))
-	originator := strings.TrimSpace(h.Get("Originator"))
-	lowerUA := strings.ToLower(ua)
-	lowerOriginator := strings.ToLower(originator)
-
-	switch {
-	case strings.Contains(lowerUA, "zed") || strings.Contains(lowerOriginator, "zed"):
-		return "Zed"
-	case strings.Contains(lowerUA, "codex-tui"):
-		return "Codex CLI"
-	case strings.Contains(lowerUA, "codex") || strings.Contains(lowerOriginator, "codex"):
-		return "Codex"
-	case claudeSDKUserAgent.MatchString(lowerUA):
-		return "ACP/sdk"
-	case strings.Contains(lowerUA, "claude-cli"):
-		return "Claude Code"
-	case originator != "":
-		return originator
-	case ua != "":
-		return ua
-	default:
-		return "Unknown"
-	}
-}
-
 func newRequestID() string {
 	var b [16]byte
 	_, _ = rand.Read(b[:])
@@ -1075,8 +1047,8 @@ func newRequestID() string {
 // platform API under /v1, the ChatGPT Codex backend under /backend-api/codex —
 // so a Codex request to /v1/responses must lose its /v1 and take the prefix from
 // the configured upstream root instead. Anthropic keeps its path verbatim.
-func upstreamPath(provider, path string) string {
-	if provider != "openai" {
+func upstreamPath(providerName, path string) string {
+	if providerName != provider.OpenAI {
 		return path
 	}
 	if rest, ok := strings.CutPrefix(path, "/v1/"); ok {

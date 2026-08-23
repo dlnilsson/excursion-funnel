@@ -17,6 +17,7 @@ import (
 	duckdb "github.com/duckdb/duckdb-go/v2"
 
 	"github.com/dlnilsson/excursion-funnel/internal/pick"
+	"github.com/dlnilsson/excursion-funnel/internal/provider"
 	"github.com/dlnilsson/excursion-funnel/internal/queue"
 )
 
@@ -525,7 +526,7 @@ WHERE (session_id IS NULL OR session_id = '')
 	if _, err := db.Exec(`INSERT INTO sessions (provider, session_id, first_seen_at)
 SELECT provider, session_id, MIN(started_at) AS first_seen_at
 FROM (
-  SELECT ` + ProviderSQL("path") + ` AS provider,
+  SELECT ` + provider.SQLForPath("path") + ` AS provider,
     COALESCE(NULLIF(session_id, ''), NULLIF(codex_session_id, '')) AS session_id,
     started_at
   FROM requests
@@ -665,43 +666,11 @@ func validateSchema(db *sql.DB) error {
 	return nil
 }
 
-// ProviderSQL returns the shared request-provider classification expression.
-func ProviderSQL(column string) string {
-	return "CASE " +
-		"WHEN " + column + " LIKE '%/messages%' THEN 'anthropic' " +
-		"WHEN " + column + " LIKE '%/responses%' OR " + column + " LIKE '%/chat/completions%' THEN 'openai' " +
-		"ELSE 'unknown' END"
-}
-
-func providerForPath(path string) string {
-	switch {
-	case strings.Contains(path, "/messages"):
-		return "anthropic"
-	case strings.Contains(path, "/responses"), strings.Contains(path, "/chat/completions"):
-		return "openai"
-	default:
-		return "unknown"
-	}
-}
-
 func eventSessionID(event queue.UsageEvent) string {
 	if sessionID := strings.TrimSpace(event.SessionID); sessionID != "" {
 		return sessionID
 	}
 	return strings.TrimSpace(event.CodexSessionID)
-}
-
-// ClientSQL returns the shared display-client classification expression.
-func ClientSQL() string {
-	return "CASE " +
-		"WHEN client_name IS NOT NULL AND client_name != '' THEN client_name " +
-		"WHEN lower(COALESCE(user_agent, '')) LIKE '%zed%' OR lower(COALESCE(originator, '')) LIKE '%zed%' THEN 'Zed' " +
-		"WHEN lower(COALESCE(user_agent, '')) LIKE '%codex-tui%' THEN 'Codex CLI' " +
-		"WHEN lower(COALESCE(user_agent, '')) LIKE '%codex%' OR lower(COALESCE(originator, '')) LIKE '%codex%' THEN 'Codex' " +
-		"WHEN lower(COALESCE(user_agent, '')) LIKE '%claude-cli%' THEN 'Claude Code' " +
-		"WHEN originator IS NOT NULL AND originator != '' THEN originator " +
-		"WHEN user_agent IS NOT NULL AND user_agent != '' THEN user_agent " +
-		"ELSE 'Unknown' END"
 }
 
 func addColumnIfMissing(db *sql.DB, table, column, columnType string) error {
@@ -827,9 +796,9 @@ func (s *Store) InsertBatch(ctx context.Context, events []queue.UsageEvent) erro
 		); err != nil {
 			return fmt.Errorf("insert request %s: %w", ev.RequestID, err)
 		}
-		provider := providerForPath(ev.Path)
-		if sessionID != "" && provider != "unknown" {
-			if _, err := sessionStmt.ExecContext(ctx, provider, sessionID, ev.StartedAt); err != nil {
+		requestProvider := provider.ForPath(ev.Path)
+		if sessionID != "" && requestProvider != provider.Unknown {
+			if _, err := sessionStmt.ExecContext(ctx, requestProvider, sessionID, ev.StartedAt); err != nil {
 				return fmt.Errorf("upsert session for request %s: %w", ev.RequestID, err)
 			}
 		}
@@ -847,7 +816,7 @@ func (s *Store) InsertBatch(ctx context.Context, events []queue.UsageEvent) erro
 			// providers (Codex's web_search_call and Claude Code's client-side
 			// WebSearch/WebFetch). Generic forward-proxy traffic is not a
 			// web-tool call, so IsWebToolName keeps it out.
-			if !queue.IsWebToolName(request.Name) {
+			if !provider.IsWebToolName(request.Name) {
 				continue
 			}
 			if _, err := webStmt.ExecContext(ctx,
@@ -906,9 +875,9 @@ func (s *Store) insertRemoteBatch(ctx context.Context, events []queue.UsageEvent
 			sqlNullableString(string(ev.UsageJSON)), "current_timestamp",
 		}
 		requestRows = append(requestRows, "("+strings.Join(requestValues, ", ")+")")
-		provider := providerForPath(ev.Path)
-		if sessionID != "" && provider != "unknown" {
-			key := provider + "\x00" + sessionID
+		requestProvider := provider.ForPath(ev.Path)
+		if sessionID != "" && requestProvider != provider.Unknown {
+			key := requestProvider + "\x00" + sessionID
 			if firstSeen, ok := sessionFirstSeen[key]; !ok || ev.StartedAt.Before(firstSeen) {
 				sessionFirstSeen[key] = ev.StartedAt
 			}
@@ -923,7 +892,7 @@ func (s *Store) insertRemoteBatch(ctx context.Context, events []queue.UsageEvent
 			}, ", ")+")")
 		}
 		for ordinal, request := range ev.WebRequests {
-			if !queue.IsWebToolName(request.Name) {
+			if !provider.IsWebToolName(request.Name) {
 				continue
 			}
 			webRows = append(webRows, "("+strings.Join([]string{

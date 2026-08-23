@@ -15,8 +15,7 @@ func New(out io.Writer) *slog.Logger {
 	return slog.New(slog.NewTextHandler(out, &slog.HandlerOptions{
 		Level: slog.LevelInfo,
 		ReplaceAttr: func(_ []string, attr slog.Attr) slog.Attr {
-			key := strings.ToLower(attr.Key)
-			if secretLikeKey(key) {
+			if IsSecretKey(attr.Key) {
 				attr.Value = slog.StringValue("[REDACTED]")
 				return attr
 			}
@@ -42,9 +41,17 @@ func Redact(value string) string {
 	return value
 }
 
-func secretLikeKey(key string) bool {
-	for _, marker := range []string{"authorization", "api_key", "apikey", "x-api-key", "token", "secret", "password", "cookie"} {
-		if strings.Contains(key, marker) {
+// secretKeyMarkers name fields whose value is a credential. A key containing
+// any of them is redacted wholesale rather than inspected.
+var secretKeyMarkers = []string{"authorization", "api_key", "apikey", "x-api-key", "token", "secret", "password", "cookie"}
+
+// IsSecretKey reports whether a field name identifies a credential. It gates
+// both log-attribute redaction and the tool/web payload redaction in
+// internal/queue, so the two cannot drift apart.
+func IsSecretKey(key string) bool {
+	lower := strings.ToLower(key)
+	for _, marker := range secretKeyMarkers {
+		if strings.Contains(lower, marker) {
 			return true
 		}
 	}

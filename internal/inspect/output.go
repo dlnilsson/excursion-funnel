@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/dlnilsson/excursion-funnel/internal/provider"
 	"github.com/dlnilsson/excursion-funnel/internal/report"
 	"github.com/dlnilsson/excursion-funnel/internal/reporting"
 )
@@ -106,20 +107,9 @@ func nullInt(value sql.NullInt64) string {
 	return strconv.FormatInt(value.Int64, 10)
 }
 
-func freshInput(provider string, input, cached, cacheWrite int64) int64 {
-	fresh := input - cached
-	if provider == "anthropic" {
-		fresh -= cacheWrite
-	}
-	if fresh < 0 {
-		return 0
-	}
-	return fresh
-}
-
-func freshInputCell(provider string, input, cached, cacheWrite sql.NullInt64) string {
+func freshInputCell(providerName string, input, cached, cacheWrite sql.NullInt64) string {
 	if !input.Valid {
 		return "-"
 	}
-	return strconv.FormatInt(freshInput(provider, input.Int64, cached.Int64, cacheWrite.Int64), 10)
+	return strconv.FormatInt(provider.FreshInput(providerName, input.Int64, cached.Int64, cacheWrite.Int64), 10)
 }

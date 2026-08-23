@@ -603,39 +603,6 @@ func TestClientAcceptsGzip(t *testing.T) {
 	}
 }
 
-func TestClientName(t *testing.T) {
-	tests := []struct {
-		name       string
-		userAgent  string
-		originator string
-		want       string
-	}{
-		{name: "codex cli", userAgent: "codex-tui/0.146.0", want: "Codex CLI"},
-		{name: "zed originator", userAgent: "codex-tui/0.146.0", originator: "zed", want: "Zed"},
-		{name: "codex generic", userAgent: "codex-acp/1.0", want: "Codex"},
-		{name: "claude code", userAgent: "claude-cli/2.1.218", want: "Claude Code"},
-		{name: "claude sdk", userAgent: "claude-cli/2.1.232 (external, sdk-ts, agent-sdk/0.3.232)", want: "ACP/sdk"},
-		{name: "claude sdk version", userAgent: "claude-cli/2.1.232 sdk-ts agent-sdk/1.2.3", want: "ACP/sdk"},
-		{name: "originator fallback", originator: "custom-editor", want: "custom-editor"},
-		{name: "user-agent fallback", userAgent: "curl/8.21.0", want: "curl/8.21.0"},
-		{name: "unknown", want: "Unknown"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			h := http.Header{}
-			if tt.userAgent != "" {
-				h.Set("User-Agent", tt.userAgent)
-			}
-			if tt.originator != "" {
-				h.Set("Originator", tt.originator)
-			}
-			if got := clientName(h); got != tt.want {
-				t.Fatalf("clientName() = %q, want %q", got, tt.want)
-			}
-		})
-	}
-}
-
 func TestUpstreamPath(t *testing.T) {
 	tests := []struct {
 		name     string

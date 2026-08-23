@@ -15,7 +15,7 @@ import (
 	"time"
 
 	"github.com/dlnilsson/excursion-funnel/internal/hubauth"
-	"github.com/dlnilsson/excursion-funnel/internal/queue"
+	"github.com/dlnilsson/excursion-funnel/internal/provider"
 	"github.com/dlnilsson/excursion-funnel/internal/reporting"
 	"github.com/dlnilsson/excursion-funnel/internal/store"
 )
@@ -352,7 +352,7 @@ func (r *Reporter) Summary(ctx context.Context, opts SummaryOptions) ([]SummaryR
 		args = append(args, opts.Branch)
 	}
 	if opts.KnownProvidersOnly {
-		predicate := providerSQL("path") + " != 'unknown'"
+		predicate := provider.SQLForPath("path") + " != 'unknown'"
 		where = appendWherePredicate(where, predicate)
 	}
 	return r.scanSummary(ctx, buildSummaryQuery(selectGroup, where, groupExpr, orderBy), args...)
@@ -370,11 +370,11 @@ func (r *Reporter) HourlyTokens(ctx context.Context, opts HourlyTokenOptions) ([
 
 	where, args := timeRange("started_at", opts.Since, opts.Until)
 	if opts.KnownProvidersOnly {
-		where = appendWherePredicate(where, providerSQL("path")+" != 'unknown'")
+		where = appendWherePredicate(where, provider.SQLForPath("path")+" != 'unknown'")
 	}
 	rows, err := r.store.DB().QueryContext(ctx, `SELECT
   date_trunc('hour', started_at) AS hour,
-  SUM(`+freshInputSQL()+`) AS fresh_input_tokens,
+  SUM(`+provider.FreshInputSQL("path")+`) AS fresh_input_tokens,
   SUM(COALESCE(output_tokens, 0)) AS output_tokens
 FROM requests
 `+where+`
@@ -414,12 +414,12 @@ ORDER BY hour`, args...)
 func (r *Reporter) KPIs(ctx context.Context, opts KPIOptions) (KPIStats, error) {
 	where, args := timeRange("started_at", opts.Since, opts.Until)
 	if opts.KnownProvidersOnly {
-		where = appendWherePredicate(where, providerSQL("path")+" != 'unknown'")
+		where = appendWherePredicate(where, provider.SQLForPath("path")+" != 'unknown'")
 	}
 
 	var (
 		failure   = "(COALESCE(error_type, '') != '' OR COALESCE(http_status >= 400, false))"
-		anthropic = "(" + providerSQL("path") + " = 'anthropic')"
+		anthropic = "(" + provider.SQLForPath("path") + " = 'anthropic')"
 		thinking  = "TRY_CAST(json_extract(TRY_CAST(usage_json AS JSON), '$.output_tokens_details.thinking_tokens') AS BIGINT)"
 		cache5M   = "TRY_CAST(json_extract(TRY_CAST(usage_json AS JSON), '$.cache_creation.ephemeral_5m_input_tokens') AS BIGINT)"
 		cache1H   = "TRY_CAST(json_extract(TRY_CAST(usage_json AS JSON), '$.cache_creation.ephemeral_1h_input_tokens') AS BIGINT)"
@@ -512,7 +512,7 @@ GROUP BY period, provider`
 FROM (
   SELECT provider, session_id, MIN(started_at) AS first_seen_at
   FROM (
-    SELECT ` + providerSQL("path") + ` AS provider, ` + schema.sessionExpression + ` AS session_id, started_at
+    SELECT ` + provider.SQLForPath("path") + ` AS provider, ` + schema.sessionExpression + ` AS session_id, started_at
     FROM requests
   ) observations
   WHERE session_id IS NOT NULL AND session_id != '' AND provider != 'unknown'
@@ -543,8 +543,8 @@ GROUP BY period, provider`
 
 	usedWhere, usedArgs := timeRange("started_at", opts.Since, opts.Until)
 	usedWhere = appendWherePredicate(usedWhere, schema.sessionExpression+" IS NOT NULL")
-	usedWhere = appendWherePredicate(usedWhere, providerSQL("path")+" != 'unknown'")
-	usedRows, err := r.store.DB().QueryContext(ctx, `SELECT `+periodFromRequest+` AS period, `+providerSQL("path")+` AS provider,
+	usedWhere = appendWherePredicate(usedWhere, provider.SQLForPath("path")+" != 'unknown'")
+	usedRows, err := r.store.DB().QueryContext(ctx, `SELECT `+periodFromRequest+` AS period, `+provider.SQLForPath("path")+` AS provider,
   COUNT(DISTINCT `+schema.sessionExpression+`)
 FROM requests
 `+usedWhere+`
@@ -640,7 +640,7 @@ func (r *Reporter) peakConcurrency(ctx context.Context, opts KPIOptions) (int64,
 	}
 	where = appendWherePredicate(where, "completed_at IS NOT NULL")
 	if opts.KnownProvidersOnly {
-		where = appendWherePredicate(where, providerSQL("path")+" != 'unknown'")
+		where = appendWherePredicate(where, provider.SQLForPath("path")+" != 'unknown'")
 	}
 
 	rows, err := r.store.DB().QueryContext(ctx, `SELECT started_at, completed_at
@@ -736,7 +736,7 @@ func (r *Reporter) RecentRequests(ctx context.Context, limit int) ([]RecentReque
 		limit = DefaultRecentRequestLimit
 	}
 	rows, err := r.store.DB().QueryContext(ctx, `
-SELECT id, COALESCE(response_id, ''), started_at, `+providerSQL("path")+`, `+clientSQL()+`,
+SELECT id, COALESCE(response_id, ''), started_at, `+provider.SQLForPath("path")+`, `+provider.ClientSQL()+`,
   COALESCE(model_reported, model_requested, ''), http_status, method, path
 FROM requests
 ORDER BY started_at DESC, id DESC
@@ -825,7 +825,7 @@ type toolCallRequest struct {
 func (r *Reporter) candidateRequestsForToolCalls(ctx context.Context, where string, whereArgs []any, limit int) ([]toolCallRequest, error) {
 	args := append(slices.Clone(whereArgs), limit)
 	rows, err := r.store.DB().QueryContext(ctx, `
-SELECT id, COALESCE(source, 'unknown'), started_at, `+providerSQL("path")+`, `+clientSQL()+`,
+SELECT id, COALESCE(source, 'unknown'), started_at, `+provider.SQLForPath("path")+`, `+provider.ClientSQL()+`,
   COALESCE(model_reported, model_requested, 'unknown')
 FROM requests
 `+where+`
@@ -963,7 +963,7 @@ FROM web_requests WHERE request_id IN (`+strings.Join(placeholders, ", ")+`)`, i
 		if err := rows.Scan(&requestID, &row.Ordinal, &row.ID, &row.Name, &row.Query, &row.URL, &row.Domain, &row.ArgumentsJSON); err != nil {
 			return nil, fmt.Errorf("scan web request for candidate requests: %w", err)
 		}
-		if !queue.IsWebToolName(row.Name) {
+		if !provider.IsWebToolName(row.Name) {
 			continue
 		}
 		req := byID[requestID]
@@ -1079,7 +1079,7 @@ ORDER BY ordinal`, requestID)
 			&request.URL, &request.Domain, &request.ArgumentsJSON); err != nil {
 			return nil, fmt.Errorf("scan web request for request %s: %w", requestID, err)
 		}
-		if !queue.IsWebToolName(request.Name) {
+		if !provider.IsWebToolName(request.Name) {
 			continue
 		}
 		out = append(out, request)
@@ -1093,8 +1093,8 @@ ORDER BY ordinal`, requestID)
 func summaryGrouping(groupBy string) (selectGroup, groupExpr, orderBy string, err error) {
 	dayExpr := "CAST(CAST(date_trunc('day', started_at) AS DATE) AS VARCHAR)"
 	modelExpr := "COALESCE(model_reported, model_requested, 'unknown')"
-	providerExpr := providerSQL("path")
-	clientExpr := clientSQL()
+	providerExpr := provider.SQLForPath("path")
+	clientExpr := provider.ClientSQL()
 	switch groupBy {
 	case "model":
 		return groupSelect("''", providerExpr, clientExpr, modelExpr, "''", "''", "''"),
@@ -1123,7 +1123,7 @@ func buildSummaryQuery(selectGroup, whereSQL, groupExpr, orderBy string) string 
  COUNT(*) AS requests,
  SUM(CASE WHEN error_type IS NULL THEN 0 ELSE 1 END) AS errors,
 	SUM(COALESCE(input_tokens, 0)) AS input_tokens,
- SUM(` + freshInputSQL() + `) AS fresh_input_tokens,
+ SUM(` + provider.FreshInputSQL("path") + `) AS fresh_input_tokens,
  SUM(COALESCE(cached_input_tokens, 0)) AS cached_input_tokens,
  SUM(COALESCE(cache_write_tokens, 0)) AS cache_write_tokens,
  SUM(COALESCE(output_tokens, 0)) AS output_tokens,
@@ -1135,19 +1135,11 @@ GROUP BY ` + groupExpr + `
 ORDER BY ` + orderBy
 }
 
-func freshInputSQL() string {
-	return `GREATEST(
-   COALESCE(input_tokens, 0) - COALESCE(cached_input_tokens, 0) -
-   CASE WHEN ` + providerSQL("path") + ` = 'anthropic' THEN COALESCE(cache_write_tokens, 0) ELSE 0 END,
-   0
- )`
-}
-
 func buildInspectQuery(whereClause, orderBy, sessionExpression string) string {
 	return `SELECT id, COALESCE(response_id, ''), COALESCE(source, 'unknown'), COALESCE(host, ''),
- started_at, completed_at, duration_ms, method, path, ` + providerSQL("path") + `, upstream_url,
+ started_at, completed_at, duration_ms, method, path, ` + provider.SQLForPath("path") + `, upstream_url,
  COALESCE(model_requested, ''), COALESCE(model_reported, ''), stream, http_status,
- COALESCE(upstream_request_id, ''), COALESCE(user_agent, ''), COALESCE(originator, ''), ` + clientSQL() + `,
+ COALESCE(upstream_request_id, ''), COALESCE(user_agent, ''), COALESCE(originator, ''), ` + provider.ClientSQL() + `,
  ` + sessionExpression + `, COALESCE(directory, ''), COALESCE(git_branch, ''),
  COALESCE(error_type, ''), COALESCE(error_message, ''),
  input_tokens, cached_input_tokens, cache_write_tokens, output_tokens, reasoning_tokens, total_tokens,
@@ -1201,6 +1193,3 @@ func quackReachable(address string) bool {
 	_ = conn.Close()
 	return true
 }
-
-func providerSQL(column string) string { return store.ProviderSQL(column) }
-func clientSQL() string                { return store.ClientSQL() }

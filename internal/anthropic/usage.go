@@ -9,8 +9,8 @@ import (
 	"encoding/json"
 	"errors"
 	"maps"
-	"strings"
 
+	"github.com/dlnilsson/excursion-funnel/internal/provider"
 	"github.com/dlnilsson/excursion-funnel/internal/queue"
 	"github.com/dlnilsson/excursion-funnel/internal/sse"
 )
@@ -90,7 +90,7 @@ func ExtractCompleted(body []byte) (CompletedResult, error) {
 func toolCallsFromContent(content []contentBlock) []queue.ToolCall {
 	var calls []queue.ToolCall
 	for _, block := range content {
-		if block.Type != "tool_use" || block.Name == "" || isWebContentBlock(block.Type, block.Name) {
+		if block.Type != "tool_use" || block.Name == "" || provider.IsWebToolBlock(block.Type, block.Name) {
 			continue
 		}
 		calls = append(calls, queue.NewToolCall(block.ID, block.Name, block.Input))
@@ -101,19 +101,12 @@ func toolCallsFromContent(content []contentBlock) []queue.ToolCall {
 func webRequestsFromContent(content []contentBlock) []queue.WebRequest {
 	var requests []queue.WebRequest
 	for _, block := range content {
-		if !isWebContentBlock(block.Type, block.Name) {
+		if !provider.IsWebToolBlock(block.Type, block.Name) {
 			continue
 		}
 		requests = append(requests, queue.NewWebRequest(block.ID, block.Name, block.Input))
 	}
 	return requests
-}
-
-func isWebContentBlock(typ, name string) bool {
-	value := strings.ToLower(typ + " " + name)
-	return strings.Contains(value, "web_search") || strings.Contains(value, "web-fetch") || strings.Contains(value, "web_fetch") ||
-		strings.Contains(value, "websearch") || // Claude Code client-side WebSearch tool
-		strings.Contains(value, "webfetch") // Claude Code client-side WebFetch tool
 }
 
 func addSyntheticWebRequests(requests []queue.WebRequest, count *int64) []queue.WebRequest {
@@ -305,7 +298,7 @@ func (p *StreamParser) handleEvent(ev sse.Event) error {
 		}
 		p.mergeUsage(envelope.Usage)
 	case "content_block_start":
-		if envelope.ContentBlock != nil && envelope.ContentBlock.Type == "tool_use" && envelope.ContentBlock.Name != "" && !isWebContentBlock(envelope.ContentBlock.Type, envelope.ContentBlock.Name) {
+		if envelope.ContentBlock != nil && envelope.ContentBlock.Type == "tool_use" && envelope.ContentBlock.Name != "" && !provider.IsWebToolBlock(envelope.ContentBlock.Type, envelope.ContentBlock.Name) {
 			call := p.toolCall(envelope.Index)
 			call.ID = envelope.ContentBlock.ID
 			call.Name = envelope.ContentBlock.Name
@@ -314,7 +307,7 @@ func (p *StreamParser) handleEvent(ev sse.Event) error {
 				call.Input = append(call.Input[:0], input...)
 			}
 			p.syncToolCalls()
-		} else if envelope.ContentBlock != nil && isWebContentBlock(envelope.ContentBlock.Type, envelope.ContentBlock.Name) {
+		} else if envelope.ContentBlock != nil && provider.IsWebToolBlock(envelope.ContentBlock.Type, envelope.ContentBlock.Name) {
 			call := p.toolCall(envelope.Index)
 			call.ID = envelope.ContentBlock.ID
 			call.Name = envelope.ContentBlock.Name

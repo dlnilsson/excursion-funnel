@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/dlnilsson/excursion-funnel/internal/pick"
+	"github.com/dlnilsson/excursion-funnel/internal/safelog"
 )
 
 // Usage holds token counts extracted from a provider response. Fields are
@@ -84,22 +85,6 @@ func NewWebRequest(id, name string, input []byte) WebRequest {
 	return request
 }
 
-// IsWebToolName reports whether name is a provider web-tool call that belongs
-// in the web-request ledger — OpenAI's web_search_call, Claude Code's
-// client-side WebSearch/WebFetch, and Anthropic's server-side web_search/
-// web_fetch — as opposed to generic forward-proxy traffic (GET/POST/…). It is
-// the single Go-side gate the store uses to decide what to persist; the
-// anthropic/openai parsers and the report read query mirror the same web-tool
-// name set.
-func IsWebToolName(name string) bool {
-	n := strings.ToLower(name)
-	return strings.Contains(n, "web_search") ||
-		strings.Contains(n, "websearch") ||
-		strings.Contains(n, "web_fetch") ||
-		strings.Contains(n, "web-fetch") ||
-		strings.Contains(n, "webfetch")
-}
-
 // SanitizeWebArguments redacts credential-like fields from a provider web
 // event while retaining the rest of the provider payload for inspection.
 func SanitizeWebArguments(input []byte) string {
@@ -122,11 +107,7 @@ func redactWebValue(value any) {
 	switch value := value.(type) {
 	case map[string]any:
 		for key, item := range value {
-			lower := strings.ToLower(key)
-			if lower == "authorization" || lower == "cookie" || lower == "set-cookie" ||
-				strings.Contains(lower, "api_key") || strings.Contains(lower, "apikey") ||
-				strings.Contains(lower, "token") || strings.Contains(lower, "secret") ||
-				strings.Contains(lower, "password") {
+			if safelog.IsSecretKey(key) {
 				value[key] = "[REDACTED]"
 				continue
 			}
