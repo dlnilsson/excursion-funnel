@@ -26,12 +26,11 @@ const LocalQuackToken = "excursion-funnel-local"
 // Store is a DuckDB-backed usage ledger. A remote Store is a small in-memory
 // DuckDB client with a Quack catalog attached as its current database.
 type Store struct {
-	db                 *sql.DB
-	quackConn          *sql.Conn
-	quackURI           string
-	remoteCatalog      string
-	remoteHasSessionID bool
-	remoteHasSessions  bool
+	db               *sql.DB
+	quackConn        *sql.Conn
+	quackURI         string
+	remoteCatalog    string
+	remoteHasStaging bool
 }
 
 // QuackServer describes a running Quack listener.
@@ -55,6 +54,35 @@ func Open(path string) (*Store, error) {
 	if err := ensureSchema(db); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("ensure schema: %w", err)
+	}
+	if err := validateSchema(db); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("validate schema: %w", err)
+	}
+	return &Store{db: db}, nil
+}
+
+// OpenHub opens or creates the shared hub ledger. The hub keeps the fully
+// constrained and indexed schema for reads and local merges, and additionally
+// exposes constraint-free staging tables that remote clients write into: Quack
+// 1.5.5 crashes fatally while replaying an ART index insert for a remote
+// write, invalidating the whole database, so remote writes must never touch a
+// constrained table. Staged rows are folded into the indexed tables by
+// MergeStaging. Any ledger table that lost its primary key during the earlier
+// constraint-free experiment is rebuilt with its constraints on open.
+func OpenHub(path string) (*Store, error) {
+	if dir := filepath.Dir(path); dir != "." {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return nil, fmt.Errorf("create db directory: %w", err)
+		}
+	}
+	db, err := openDuckDB(path, false)
+	if err != nil {
+		return nil, err
+	}
+	if err := ensureHubSchema(db); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("ensure hub schema: %w", err)
 	}
 	if err := validateSchema(db); err != nil {
 		_ = db.Close()
@@ -118,40 +146,23 @@ func OpenRemote(ctx context.Context, address, token string, disableSSL bool) (*S
 		_ = db.Close()
 		return nil, fmt.Errorf("connect to Quack ledger %s: %w", uri, err)
 	}
-	hasSessionID, hasSessions, err := inspectRemoteSessionSchema(ctx, db)
+	hasStaging, err := remoteHasStagingTables(ctx, db)
 	if err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("inspect Quack ledger schema %s: %w", uri, err)
 	}
-	return &Store{
-		db: db, remoteCatalog: "quack_remote",
-		remoteHasSessionID: hasSessionID, remoteHasSessions: hasSessions,
-	}, nil
+	return &Store{db: db, remoteCatalog: "quack_remote", remoteHasStaging: hasStaging}, nil
 }
 
-func inspectRemoteSessionSchema(ctx context.Context, db *sql.DB) (bool, bool, error) {
-	rows, err := db.QueryContext(ctx, `SELECT table_name, column_name
-FROM information_schema.columns
-WHERE (table_name = 'requests' AND column_name = 'session_id')
-   OR table_name = 'sessions'`)
-	if err != nil {
-		return false, false, err
+func remoteHasStagingTables(ctx context.Context, db *sql.DB) (bool, error) {
+	// Query information_schema.columns rather than .tables: attached Quack
+	// catalogs populate the column view but not the table view.
+	var count int
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM information_schema.columns
+WHERE table_name = 'staging_requests'`).Scan(&count); err != nil {
+		return false, err
 	}
-	defer rows.Close()
-	var hasSessionID, hasSessions bool
-	for rows.Next() {
-		var tableName, columnName string
-		if err := rows.Scan(&tableName, &columnName); err != nil {
-			return false, false, err
-		}
-		if tableName == "sessions" {
-			hasSessions = true
-		}
-		if tableName == "requests" && columnName == "session_id" {
-			hasSessionID = true
-		}
-	}
-	return hasSessionID, hasSessions, rows.Err()
+	return count > 0, nil
 }
 
 func openDuckDB(path string, readOnly bool) (*sql.DB, error) {
@@ -331,9 +342,12 @@ WHERE request_id IN (SELECT id FROM requests WHERE started_at < ?)`, cutoff); er
 	return n, nil
 }
 
-func ensureSchema(db *sql.DB) error {
-	_, err := db.Exec(`CREATE TABLE IF NOT EXISTS requests (
-  id VARCHAR PRIMARY KEY,
+// Column definitions shared by the indexed ledger tables and their
+// constraint-free staging mirrors. Only constant defaults appear here; Quack
+// 1.5.x cannot reconstruct attached catalogs whose column defaults contain a
+// bound expression such as current_timestamp.
+const (
+	requestColumnsDDL = `id VARCHAR,
   response_id VARCHAR,
   source VARCHAR NOT NULL DEFAULT 'unknown',
   host VARCHAR,
@@ -364,44 +378,70 @@ func ensureSchema(db *sql.DB) error {
   reasoning_tokens BIGINT,
   total_tokens BIGINT,
   usage_json VARCHAR,
-  created_at TIMESTAMPTZ NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_requests_started_at ON requests(started_at);
-CREATE INDEX IF NOT EXISTS idx_requests_model_requested ON requests(model_requested);
-CREATE INDEX IF NOT EXISTS idx_requests_response_id ON requests(response_id);
-CREATE INDEX IF NOT EXISTS idx_requests_source ON requests(source);
-CREATE TABLE IF NOT EXISTS sessions (
-  provider VARCHAR NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL`
+	sessionColumnsDDL = `provider VARCHAR NOT NULL,
   session_id VARCHAR NOT NULL,
-  first_seen_at TIMESTAMPTZ NOT NULL,
-  PRIMARY KEY (provider, session_id)
-);
-CREATE INDEX IF NOT EXISTS idx_sessions_first_seen_at ON sessions(first_seen_at);
-CREATE TABLE IF NOT EXISTS tool_calls (
-  request_id VARCHAR NOT NULL,
+  first_seen_at TIMESTAMPTZ NOT NULL`
+	toolCallColumnsDDL = `request_id VARCHAR NOT NULL,
   ordinal INTEGER NOT NULL,
   tool_call_id VARCHAR,
   name VARCHAR NOT NULL,
   command VARCHAR,
   description VARCHAR,
-  arguments_json VARCHAR,
-  PRIMARY KEY (request_id, ordinal)
-);
-CREATE INDEX IF NOT EXISTS idx_tool_calls_request_id ON tool_calls(request_id);
-
-CREATE TABLE IF NOT EXISTS web_requests (
-  request_id VARCHAR NOT NULL,
+  arguments_json VARCHAR`
+	webRequestColumnsDDL = `request_id VARCHAR NOT NULL,
   ordinal INTEGER NOT NULL,
   web_request_id VARCHAR,
   name VARCHAR NOT NULL,
   query VARCHAR,
   url VARCHAR,
   domain VARCHAR,
-  arguments_json VARCHAR,
+  arguments_json VARCHAR`
+)
+
+// Column name lists for staging inserts and staged-to-ledger merges.
+const (
+	requestColumnNames    = `id, response_id, source, host, started_at, completed_at, duration_ms, method, path, upstream_url, model_requested, model_reported, stream, http_status, upstream_request_id, user_agent, originator, client_name, session_id, codex_session_id, directory, git_branch, error_type, error_message, input_tokens, cached_input_tokens, cache_write_tokens, output_tokens, reasoning_tokens, total_tokens, usage_json, created_at`
+	toolCallColumnNames   = `request_id, ordinal, tool_call_id, name, command, description, arguments_json`
+	webRequestColumnNames = `request_id, ordinal, web_request_id, name, query, url, domain, arguments_json`
+)
+
+func ensureSchema(db *sql.DB) error { return ensureLedgerSchema(db) }
+
+// ensureHubSchema prepares the shared hub ledger. The hub keeps the fully
+// constrained and indexed schema for reads and local merges, and additionally
+// exposes constraint-free staging tables that remote clients write into: Quack
+// 1.5.5 crashes fatally while replaying an ART index insert for a remote write,
+// so remote writes must never touch a constrained table. Staged rows are folded
+// in locally by MergeStaging. Any ledger table that lost its primary key during
+// the earlier constraint-free experiment is rebuilt with its constraints first.
+func ensureHubSchema(db *sql.DB) error {
+	if err := repairLedgerPrimaryKeys(db); err != nil {
+		return err
+	}
+	if err := ensureLedgerSchema(db); err != nil {
+		return err
+	}
+	return ensureStagingSchema(db)
+}
+
+func ensureLedgerSchema(db *sql.DB) error {
+	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS requests (
+  ` + requestColumnsDDL + `,
+  PRIMARY KEY (id)
+);
+CREATE TABLE IF NOT EXISTS sessions (
+  ` + sessionColumnsDDL + `,
+  PRIMARY KEY (provider, session_id)
+);
+CREATE TABLE IF NOT EXISTS tool_calls (
+  ` + toolCallColumnsDDL + `,
   PRIMARY KEY (request_id, ordinal)
 );
-CREATE INDEX IF NOT EXISTS idx_web_requests_request_id ON web_requests(request_id);`)
-	if err != nil {
+CREATE TABLE IF NOT EXISTS web_requests (
+  ` + webRequestColumnsDDL + `,
+  PRIMARY KEY (request_id, ordinal)
+);`); err != nil {
 		return fmt.Errorf("create schema: %w", err)
 	}
 	for _, col := range []struct{ name, typ string }{
@@ -414,28 +454,20 @@ CREATE INDEX IF NOT EXISTS idx_web_requests_request_id ON web_requests(request_i
 			return err
 		}
 	}
-	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_requests_directory ON requests(directory);
+	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_requests_started_at ON requests(started_at);
+CREATE INDEX IF NOT EXISTS idx_requests_model_requested ON requests(model_requested);
+CREATE INDEX IF NOT EXISTS idx_requests_response_id ON requests(response_id);
+CREATE INDEX IF NOT EXISTS idx_requests_source ON requests(source);
+CREATE INDEX IF NOT EXISTS idx_sessions_first_seen_at ON sessions(first_seen_at);
+CREATE INDEX IF NOT EXISTS idx_tool_calls_request_id ON tool_calls(request_id);
+CREATE INDEX IF NOT EXISTS idx_web_requests_request_id ON web_requests(request_id);
+CREATE INDEX IF NOT EXISTS idx_requests_directory ON requests(directory);
 CREATE INDEX IF NOT EXISTS idx_requests_git_branch ON requests(git_branch);
 CREATE INDEX IF NOT EXISTS idx_requests_session_id ON requests(session_id);`); err != nil {
-		return fmt.Errorf("create project context indexes: %w", err)
+		return fmt.Errorf("create schema indexes: %w", err)
 	}
-	if _, err := db.Exec(`UPDATE requests
-SET session_id = codex_session_id
-WHERE (session_id IS NULL OR session_id = '')
-  AND codex_session_id IS NOT NULL AND codex_session_id != '';
-INSERT INTO sessions (provider, session_id, first_seen_at)
-SELECT provider, session_id, MIN(started_at) AS first_seen_at
-FROM (
-  SELECT ` + ProviderSQL("path") + ` AS provider,
-    COALESCE(NULLIF(session_id, ''), NULLIF(codex_session_id, '')) AS session_id,
-    started_at
-  FROM requests
-) observations
-WHERE session_id IS NOT NULL AND provider != 'unknown'
-GROUP BY provider, session_id
-ON CONFLICT (provider, session_id) DO UPDATE
-SET first_seen_at = LEAST(sessions.first_seen_at, excluded.first_seen_at);`); err != nil {
-		return fmt.Errorf("backfill sessions: %w", err)
+	if err := backfillSessions(db); err != nil {
+		return err
 	}
 	// Quack 1.5.x cannot reconstruct attached catalogs when a column default
 	// contains a bound expression such as current_timestamp. Supply the value
@@ -443,7 +475,7 @@ SET first_seen_at = LEAST(sessions.first_seen_at, excluded.first_seen_at);`); er
 	if _, err := db.Exec(`ALTER TABLE requests ALTER COLUMN created_at DROP DEFAULT`); err != nil {
 		return fmt.Errorf("remove requests.created_at default: %w", err)
 	}
-	_, err = db.Exec(`CREATE OR REPLACE VIEW usage_by_day_model AS
+	if _, err := db.Exec(`CREATE OR REPLACE VIEW usage_by_day_model AS
 SELECT
   CAST(CAST(date_trunc('day', started_at) AS DATE) AS VARCHAR) AS day,
   COALESCE(model_reported, model_requested, 'unknown') AS model,
@@ -455,11 +487,144 @@ SELECT
   SUM(COALESCE(reasoning_tokens, 0)) AS reasoning_tokens,
   SUM(COALESCE(total_tokens, 0)) AS total_tokens
 FROM requests
-GROUP BY day, model`)
-	if err != nil {
+GROUP BY day, model`); err != nil {
 		return fmt.Errorf("create live usage view: %w", err)
 	}
 	return nil
+}
+
+// ensureStagingSchema creates the constraint-free, index-free staging tables
+// that remote clients write into. Their absence of an ART index is exactly what
+// keeps Quack's remote-write path from crashing.
+func ensureStagingSchema(db *sql.DB) error {
+	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS staging_requests (
+  ` + requestColumnsDDL + `
+);
+CREATE TABLE IF NOT EXISTS staging_sessions (
+  ` + sessionColumnsDDL + `
+);
+CREATE TABLE IF NOT EXISTS staging_tool_calls (
+  ` + toolCallColumnsDDL + `
+);
+CREATE TABLE IF NOT EXISTS staging_web_requests (
+  ` + webRequestColumnsDDL + `
+);`); err != nil {
+		return fmt.Errorf("create staging schema: %w", err)
+	}
+	return nil
+}
+
+func backfillSessions(db *sql.DB) error {
+	if _, err := db.Exec(`UPDATE requests
+SET session_id = codex_session_id
+WHERE (session_id IS NULL OR session_id = '')
+  AND codex_session_id IS NOT NULL AND codex_session_id != ''`); err != nil {
+		return fmt.Errorf("backfill request session ids: %w", err)
+	}
+	if _, err := db.Exec(`INSERT INTO sessions (provider, session_id, first_seen_at)
+SELECT provider, session_id, MIN(started_at) AS first_seen_at
+FROM (
+  SELECT ` + ProviderSQL("path") + ` AS provider,
+    COALESCE(NULLIF(session_id, ''), NULLIF(codex_session_id, '')) AS session_id,
+    started_at
+  FROM requests
+) observations
+WHERE session_id IS NOT NULL AND provider != 'unknown'
+GROUP BY provider, session_id
+ON CONFLICT (provider, session_id) DO UPDATE
+SET first_seen_at = LEAST(sessions.first_seen_at, excluded.first_seen_at)`); err != nil {
+		return fmt.Errorf("backfill sessions: %w", err)
+	}
+	return nil
+}
+
+// repairLedgerPrimaryKeys restores the primary keys on any ledger table that
+// lost them during the earlier constraint-free experiment (or a manual rebuild).
+// DuckDB cannot add a primary key to a populated table in place, so the table is
+// copied into a fresh constrained one. Tables that do not yet exist are left for
+// ensureLedgerSchema to create constrained.
+func repairLedgerPrimaryKeys(db *sql.DB) error {
+	for _, t := range []struct{ table, columnsDDL, primaryKey string }{
+		{"requests", requestColumnsDDL, "id"},
+		{"sessions", sessionColumnsDDL, "provider, session_id"},
+		{"tool_calls", toolCallColumnsDDL, "request_id, ordinal"},
+		{"web_requests", webRequestColumnsDDL, "request_id, ordinal"},
+	} {
+		exists, err := tableExists(db, t.table)
+		if err != nil {
+			return err
+		}
+		if !exists {
+			continue
+		}
+		hasPK, err := tableHasPrimaryKey(db, t.table)
+		if err != nil {
+			return err
+		}
+		if hasPK {
+			continue
+		}
+		if err := rebuildWithPrimaryKey(db, t.table, t.columnsDDL, t.primaryKey); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func rebuildWithPrimaryKey(db *sql.DB, table, columnsDDL, primaryKey string) error {
+	cols, err := orderedColumns(db, table)
+	if err != nil {
+		return err
+	}
+	colList := strings.Join(cols, ", ")
+	tmp := table + "_ef_rebuild"
+	for _, stmt := range []string{
+		"DROP TABLE IF EXISTS " + tmp,
+		"CREATE TABLE " + tmp + " (\n  " + columnsDDL + ",\n  PRIMARY KEY (" + primaryKey + ")\n)",
+		fmt.Sprintf("INSERT INTO %s (%s) SELECT %s FROM %s", tmp, colList, colList, table),
+		"DROP TABLE " + table,
+		"ALTER TABLE " + tmp + " RENAME TO " + table,
+	} {
+		if _, err := db.Exec(stmt); err != nil {
+			return fmt.Errorf("restore primary key on %s: %w", table, err)
+		}
+	}
+	return nil
+}
+
+func tableExists(db *sql.DB, table string) (bool, error) {
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM information_schema.tables WHERE table_name = ?`, table).Scan(&count); err != nil {
+		return false, fmt.Errorf("inspect table %s: %w", table, err)
+	}
+	return count > 0, nil
+}
+
+func tableHasPrimaryKey(db *sql.DB, table string) (bool, error) {
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM duckdb_constraints()
+WHERE table_name = ? AND constraint_type = 'PRIMARY KEY'`, table).Scan(&count); err != nil {
+		return false, fmt.Errorf("inspect primary key for %s: %w", table, err)
+	}
+	return count > 0, nil
+}
+
+func orderedColumns(db *sql.DB, table string) ([]string, error) {
+	rows, err := db.Query(`SELECT column_name FROM information_schema.columns
+WHERE table_name = ? ORDER BY ordinal_position`, table)
+	if err != nil {
+		return nil, fmt.Errorf("read columns for %s: %w", table, err)
+	}
+	defer rows.Close()
+	var cols []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, fmt.Errorf("scan column for %s: %w", table, err)
+		}
+		cols = append(cols, name)
+	}
+	return cols, rows.Err()
 }
 
 func validateSchema(db *sql.DB) error {
@@ -699,15 +864,16 @@ func (s *Store) InsertBatch(ctx context.Context, events []queue.UsageEvent) erro
 	return nil
 }
 
-// insertRemoteBatch sends server-side INSERT statements through Quack's query
-// macro. Binding ON CONFLICT against an attached remote table currently asks
-// the Quack storage adapter for unsupported local storage metadata, while the
-// same statement executes normally on the server. A replay after either query
-// is safe because both target keys use ON CONFLICT DO NOTHING.
+// insertRemoteBatch appends a batch into the hub's constraint-free staging
+// tables via Quack's query macro. Staging tables have no ART index, so these
+// remote writes never hit Quack 1.5.5's crashing index-replay path. The hub's
+// MergeStaging job later folds staged rows into the indexed ledger tables
+// locally, where DuckDB maintains the ART indexes safely. Deduplication happens
+// at merge time (ON CONFLICT against the real tables), so duplicate staged rows
+// are harmless.
 func (s *Store) insertRemoteBatch(ctx context.Context, events []queue.UsageEvent) error {
-	sessionColumns := "session_id, codex_session_id"
-	if !s.remoteHasSessionID {
-		sessionColumns = "codex_session_id"
+	if !s.remoteHasStaging {
+		return errors.New("hub is missing staging tables; upgrade the hub to a build with staging support")
 	}
 	requestRows := make([]string, 0, len(events))
 	sessionFirstSeen := make(map[string]time.Time)
@@ -731,25 +897,16 @@ func (s *Store) insertRemoteBatch(ctx context.Context, events []queue.UsageEvent
 			sqlTime(ev.StartedAt), completedAt, durationMS, sqlString(ev.Method), sqlString(ev.Path), sqlString(ev.UpstreamURL),
 			sqlNullableString(ev.ModelRequested), sqlNullableString(ev.ModelReported), strconv.FormatBool(ev.Stream), strconv.Itoa(ev.HTTPStatus),
 			sqlNullableString(ev.UpstreamRequestID), sqlNullableString(ev.UserAgent), sqlNullableString(ev.Originator), sqlNullableString(ev.ClientName),
-		}
-		if s.remoteHasSessionID {
-			requestValues = append(requestValues, sqlNullableString(sessionID), sqlNullableString(ev.CodexSessionID))
-		} else {
-			// Legacy hubs only have codex_session_id. Use it as the transport
-			// column for both providers; the hub's later migration classifies
-			// the session from the request path when it backfills session_id.
-			requestValues = append(requestValues, sqlNullableString(sessionID))
-		}
-		requestValues = append(requestValues,
+			sqlNullableString(sessionID), sqlNullableString(ev.CodexSessionID),
 			sqlNullableString(ev.Directory), sqlNullableString(ev.GitBranch),
 			sqlNullableString(ev.ErrorType), sqlNullableString(ev.ErrorMessage),
 			sqlNullableInt64(ev.Usage.InputTokens), sqlNullableInt64(ev.Usage.CachedInputTokens), sqlNullableInt64(ev.Usage.CacheWriteTokens),
 			sqlNullableInt64(ev.Usage.OutputTokens), sqlNullableInt64(ev.Usage.ReasoningTokens), sqlNullableInt64(ev.Usage.TotalTokens),
 			sqlNullableString(string(ev.UsageJSON)), "current_timestamp",
-		)
+		}
 		requestRows = append(requestRows, "("+strings.Join(requestValues, ", ")+")")
 		provider := providerForPath(ev.Path)
-		if s.remoteHasSessions && sessionID != "" && provider != "unknown" {
+		if sessionID != "" && provider != "unknown" {
 			key := provider + "\x00" + sessionID
 			if firstSeen, ok := sessionFirstSeen[key]; !ok || ev.StartedAt.Before(firstSeen) {
 				sessionFirstSeen[key] = ev.StartedAt
@@ -774,17 +931,10 @@ func (s *Store) insertRemoteBatch(ctx context.Context, events []queue.UsageEvent
 			}, ", ")+")")
 		}
 	}
-	requestQuery := `INSERT INTO requests (
-  id, response_id, source, host, started_at, completed_at, duration_ms,
-  method, path, upstream_url, model_requested, model_reported, stream, http_status,
-  upstream_request_id, user_agent, originator, client_name, ` + sessionColumns + `,
-  directory, git_branch, error_type, error_message, input_tokens, cached_input_tokens, cache_write_tokens,
-  output_tokens, reasoning_tokens, total_tokens, usage_json, created_at
-) VALUES ` + strings.Join(requestRows, ", ") + ` ON CONFLICT (id) DO NOTHING`
-	if err := s.execRemoteQuery(ctx, requestQuery); err != nil {
-		return fmt.Errorf("insert remote requests: %w", err)
+	if err := s.execRemoteQuery(ctx, `INSERT INTO staging_requests (`+requestColumnNames+`) VALUES `+strings.Join(requestRows, ", ")); err != nil {
+		return fmt.Errorf("stage remote requests: %w", err)
 	}
-	if s.remoteHasSessions && len(sessionFirstSeen) > 0 {
+	if len(sessionFirstSeen) > 0 {
 		sessionRows := make([]string, 0, len(sessionFirstSeen))
 		for key, firstSeen := range sessionFirstSeen {
 			provider, sessionID, _ := strings.Cut(key, "\x00")
@@ -793,31 +943,73 @@ func (s *Store) insertRemoteBatch(ctx context.Context, events []queue.UsageEvent
 			}, ", ")+")")
 		}
 		slices.Sort(sessionRows)
-		sessionQuery := `INSERT INTO sessions (provider, session_id, first_seen_at)
-VALUES ` + strings.Join(sessionRows, ", ") + `
-ON CONFLICT (provider, session_id) DO UPDATE
-SET first_seen_at = LEAST(sessions.first_seen_at, excluded.first_seen_at)`
-		if err := s.execRemoteQuery(ctx, sessionQuery); err != nil {
-			return fmt.Errorf("upsert remote sessions: %w", err)
+		if err := s.execRemoteQuery(ctx, `INSERT INTO staging_sessions (provider, session_id, first_seen_at) VALUES `+strings.Join(sessionRows, ", ")); err != nil {
+			return fmt.Errorf("stage remote sessions: %w", err)
 		}
 	}
 	if len(toolRows) > 0 {
-		toolQuery := `INSERT INTO tool_calls (
-  request_id, ordinal, tool_call_id, name, command, description, arguments_json
-) VALUES ` + strings.Join(toolRows, ", ") + ` ON CONFLICT (request_id, ordinal) DO NOTHING`
-		if err := s.execRemoteQuery(ctx, toolQuery); err != nil {
-			return fmt.Errorf("insert remote tool calls: %w", err)
+		if err := s.execRemoteQuery(ctx, `INSERT INTO staging_tool_calls (`+toolCallColumnNames+`) VALUES `+strings.Join(toolRows, ", ")); err != nil {
+			return fmt.Errorf("stage remote tool calls: %w", err)
 		}
 	}
 	if len(webRows) > 0 {
-		webQuery := `INSERT INTO web_requests (
-  request_id, ordinal, web_request_id, name, query, url, domain, arguments_json
-) VALUES ` + strings.Join(webRows, ", ") + ` ON CONFLICT (request_id, ordinal) DO NOTHING`
-		if err := s.execRemoteQuery(ctx, webQuery); err != nil {
-			return fmt.Errorf("insert remote web requests: %w", err)
+		if err := s.execRemoteQuery(ctx, `INSERT INTO staging_web_requests (`+webRequestColumnNames+`) VALUES `+strings.Join(webRows, ", ")); err != nil {
+			return fmt.Errorf("stage remote web requests: %w", err)
 		}
 	}
 	return nil
+}
+
+// MergeStaging folds the constraint-free staging tables that remote clients
+// write into the indexed ledger tables. It runs on the hub's local connection,
+// where DuckDB maintains the ART indexes safely — unlike Quack's remote-write
+// replay, which crashes on those same indexes. The merge and the staging
+// cleanup share one transaction: under DuckDB's snapshot isolation the DELETE
+// only removes rows visible when the transaction began, so rows a client stages
+// concurrently survive to the next merge. Returns the number of request rows
+// newly inserted into the ledger.
+func (s *Store) MergeStaging(ctx context.Context) (int64, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, fmt.Errorf("begin merge: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	res, err := tx.ExecContext(ctx, `INSERT INTO requests (`+requestColumnNames+`)
+SELECT `+requestColumnNames+` FROM staging_requests
+ON CONFLICT (id) DO NOTHING`)
+	if err != nil {
+		return 0, fmt.Errorf("merge staged requests: %w", err)
+	}
+	merged, err := res.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("merge staged requests: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO sessions (provider, session_id, first_seen_at)
+SELECT provider, session_id, MIN(first_seen_at) AS first_seen_at FROM staging_sessions
+GROUP BY provider, session_id
+ON CONFLICT (provider, session_id) DO UPDATE
+SET first_seen_at = LEAST(sessions.first_seen_at, excluded.first_seen_at)`); err != nil {
+		return 0, fmt.Errorf("merge staged sessions: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO tool_calls (`+toolCallColumnNames+`)
+SELECT `+toolCallColumnNames+` FROM staging_tool_calls
+ON CONFLICT (request_id, ordinal) DO NOTHING`); err != nil {
+		return 0, fmt.Errorf("merge staged tool calls: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO web_requests (`+webRequestColumnNames+`)
+SELECT `+webRequestColumnNames+` FROM staging_web_requests
+ON CONFLICT (request_id, ordinal) DO NOTHING`); err != nil {
+		return 0, fmt.Errorf("merge staged web requests: %w", err)
+	}
+	for _, staging := range []string{"staging_requests", "staging_sessions", "staging_tool_calls", "staging_web_requests"} {
+		if _, err := tx.ExecContext(ctx, "DELETE FROM "+staging); err != nil {
+			return 0, fmt.Errorf("clear %s: %w", staging, err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("commit merge: %w", err)
+	}
+	return merged, nil
 }
 
 func (s *Store) execRemoteQuery(ctx context.Context, query string) error {

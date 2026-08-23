@@ -51,7 +51,7 @@ func Run(ctx context.Context, cfg config.Config, out io.Writer) error {
 	}
 	auth := hubauth.NewHubWithLogger(allowed, log)
 	defer auth.Close()
-	st, err := store.Open(cfg.DBPath)
+	st, err := store.OpenHub(cfg.DBPath)
 	if err != nil {
 		return fmt.Errorf("open hub ledger: %w", err)
 	}
@@ -59,6 +59,8 @@ func Run(ctx context.Context, cfg config.Config, out io.Writer) error {
 	if err := daemon.RunRetention(ctx, st, cfg, log); err != nil {
 		return err
 	}
+	stopMerge := daemon.StartStagingMerge(st, cfg.MergeInterval, log)
+	defer stopMerge()
 	server, err := st.StartQuackAuthenticated(ctx, cfg.HubQuackAddr, cfg.HubToken, auth.ValidateSession)
 	if err != nil {
 		return err

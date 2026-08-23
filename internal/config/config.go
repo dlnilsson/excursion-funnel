@@ -49,6 +49,7 @@ type Config struct {
 	Queue             queue.Config
 	QueueDrainTimeout time.Duration
 	ForwardInterval   time.Duration
+	MergeInterval     time.Duration
 }
 
 const (
@@ -85,6 +86,7 @@ func Default() Config {
 		Queue:             queue.DefaultConfig(),
 		QueueDrainTimeout: 5 * time.Second,
 		ForwardInterval:   time.Second,
+		MergeInterval:     2 * time.Second,
 	}
 }
 
@@ -173,6 +175,13 @@ func LoadEnvironment() (Config, error) {
 		}
 		cfg.ForwardInterval = d
 	}
+	if v := os.Getenv("EF_MERGE_INTERVAL"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			return Config{}, fmt.Errorf("EF_MERGE_INTERVAL: %w", err)
+		}
+		cfg.MergeInterval = d
+	}
 	if v := os.Getenv("EF_RETENTION_DAYS"); v != "" {
 		days, err := strconv.Atoi(v)
 		if err != nil {
@@ -203,7 +212,7 @@ func Validate(cfg Config) error {
 	if cfg.RetentionDays < 0 {
 		return fmt.Errorf("retention-days must be >= 0")
 	}
-	if cfg.ShutdownTimeout < 0 || cfg.RequestTimeout < 0 || cfg.IdleTimeout < 0 || cfg.QueueDrainTimeout < 0 || cfg.ForwardInterval < 0 {
+	if cfg.ShutdownTimeout < 0 || cfg.RequestTimeout < 0 || cfg.IdleTimeout < 0 || cfg.QueueDrainTimeout < 0 || cfg.ForwardInterval < 0 || cfg.MergeInterval < 0 {
 		return fmt.Errorf("timeouts must be >= 0")
 	}
 	if cfg.Source == "" {

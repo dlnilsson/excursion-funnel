@@ -36,7 +36,7 @@ func TestForwarderDrainsOutboxToQuackHub(t *testing.T) {
 	internalAddress := listener.Addr().String()
 	_ = listener.Close()
 
-	hub, err := store.Open(filepath.Join(t.TempDir(), "hub.duckdb"))
+	hub, err := store.OpenHub(filepath.Join(t.TempDir(), "hub.duckdb"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -98,6 +98,11 @@ func TestForwarderDrainsOutboxToQuackHub(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
 	if err := outbox.WaitUntilEmpty(ctx); err != nil {
+		t.Fatal(err)
+	}
+	// The forwarder writes to the hub's staging tables; fold them into the
+	// indexed ledger tables the same way the hub daemon does before asserting.
+	if _, err := hub.MergeStaging(ctx); err != nil {
 		t.Fatal(err)
 	}
 	var source string
