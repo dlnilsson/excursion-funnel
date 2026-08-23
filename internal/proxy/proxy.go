@@ -39,6 +39,7 @@ import (
 	"github.com/dlnilsson/excursion-funnel/internal/pick"
 	"github.com/dlnilsson/excursion-funnel/internal/provider"
 	"github.com/dlnilsson/excursion-funnel/internal/queue"
+	"github.com/dlnilsson/excursion-funnel/internal/usageparse"
 )
 
 var (
@@ -79,6 +80,13 @@ func putCopyBuffer(buf []byte) {
 // by dropping events under sustained backpressure instead of blocking.
 type EventSink interface {
 	Enqueue(queue.UsageEvent)
+}
+
+// parsers maps a routed provider to its usage extractor. Adding a provider is
+// an entry here plus a route case, not an edit to every extraction site.
+var parsers = map[string]usageparse.Provider{
+	provider.OpenAI:    openai.Parser{},
+	provider.Anthropic: anthropic.Parser{},
 }
 
 // hopByHop headers are connection-scoped and must not be forwarded across the
@@ -569,41 +577,27 @@ func (p *Proxy) handleWebConnect(w http.ResponseWriter, r *http.Request) {
 }
 
 // populateUsage extracts model/usage/error metadata from a captured
-// non-streaming response body using the parser for provider, and fills in
+// non-streaming response body using the parser for providerName, and fills in
 // the corresponding UsageEvent fields. Parse failures are recorded as
 // parse_error on the event but never returned to the caller — a malformed
 // or truncated capture must not affect the already-sent proxy response.
 func populateUsage(ev *queue.UsageEvent, providerName string, httpStatus int, body []byte) {
-	isSuccess := httpStatus >= 200 && httpStatus < 300
-
-	switch providerName {
-	case provider.OpenAI:
-		if isSuccess {
-			result, err := openai.ExtractCompleted(body)
-			if err != nil {
-				ev.ErrorType, ev.ErrorMessage = errParseError, err.Error()
-				return
-			}
-			ev.ResponseID, ev.ModelReported, ev.Usage, ev.UsageJSON, ev.ToolCalls, ev.WebRequests = result.ResponseID, result.Model, result.Usage, result.UsageJSON, result.ToolCalls, result.WebRequests
-			return
-		}
-		if errType, errMessage, ok := openai.ExtractError(body); ok {
-			ev.ErrorType, ev.ErrorMessage = errType, errMessage
-		}
-	case provider.Anthropic:
-		if isSuccess {
-			result, err := anthropic.ExtractCompleted(body)
-			if err != nil {
-				ev.ErrorType, ev.ErrorMessage = errParseError, err.Error()
-				return
-			}
-			ev.ResponseID, ev.ModelReported, ev.Usage, ev.UsageJSON, ev.ToolCalls, ev.WebRequests = result.ResponseID, result.Model, result.Usage, result.UsageJSON, result.ToolCalls, result.WebRequests
-			return
-		}
-		if errType, errMessage, ok := anthropic.ExtractError(body); ok {
-			ev.ErrorType, ev.ErrorMessage = errType, errMessage
-		}
+	parser, ok := parsers[providerName]
+	if !ok {
+		return
 	}
+	if httpStatus < 200 || httpStatus >= 300 {
+		if errType, errMessage, ok := parser.ExtractError(body); ok {
+			ev.ErrorType, ev.ErrorMessage = errType, errMessage
+		}
+		return
+	}
+	result, err := parser.ExtractCompleted(body)
+	if err != nil {
+		ev.ErrorType, ev.ErrorMessage = errParseError, err.Error()
+		return
+	}
+	applyResult(ev, result)
 }
 
 // Error types recorded on the usage row when telemetry could not be read
@@ -617,42 +611,34 @@ const (
 )
 
 // populateStreamUsage fills event fields from a completed SSE parser. Any
-// malformed or prematurely-ended stream is recorded as parse_error.
+// malformed or prematurely-ended stream is recorded as parse_error, but the
+// tool activity the parser did observe is kept: those calls really happened.
 func populateStreamUsage(ev *queue.UsageEvent, capture *streamCapture) {
-	switch capture.providerName {
-	case provider.OpenAI:
-		result, err := capture.openai.Result()
-		if err != nil {
-			ev.ToolCalls = capture.openai.PartialResult().ToolCalls
-			ev.WebRequests = capture.openai.PartialResult().WebRequests
-			ev.ErrorType, ev.ErrorMessage = errParseError, err.Error()
-			return
-		}
-		ev.ResponseID = result.ResponseID
-		ev.ModelReported = result.Model
-		ev.Usage = result.Usage
-		ev.UsageJSON = result.UsageJSON
-		ev.ToolCalls = result.ToolCalls
-		ev.WebRequests = result.WebRequests
-		ev.ErrorType = result.ErrorType
-		ev.ErrorMessage = result.ErrorMessage
-	case provider.Anthropic:
-		result, err := capture.anthropic.Result()
-		if err != nil {
-			ev.ToolCalls = capture.anthropic.PartialResult().ToolCalls
-			ev.WebRequests = capture.anthropic.PartialResult().WebRequests
-			ev.ErrorType, ev.ErrorMessage = errParseError, err.Error()
-			return
-		}
-		ev.ResponseID = result.ResponseID
-		ev.ModelReported = result.Model
-		ev.Usage = result.Usage
-		ev.UsageJSON = result.UsageJSON
-		ev.ToolCalls = result.ToolCalls
-		ev.WebRequests = result.WebRequests
-		ev.ErrorType = result.ErrorType
-		ev.ErrorMessage = result.ErrorMessage
+	if capture.parser == nil {
+		return
 	}
+	result, err := capture.parser.Result()
+	if err != nil {
+		partial := capture.parser.PartialResult()
+		ev.ToolCalls, ev.WebRequests = partial.ToolCalls, partial.WebRequests
+		ev.ErrorType, ev.ErrorMessage = errParseError, err.Error()
+		return
+	}
+	applyResult(ev, result)
+	ev.ErrorType, ev.ErrorMessage = result.ErrorType, result.ErrorMessage
+}
+
+// applyResult copies the extracted metadata onto the event. It deliberately
+// leaves ErrorType/ErrorMessage alone: those are set by the caller, which knows
+// whether an error means "the provider reported one", "the capture would not
+// parse", or "the stream was cut short".
+func applyResult(ev *queue.UsageEvent, result usageparse.Result) {
+	ev.ResponseID = result.ResponseID
+	ev.ModelReported = result.Model
+	ev.Usage = result.Usage
+	ev.UsageJSON = result.UsageJSON
+	ev.ToolCalls = result.ToolCalls
+	ev.WebRequests = result.WebRequests
 }
 
 // populateInterruptedStreamUsage records an upstream stream that died before
@@ -660,7 +646,9 @@ func populateStreamUsage(ev *queue.UsageEvent, capture *streamCapture) {
 // is kept; the row is marked stream_interrupted so it stays distinguishable
 // from a clean response and from a response that merely failed to parse.
 func populateInterruptedStreamUsage(ev *queue.UsageEvent, capture *streamCapture, cause error) {
-	ev.ResponseID, ev.ModelReported, ev.Usage, ev.UsageJSON, ev.ToolCalls, ev.WebRequests = capture.partial()
+	if capture.parser != nil {
+		applyResult(ev, capture.parser.PartialResult())
+	}
 	ev.ErrorType, ev.ErrorMessage = errStreamInterrupted, cause.Error()
 }
 
@@ -754,29 +742,24 @@ type teeCapture struct {
 	full  bool
 }
 
+// streamCapture feeds relayed SSE bytes into the parser for the routed
+// provider. An unrouted provider leaves parser nil and the capture becomes a
+// sink, so telemetry degrades quietly instead of failing the proxied request.
 type streamCapture struct {
-	providerName string
-	openai       *openai.StreamParser
-	anthropic    *anthropic.StreamParser
+	parser usageparse.StreamParser
 }
 
 func newStreamCapture(providerName string, limit int) *streamCapture {
-	c := &streamCapture{providerName: providerName}
-	switch providerName {
-	case provider.OpenAI:
-		c.openai = openai.NewStreamParser(limit)
-	case provider.Anthropic:
-		c.anthropic = anthropic.NewStreamParser(limit)
+	capture := &streamCapture{}
+	if parser, ok := parsers[providerName]; ok {
+		capture.parser = parser.NewStreamParser(limit)
 	}
-	return c
+	return capture
 }
 
 func (s *streamCapture) Write(p []byte) {
-	switch s.providerName {
-	case provider.OpenAI:
-		s.openai.Feed(p)
-	case provider.Anthropic:
-		s.anthropic.Feed(p)
+	if s.parser != nil {
+		s.parser.Feed(p)
 	}
 }
 
@@ -784,27 +767,7 @@ func (s *streamCapture) Write(p []byte) {
 // terminal SSE event. When true, a client disconnect mid-copy still represents
 // a complete, billable response rather than an abandoned request.
 func (s *streamCapture) terminated() bool {
-	switch s.providerName {
-	case provider.OpenAI:
-		return s.openai.Terminated()
-	case provider.Anthropic:
-		return s.anthropic.Terminated()
-	}
-	return false
-}
-
-// partial returns the metadata accumulated so far, without requiring the
-// stream to have reached a terminal event.
-func (s *streamCapture) partial() (responseID, model string, usage queue.Usage, usageJSON json.RawMessage, toolCalls []queue.ToolCall, webRequests []queue.WebRequest) {
-	switch s.providerName {
-	case provider.OpenAI:
-		r := s.openai.PartialResult()
-		return r.ResponseID, r.Model, r.Usage, r.UsageJSON, r.ToolCalls, r.WebRequests
-	case provider.Anthropic:
-		r := s.anthropic.PartialResult()
-		return r.ResponseID, r.Model, r.Usage, r.UsageJSON, r.ToolCalls, r.WebRequests
-	}
-	return "", "", queue.Usage{}, nil, nil, nil
+	return s.parser != nil && s.parser.Terminated()
 }
 
 func newTeeCapture(limit int) *teeCapture {

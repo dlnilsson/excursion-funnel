@@ -7,12 +7,13 @@ package anthropic
 import (
 	"bytes"
 	"encoding/json"
-	"errors"
+	"fmt"
 	"maps"
 
 	"github.com/dlnilsson/excursion-funnel/internal/provider"
 	"github.com/dlnilsson/excursion-funnel/internal/queue"
 	"github.com/dlnilsson/excursion-funnel/internal/sse"
+	"github.com/dlnilsson/excursion-funnel/internal/usageparse"
 )
 
 // CompletedResult is the metadata extracted from a completed Messages API
@@ -144,25 +145,11 @@ func (u messageUsage) toUsage() queue.Usage {
 	}
 }
 
-type errorPayload struct {
-	Error struct {
-		Type    string `json:"type"`
-		Message string `json:"message"`
-	} `json:"error"`
-}
-
 // ExtractError parses an Anthropic-style JSON error body
 // ({"type": "error", "error": {"type", "message"}}). ok is false if body
 // doesn't match that shape.
 func ExtractError(body []byte) (errType, errMessage string, ok bool) {
-	var payload errorPayload
-	if err := json.Unmarshal(body, &payload); err != nil {
-		return "", "", false
-	}
-	if payload.Error.Type == "" && payload.Error.Message == "" {
-		return "", "", false
-	}
-	return payload.Error.Type, payload.Error.Message, true
+	return usageparse.ExtractError(body)
 }
 
 // StreamResult is the metadata accumulated from a Messages API SSE stream.
@@ -231,7 +218,7 @@ func (p *StreamParser) Result() (StreamResult, error) {
 	if p.parseErr != nil {
 		return p.result, p.parseErr
 	}
-	return p.result, errors.New("anthropic stream ended without terminal event")
+	return p.result, fmt.Errorf("anthropic: %w", usageparse.ErrNoTerminalEvent)
 }
 
 // PartialResult returns whatever has accumulated so far without requiring a

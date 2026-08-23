@@ -7,13 +7,13 @@ package openai
 import (
 	"bytes"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"strings"
 
 	"github.com/dlnilsson/excursion-funnel/internal/pick"
 	"github.com/dlnilsson/excursion-funnel/internal/queue"
 	"github.com/dlnilsson/excursion-funnel/internal/sse"
+	"github.com/dlnilsson/excursion-funnel/internal/usageparse"
 )
 
 // CompletedResult is the metadata extracted from a completed (or
@@ -275,24 +275,10 @@ func newCodexToolCall(id, name string, input []byte) queue.ToolCall {
 	return call
 }
 
-type errorPayload struct {
-	Error struct {
-		Type    string `json:"type"`
-		Message string `json:"message"`
-	} `json:"error"`
-}
-
 // ExtractError parses an OpenAI-style JSON error body ({"error": {"type",
 // "message"}}). ok is false if body doesn't match that shape.
 func ExtractError(body []byte) (errType, errMessage string, ok bool) {
-	var payload errorPayload
-	if err := json.Unmarshal(body, &payload); err != nil {
-		return "", "", false
-	}
-	if payload.Error.Type == "" && payload.Error.Message == "" {
-		return "", "", false
-	}
-	return payload.Error.Type, payload.Error.Message, true
+	return usageparse.ExtractError(body)
 }
 
 // StreamResult is the metadata accumulated from a Responses API SSE stream.
@@ -361,7 +347,7 @@ func (p *StreamParser) Result() (StreamResult, error) {
 	if p.parseErr != nil {
 		return p.result, p.parseErr
 	}
-	return p.result, errors.New("openai stream ended without terminal event")
+	return p.result, fmt.Errorf("openai: %w", usageparse.ErrNoTerminalEvent)
 }
 
 // PartialResult returns whatever has accumulated so far without requiring a
