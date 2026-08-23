@@ -3,7 +3,6 @@ package sessions
 
 import (
 	"context"
-	"fmt"
 	"io"
 	"time"
 
@@ -23,46 +22,29 @@ type Options struct {
 
 // Run queries and writes a session lifecycle summary.
 func Run(ctx context.Context, out io.Writer, opts Options) error {
-	var (
-		since   time.Time
-		until   time.Time
-		groupBy = opts.GroupBy
-	)
+	window, err := reporting.ResolveRange("sessions", opts.Shortcut, opts.Since, opts.Until, time.Now())
+	if err != nil {
+		return err
+	}
+	// The period shortcuts also fix the grouping: `sessions week` means weekly
+	// buckets, not weekly data in whatever grouping --group-by happened to hold.
+	groupBy := opts.GroupBy
 	switch opts.Shortcut {
-	case "today":
-		since = reporting.BeginningOfDay(time.Now())
-		until = since.AddDate(0, 0, 1)
+	case reporting.ShortcutToday:
 		groupBy = "day"
-	case "week":
-		since = reporting.BeginningOfWeek(time.Now())
-		until = since.AddDate(0, 0, 7)
+	case reporting.ShortcutWeek:
 		groupBy = "week"
-	case "":
-		var err error
-		if opts.Since != "" {
-			since, err = reporting.ParseDate(opts.Since)
-			if err != nil {
-				return fmt.Errorf("--since: %w", err)
-			}
-		}
-		if opts.Until != "" {
-			until, err = reporting.ParseDate(opts.Until)
-			if err != nil {
-				return fmt.Errorf("--until: %w", err)
-			}
-			until = until.AddDate(0, 0, 1)
-		}
-	default:
-		return fmt.Errorf("unsupported session shortcut %q", opts.Shortcut)
 	}
 
-	reporter, err := report.OpenWithHubKey(opts.Connection.DBPath, opts.Connection.DefaultDBPath, opts.Connection.HubKey)
+	reporter, err := report.OpenConnection(opts.Connection)
 	if err != nil {
-		return fmt.Errorf("open database: %w", err)
+		return err
 	}
 	defer reporter.Close()
 
-	rows, err := reporter.Sessions(ctx, report.SessionOptions{Since: since, Until: until, GroupBy: groupBy})
+	rows, err := reporter.Sessions(ctx, report.SessionOptions{
+		Since: window.Since, Until: window.Until, GroupBy: groupBy,
+	})
 	if err != nil {
 		return err
 	}

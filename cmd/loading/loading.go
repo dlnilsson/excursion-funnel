@@ -2,6 +2,7 @@
 package loading
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -134,4 +135,28 @@ func Run[T any](ctx context.Context, statusOut io.Writer, text string, task func
 		return zero, clearErr
 	}
 	return loadingModel.value, nil
+}
+
+// RunBuffered runs a command that writes human-readable output, showing a
+// loading animation while it works.
+//
+// The output is buffered rather than streamed because the animation and the
+// result share a terminal: a partially-written table interleaved with a
+// respawning spinner line is unreadable. When no animation is warranted
+// (JSON output, or either stream redirected) the command writes straight
+// through and nothing is buffered.
+func RunBuffered(ctx context.Context, out, statusOut io.Writer, jsonMode bool, text string, run func(io.Writer) error) error {
+	if !ShouldAnimate(jsonMode, IsTerminalWriter(out), IsTerminalWriter(statusOut)) {
+		return run(out)
+	}
+	rendered, err := Run(ctx, statusOut, text, func() ([]byte, error) {
+		var buffered bytes.Buffer
+		err := run(&buffered)
+		return buffered.Bytes(), err
+	})
+	if err != nil {
+		return err
+	}
+	_, err = out.Write(rendered)
+	return err
 }

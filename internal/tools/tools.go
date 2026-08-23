@@ -26,9 +26,9 @@ func Load(ctx context.Context, opts Options) ([]report.ToolCallRow, error) {
 		return nil, fmt.Errorf("--limit must be positive, got %d", opts.Limit)
 	}
 	since := reporting.BeginningOfDay(time.Now())
-	reporter, err := report.OpenWithHubKey(opts.Connection.DBPath, opts.Connection.DefaultDBPath, opts.Connection.HubKey)
+	reporter, err := report.OpenConnection(opts.Connection)
 	if err != nil {
-		return nil, fmt.Errorf("open database: %w", err)
+		return nil, err
 	}
 	defer reporter.Close()
 	rows, err := reporter.ToolCalls(ctx, report.ToolCallOptions{

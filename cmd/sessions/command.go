@@ -2,7 +2,6 @@
 package sessions
 
 import (
-	"bytes"
 	"io"
 
 	"github.com/dlnilsson/excursion-funnel/cmd/loading"
@@ -38,32 +37,17 @@ func New() *cobra.Command {
 
 func run(opts *options, shortcut string) func(*cobra.Command, []string) error {
 	return func(cmd *cobra.Command, _ []string) error {
-		var (
-			ctx       = cmd.Context()
-			out       = cmd.OutOrStdout()
-			statusOut = cmd.ErrOrStderr()
-			appOpts   = appsessions.Options{
-				Connection: opts.connection.Resolve(cmd.Flags()),
-				Since:      opts.since,
-				Until:      opts.until,
-				GroupBy:    opts.groupBy,
-				Shortcut:   shortcut,
-				JSON:       opts.json,
-			}
-		)
-		runSessions := func(writer io.Writer) error { return appsessions.Run(ctx, writer, appOpts) }
-		if !loading.ShouldAnimate(appOpts.JSON, loading.IsTerminalWriter(out), loading.IsTerminalWriter(statusOut)) {
-			return runSessions(out)
+		appOpts := appsessions.Options{
+			Connection: opts.connection.Resolve(cmd.Flags()),
+			Since:      opts.since,
+			Until:      opts.until,
+			GroupBy:    opts.groupBy,
+			Shortcut:   shortcut,
+			JSON:       opts.json,
 		}
-		output, err := loading.Run(ctx, statusOut, "Loading sessions…", func() ([]byte, error) {
-			var buffered bytes.Buffer
-			err := runSessions(&buffered)
-			return buffered.Bytes(), err
-		})
-		if err != nil {
-			return err
-		}
-		_, err = io.Copy(out, bytes.NewReader(output))
-		return err
+		return loading.RunBuffered(cmd.Context(), cmd.OutOrStdout(), cmd.ErrOrStderr(), appOpts.JSON,
+			"Loading sessions…", func(out io.Writer) error {
+				return appsessions.Run(cmd.Context(), out, appOpts)
+			})
 	}
 }

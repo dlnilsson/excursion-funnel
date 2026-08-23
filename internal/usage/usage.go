@@ -3,17 +3,12 @@ package usage
 
 import (
 	"context"
-	"errors"
-	"fmt"
 	"io"
 	"time"
 
 	"github.com/dlnilsson/excursion-funnel/internal/report"
 	"github.com/dlnilsson/excursion-funnel/internal/reporting"
 )
-
-// ErrTodayWithRange prevents an explicit range from being silently ignored.
-var ErrTodayWithRange = errors.New("`usage today` cannot be combined with --since/--until; drop `today` to use an explicit range")
 
 // Options controls a usage summary execution.
 type Options struct {
@@ -29,40 +24,24 @@ type Options struct {
 
 // Run queries and writes a usage summary.
 func Run(ctx context.Context, out io.Writer, opts Options) error {
-	if opts.Today && (opts.Since != "" || opts.Until != "") {
-		return ErrTodayWithRange
-	}
-
-	var since, until time.Time
+	shortcut := reporting.ShortcutNone
 	if opts.Today {
-		since = reporting.BeginningOfDay(time.Now())
-		until = since.AddDate(0, 0, 1)
-	} else {
-		var err error
-		if opts.Since != "" {
-			since, err = reporting.ParseDate(opts.Since)
-			if err != nil {
-				return fmt.Errorf("--since: %w", err)
-			}
-		}
-		if opts.Until != "" {
-			until, err = reporting.ParseDate(opts.Until)
-			if err != nil {
-				return fmt.Errorf("--until: %w", err)
-			}
-			until = until.AddDate(0, 0, 1)
-		}
+		shortcut = reporting.ShortcutToday
+	}
+	window, err := reporting.ResolveRange("usage", shortcut, opts.Since, opts.Until, time.Now())
+	if err != nil {
+		return err
 	}
 
-	reporter, err := report.OpenWithHubKey(opts.Connection.DBPath, opts.Connection.DefaultDBPath, opts.Connection.HubKey)
+	reporter, err := report.OpenConnection(opts.Connection)
 	if err != nil {
-		return fmt.Errorf("open database: %w", err)
+		return err
 	}
 	defer reporter.Close()
 
 	rows, err := reporter.Summary(ctx, report.SummaryOptions{
-		Since:     since,
-		Until:     until,
+		Since:     window.Since,
+		Until:     window.Until,
 		GroupBy:   opts.GroupBy,
 		Directory: opts.Directory,
 		Branch:    opts.Branch,
@@ -70,8 +49,10 @@ func Run(ctx context.Context, out io.Writer, opts Options) error {
 	if err != nil {
 		return err
 	}
-	if opts.GroupBy != "day" && !since.IsZero() && until.Equal(since.AddDate(0, 0, 1)) {
-		day := since.Format("2006-01-02")
+	// A single-day window has one obvious date, but only the day grouping
+	// selects it. Stamp it on the rows so the JSON output still carries it.
+	if opts.GroupBy != "day" && window.IsSingleDay() {
+		day := window.Since.Format("2006-01-02")
 		for index := range rows {
 			rows[index].Day = day
 		}

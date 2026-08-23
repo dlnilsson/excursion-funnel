@@ -106,6 +106,16 @@ func OpenHubRemote(address, keyPath string, insecure bool) (*Reporter, error) {
 	return &Reporter{store: st, owned: true}, nil
 }
 
+// OpenConnection opens the reporter a reporting command should read from,
+// resolving hub, running-daemon and read-only-file access in that order.
+func OpenConnection(conn reporting.Connection) (*Reporter, error) {
+	reporter, err := OpenWithHubKey(conn.DBPath, conn.DefaultDBPath, conn.HubKey)
+	if err != nil {
+		return nil, fmt.Errorf("open database: %w", err)
+	}
+	return reporter, nil
+}
+
 // New builds a Reporter over an already-open in-process Store.
 func New(st *store.Store) *Reporter { return &Reporter{store: st} }
 

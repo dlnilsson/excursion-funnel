@@ -23,9 +23,9 @@ func Run(ctx context.Context, in io.Reader, out io.Writer, id string, opts Optio
 	if opts.Limit <= 0 {
 		return fmt.Errorf("--limit must be positive, got %d", opts.Limit)
 	}
-	reporter, err := report.OpenWithHubKey(opts.Connection.DBPath, opts.Connection.DefaultDBPath, opts.Connection.HubKey)
+	reporter, err := report.OpenConnection(opts.Connection)
 	if err != nil {
-		return fmt.Errorf("open database: %w", err)
+		return err
 	}
 	defer reporter.Close()
 	if id == "" {

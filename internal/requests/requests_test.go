@@ -18,8 +18,8 @@ import (
 
 func TestTodayWithExplicitRangeIsRejected(t *testing.T) {
 	for _, opts := range []Options{{Today: true, Limit: 50, Since: "2026-08-01"}, {Today: true, Limit: 50, Until: "2026-08-01"}} {
-		if err := Run(t.Context(), io.Discard, opts); !errors.Is(err, ErrTodayWithRange) {
-			t.Fatalf("Run() error = %v, want ErrTodayWithRange", err)
+		if err := Run(t.Context(), io.Discard, opts); !errors.Is(err, reporting.ErrShortcutWithRange) {
+			t.Fatalf("Run() error = %v, want ErrShortcutWithRange", err)
 		}
 	}
 }

@@ -27,8 +27,8 @@ func connection(t *testing.T, dbPath string) reporting.Connection {
 
 func TestTodayWithExplicitRangeIsRejected(t *testing.T) {
 	for _, opts := range []Options{{Today: true, Since: "2026-07-01"}, {Today: true, Until: "2026-07-01"}} {
-		if err := Run(t.Context(), io.Discard, opts); !errors.Is(err, ErrTodayWithRange) {
-			t.Fatalf("Run() error = %v, want ErrTodayWithRange", err)
+		if err := Run(t.Context(), io.Discard, opts); !errors.Is(err, reporting.ErrShortcutWithRange) {
+			t.Fatalf("Run() error = %v, want ErrShortcutWithRange", err)
 		}
 	}
 }
