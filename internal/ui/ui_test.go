@@ -15,6 +15,18 @@ import (
 	"github.com/dlnilsson/excursion-funnel/internal/store"
 )
 
+func TestNew_RedirectsUIPath(t *testing.T) {
+	h := New(nil, slog.New(slog.DiscardHandler))
+	rec := doRequest(t, h, http.MethodGet, "/ui")
+
+	if rec.Code != http.StatusMovedPermanently {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusMovedPermanently)
+	}
+	if got := rec.Header().Get("Location"); got != "/ui/" {
+		t.Fatalf("Location = %q, want %q", got, "/ui/")
+	}
+}
+
 func TestHandleIndex_ServesDashboardHTML(t *testing.T) {
 	h := newTestHandler(t)
 

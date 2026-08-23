@@ -32,6 +32,7 @@ func New(rep *report.Reporter, log *slog.Logger) http.Handler {
 	}
 
 	mux := http.NewServeMux()
+	mux.Handle("GET /ui", http.RedirectHandler("/ui/", http.StatusMovedPermanently))
 	mux.HandleFunc("GET /ui/", handleIndex)
 	mux.Handle("GET /ui/assets/", http.StripPrefix("/ui/assets/", http.FileServerFS(staticAssets)))
 	mux.HandleFunc("GET /ui/api/kpis", handleKPIs(rep, log))
