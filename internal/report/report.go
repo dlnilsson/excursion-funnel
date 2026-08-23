@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -372,29 +371,22 @@ func (r *Reporter) HourlyTokens(ctx context.Context, opts HourlyTokenOptions) ([
 	if opts.KnownProvidersOnly {
 		where = appendWherePredicate(where, provider.SQLForPath("path")+" != 'unknown'")
 	}
-	rows, err := r.store.DB().QueryContext(ctx, `SELECT
+	scanned, err := queryRows(ctx, r.store.DB(), "hourly tokens", `SELECT
   date_trunc('hour', started_at) AS hour,
   SUM(`+provider.FreshInputSQL("path")+`) AS fresh_input_tokens,
   SUM(COALESCE(output_tokens, 0)) AS output_tokens
 FROM requests
 `+where+`
 GROUP BY hour
-ORDER BY hour`, args...)
+ORDER BY hour`, args, func(rows *sql.Rows, row *HourlyTokenRow) error {
+		return rows.Scan(&row.Hour, &row.FreshInput, &row.Output)
+	})
 	if err != nil {
-		return nil, fmt.Errorf("query hourly tokens: %w", err)
+		return nil, err
 	}
-	defer rows.Close()
-
-	aggregated := make(map[int64]HourlyTokenRow)
-	for rows.Next() {
-		var row HourlyTokenRow
-		if err := rows.Scan(&row.Hour, &row.FreshInput, &row.Output); err != nil {
-			return nil, fmt.Errorf("scan hourly tokens: %w", err)
-		}
+	aggregated := make(map[int64]HourlyTokenRow, len(scanned))
+	for _, row := range scanned {
 		aggregated[row.Hour.Unix()] = row
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate hourly tokens: %w", err)
 	}
 
 	start := reporting.BeginningOfHour(opts.Since)
@@ -521,51 +513,41 @@ FROM (
 ` + startedWhere + `
 GROUP BY period, provider`
 	}
-	startedRows, err := r.store.DB().QueryContext(ctx, startedQuery, startedArgs...)
+	// Each scan must finish before the next begins: a Quack-attached remote
+	// catalog cannot stream-scan two tables at once, and queryRows closes its
+	// cursor before returning.
+	started, err := queryRows(ctx, r.store.DB(), "sessions started", startedQuery, startedArgs,
+		func(rows *sql.Rows, row *SessionRow) error {
+			return rows.Scan(&row.Period, &row.Provider, &row.Started)
+		})
 	if err != nil {
-		return nil, fmt.Errorf("query sessions started: %w", err)
+		return nil, err
 	}
-	for startedRows.Next() {
-		var row SessionRow
-		if err := startedRows.Scan(&row.Period, &row.Provider, &row.Started); err != nil {
-			_ = startedRows.Close()
-			return nil, fmt.Errorf("scan sessions started: %w", err)
-		}
+	for _, row := range started {
 		rowsByKey[sessionRowKey(row.Period, row.Provider)] = row
-	}
-	if err := startedRows.Err(); err != nil {
-		_ = startedRows.Close()
-		return nil, fmt.Errorf("iterate sessions started: %w", err)
-	}
-	if err := startedRows.Close(); err != nil {
-		return nil, fmt.Errorf("close sessions started: %w", err)
 	}
 
 	usedWhere, usedArgs := timeRange("started_at", opts.Since, opts.Until)
 	usedWhere = appendWherePredicate(usedWhere, schema.sessionExpression+" IS NOT NULL")
 	usedWhere = appendWherePredicate(usedWhere, provider.SQLForPath("path")+" != 'unknown'")
-	usedRows, err := r.store.DB().QueryContext(ctx, `SELECT `+periodFromRequest+` AS period, `+provider.SQLForPath("path")+` AS provider,
+	used, err := queryRows(ctx, r.store.DB(), "sessions used",
+		`SELECT `+periodFromRequest+` AS period, `+provider.SQLForPath("path")+` AS provider,
   COUNT(DISTINCT `+schema.sessionExpression+`)
 FROM requests
 `+usedWhere+`
-GROUP BY period, provider`, usedArgs...)
+GROUP BY period, provider`, usedArgs, func(rows *sql.Rows, row *SessionRow) error {
+			return rows.Scan(&row.Period, &row.Provider, &row.Used)
+		})
 	if err != nil {
-		return nil, fmt.Errorf("query sessions used: %w", err)
+		return nil, err
 	}
-	defer usedRows.Close()
-	for usedRows.Next() {
-		var row SessionRow
-		if err := usedRows.Scan(&row.Period, &row.Provider, &row.Used); err != nil {
-			return nil, fmt.Errorf("scan sessions used: %w", err)
-		}
+	for _, row := range used {
 		key := sessionRowKey(row.Period, row.Provider)
-		if existing, ok := rowsByKey[key]; ok {
-			row.Started = existing.Started
-		}
+		// Starts come from the session registry and usage from retained request
+		// rows, so a period can appear in either scan alone. Carry the start
+		// count across rather than letting the second scan overwrite it.
+		row.Started = rowsByKey[key].Started
 		rowsByKey[key] = row
-	}
-	if err := usedRows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate sessions used: %w", err)
 	}
 
 	rows := make([]SessionRow, 0, len(rowsByKey))
@@ -589,32 +571,27 @@ type sessionSchema struct {
 }
 
 func (r *Reporter) sessionSchema(ctx context.Context) (sessionSchema, error) {
-	rows, err := r.store.DB().QueryContext(ctx, `SELECT table_name, column_name
+	type schemaColumn struct{ table, column string }
+	columns, err := queryRows(ctx, r.store.DB(), "session schema", `SELECT table_name, column_name
 FROM information_schema.columns
 WHERE (table_name = 'requests' AND column_name IN ('session_id', 'codex_session_id'))
-   OR table_name = 'sessions'`)
+   OR table_name = 'sessions'`, nil, func(rows *sql.Rows, col *schemaColumn) error {
+		return rows.Scan(&col.table, &col.column)
+	})
 	if err != nil {
-		return sessionSchema{}, fmt.Errorf("inspect session schema: %w", err)
+		return sessionSchema{}, err
 	}
-	defer rows.Close()
 	var hasSessionID, hasCodexSessionID bool
 	schema := sessionSchema{}
-	for rows.Next() {
-		var tableName, columnName string
-		if err := rows.Scan(&tableName, &columnName); err != nil {
-			return sessionSchema{}, fmt.Errorf("scan session schema: %w", err)
-		}
+	for _, col := range columns {
 		switch {
-		case tableName == "sessions":
+		case col.table == "sessions":
 			schema.hasRegistry = true
-		case columnName == "session_id":
+		case col.column == "session_id":
 			hasSessionID = true
-		case columnName == "codex_session_id":
+		case col.column == "codex_session_id":
 			hasCodexSessionID = true
 		}
-	}
-	if err := rows.Err(); err != nil {
-		return sessionSchema{}, fmt.Errorf("iterate session schema: %w", err)
 	}
 	switch {
 	case hasSessionID && hasCodexSessionID:
@@ -643,20 +620,20 @@ func (r *Reporter) peakConcurrency(ctx context.Context, opts KPIOptions) (int64,
 		where = appendWherePredicate(where, provider.SQLForPath("path")+" != 'unknown'")
 	}
 
-	rows, err := r.store.DB().QueryContext(ctx, `SELECT started_at, completed_at
+	type interval struct{ start, end time.Time }
+	intervals, err := queryRows(ctx, r.store.DB(), "request intervals for peak concurrency",
+		`SELECT started_at, completed_at
 FROM requests
-`+where, args...)
+`+where, args, func(rows *sql.Rows, iv *interval) error {
+			return rows.Scan(&iv.start, &iv.end)
+		})
 	if err != nil {
-		return 0, fmt.Errorf("query request intervals for peak concurrency: %w", err)
+		return 0, err
 	}
-	defer rows.Close()
 
-	deltas := make(map[time.Time]int64)
-	for rows.Next() {
-		var start, end time.Time
-		if err := rows.Scan(&start, &end); err != nil {
-			return 0, fmt.Errorf("scan request interval for peak concurrency: %w", err)
-		}
+	deltas := make(map[time.Time]int64, 2*len(intervals))
+	for _, iv := range intervals {
+		start, end := iv.start, iv.end
 		if !opts.Since.IsZero() && start.Before(opts.Since) {
 			start = opts.Since
 		}
@@ -673,9 +650,6 @@ FROM requests
 		end = end.UTC()
 		deltas[start]++
 		deltas[end]--
-	}
-	if err := rows.Err(); err != nil {
-		return 0, fmt.Errorf("iterate request intervals for peak concurrency: %w", err)
 	}
 
 	times := make([]time.Time, 0, len(deltas))
@@ -704,25 +678,11 @@ func (r *Reporter) HistoricalByDay(ctx context.Context) ([]SummaryRow, error) {
 }
 
 func (r *Reporter) scanSummary(ctx context.Context, query string, args ...any) ([]SummaryRow, error) {
-	rows, err := r.store.DB().QueryContext(ctx, query, args...)
-	if err != nil {
-		return nil, fmt.Errorf("query summary: %w", err)
-	}
-	defer rows.Close()
-	var out []SummaryRow
-	for rows.Next() {
-		var row SummaryRow
-		if err := rows.Scan(&row.Day, &row.Provider, &row.Client, &row.Model, &row.Source, &row.Directory, &row.GitBranch,
+	return queryRows(ctx, r.store.DB(), "summary", query, args, func(rows *sql.Rows, row *SummaryRow) error {
+		return rows.Scan(&row.Day, &row.Provider, &row.Client, &row.Model, &row.Source, &row.Directory, &row.GitBranch,
 			&row.Requests, &row.Errors, &row.Input, &row.FreshInput, &row.Cached, &row.CacheWrite,
-			&row.Output, &row.Reasoning, &row.Total); err != nil {
-			return nil, fmt.Errorf("scan summary: %w", err)
-		}
-		out = append(out, row)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate summary: %w", err)
-	}
-	return out, nil
+			&row.Output, &row.Reasoning, &row.Total)
+	})
 }
 
 const DefaultInspectLimit = 20
@@ -735,30 +695,15 @@ func (r *Reporter) RecentRequests(ctx context.Context, limit int) ([]RecentReque
 	if limit <= 0 {
 		limit = DefaultRecentRequestLimit
 	}
-	rows, err := r.store.DB().QueryContext(ctx, `
+	return queryRows(ctx, r.store.DB(), "recent requests", `
 SELECT id, COALESCE(response_id, ''), started_at, `+provider.SQLForPath("path")+`, `+provider.ClientSQL()+`,
   COALESCE(model_reported, model_requested, ''), http_status, method, path
 FROM requests
 ORDER BY started_at DESC, id DESC
-LIMIT ?`, limit)
-	if err != nil {
-		return nil, fmt.Errorf("query recent requests: %w", err)
-	}
-	defer rows.Close()
-
-	out := make([]RecentRequestRow, 0, limit)
-	for rows.Next() {
-		var row RecentRequestRow
-		if err := rows.Scan(&row.ID, &row.ResponseID, &row.StartedAt, &row.Provider, &row.Client,
-			&row.Model, &row.HTTPStatus, &row.Method, &row.Path); err != nil {
-			return nil, fmt.Errorf("scan recent request: %w", err)
-		}
-		out = append(out, row)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate recent requests: %w", err)
-	}
-	return out, nil
+LIMIT ?`, []any{limit}, func(rows *sql.Rows, row *RecentRequestRow) error {
+		return rows.Scan(&row.ID, &row.ResponseID, &row.StartedAt, &row.Provider, &row.Client,
+			&row.Model, &row.HTTPStatus, &row.Method, &row.Path)
+	})
 }
 
 func (r *Reporter) Inspect(ctx context.Context, id string, limit int) ([]InspectRow, error) {
@@ -778,131 +723,37 @@ func (r *Reporter) RecentErrorsWithin(ctx context.Context, since, until time.Tim
 	return r.queryInspectRows(ctx, where, "started_at DESC", limit, args...)
 }
 
-// ToolCalls reports the most recent tool calls across requests. It deliberately
-// avoids a SQL JOIN between requests and tool_calls: a Quack-attached remote
-// catalog rejects queries that stream-scan two tables at once ("Multiple
-// streaming scans... not currently supported"), which a JOIN across those
-// tables triggers. Instead it fetches candidate requests and their tool calls
-// as two independent single-table scans and joins/orders/limits in Go,
-// expanding the request window until enough tool calls are gathered or the
-// requests are exhausted.
+// ToolCalls reports the most recent tool calls across requests, newest request
+// first and provider event order preserved within a request.
 func (r *Reporter) ToolCalls(ctx context.Context, opts ToolCallOptions) ([]ToolCallRow, error) {
 	limit := opts.Limit
 	if limit <= 0 {
 		limit = DefaultRecentToolCallLimit
 	}
 	where, args := timeRange("started_at", opts.Since, opts.Until)
-
-	const maxRequestWindow = 1 << 16
-	requestWindow := limit
-	var requests []toolCallRequest
-	for {
-		var err error
-		requests, err = r.candidateRequestsForToolCalls(ctx, where, args, requestWindow)
-		if err != nil {
-			return nil, err
-		}
-		out, err := r.joinRequestsToToolCalls(ctx, requests, limit, opts.CommandsOnly)
-		if err != nil {
-			return nil, err
-		}
-		if len(out) >= limit || len(requests) < requestWindow || requestWindow >= maxRequestWindow {
-			return out, nil
-		}
-		requestWindow *= 2
-	}
-}
-
-type toolCallRequest struct {
-	ID        string
-	Source    string
-	StartedAt time.Time
-	Provider  string
-	Client    string
-	Model     string
-}
-
-func (r *Reporter) candidateRequestsForToolCalls(ctx context.Context, where string, whereArgs []any, limit int) ([]toolCallRequest, error) {
-	args := append(slices.Clone(whereArgs), limit)
-	rows, err := r.store.DB().QueryContext(ctx, `
-SELECT id, COALESCE(source, 'unknown'), started_at, `+provider.SQLForPath("path")+`, `+provider.ClientSQL()+`,
-  COALESCE(model_reported, model_requested, 'unknown')
-FROM requests
-`+where+`
-ORDER BY started_at DESC LIMIT ?`, args...)
-	if err != nil {
-		return nil, fmt.Errorf("query candidate requests for tool calls: %w", err)
-	}
-	defer rows.Close()
-	out := make([]toolCallRequest, 0, limit)
-	for rows.Next() {
-		var req toolCallRequest
-		if err := rows.Scan(&req.ID, &req.Source, &req.StartedAt, &req.Provider, &req.Client, &req.Model); err != nil {
-			return nil, fmt.Errorf("scan candidate request for tool calls: %w", err)
-		}
-		out = append(out, req)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate candidate requests for tool calls: %w", err)
-	}
-	return out, nil
-}
-
-func (r *Reporter) joinRequestsToToolCalls(ctx context.Context, requests []toolCallRequest, limit int, commandsOnly bool) ([]ToolCallRow, error) {
-	if len(requests) == 0 {
-		return nil, nil
-	}
-	byID := make(map[string]toolCallRequest, len(requests))
-	ids := make([]any, len(requests))
-	placeholders := make([]string, len(requests))
-	for i, req := range requests {
-		byID[req.ID] = req
-		ids[i] = req.ID
-		placeholders[i] = "?"
-	}
-	query := `
+	return expandingJoin(ctx, r, where, args, limit,
+		func(ctx context.Context, requests []toolCallRequest, limit int) ([]ToolCallRow, error) {
+			filter := ""
+			if opts.CommandsOnly {
+				filter = `COALESCE(command, '') <> ''`
+			}
+			return joinChildRows(ctx, r, requests, limit, childRowQuery[ToolCallRow]{
+				label: "tool calls for candidate requests",
+				sql: `
 SELECT request_id, ordinal, COALESCE(tool_call_id, ''), name, COALESCE(command, ''), COALESCE(description, '')
-FROM tool_calls WHERE request_id IN (` + strings.Join(placeholders, ", ") + `)`
-	if commandsOnly {
-		query += ` AND COALESCE(command, '') <> ''`
-	}
-	rows, err := r.store.DB().QueryContext(ctx, query, ids...)
-	if err != nil {
-		return nil, fmt.Errorf("query tool calls for candidate requests: %w", err)
-	}
-	defer rows.Close()
-	byRequest := make(map[string][]ToolCallRow, len(requests))
-	for rows.Next() {
-		var (
-			requestID string
-			row       ToolCallRow
-		)
-		if err := rows.Scan(&requestID, &row.Ordinal, &row.ID, &row.Name, &row.Command, &row.Description); err != nil {
-			return nil, fmt.Errorf("scan tool call for candidate requests: %w", err)
-		}
-		req := byID[requestID]
-		row.RequestID = requestID
-		row.Source = req.Source
-		row.StartedAt = req.StartedAt
-		row.Provider = req.Provider
-		row.Client = req.Client
-		row.Model = req.Model
-		byRequest[requestID] = append(byRequest[requestID], row)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate tool calls for candidate requests: %w", err)
-	}
-
-	out := make([]ToolCallRow, 0, limit)
-	for _, req := range requests {
-		calls := byRequest[req.ID]
-		sort.Slice(calls, func(i, j int) bool { return calls[i].Ordinal < calls[j].Ordinal })
-		out = append(out, calls...)
-	}
-	if len(out) > limit {
-		out = out[:limit]
-	}
-	return out, nil
+FROM tool_calls`,
+				filter: filter,
+				scan: func(rows *sql.Rows, row *ToolCallRow) (string, error) {
+					err := rows.Scan(&row.RequestID, &row.Ordinal, &row.ID, &row.Name, &row.Command, &row.Description)
+					return row.RequestID, err
+				},
+				attach: func(row *ToolCallRow, req toolCallRequest) {
+					row.Source, row.StartedAt = req.Source, req.StartedAt
+					row.Provider, row.Client, row.Model = req.Provider, req.Client, req.Model
+				},
+				ordinal: func(row ToolCallRow) int { return row.Ordinal },
+			})
+		})
 }
 
 // WebRequests returns provider-reported web activity within the requested
@@ -913,81 +764,29 @@ func (r *Reporter) WebRequests(ctx context.Context, opts ToolCallOptions) ([]Web
 		limit = DefaultRecentToolCallLimit
 	}
 	where, args := timeRange("started_at", opts.Since, opts.Until)
-
-	// Quack cannot stream-scan requests and web_requests in one query, so use
-	// the same expanding two-scan strategy as ToolCalls and join the rows in Go.
-	const maxRequestWindow = 1 << 16
-	requestWindow := limit
-	for {
-		requests, err := r.candidateRequestsForToolCalls(ctx, where, args, requestWindow)
-		if err != nil {
-			return nil, err
-		}
-		out, err := r.joinRequestsToWebRequests(ctx, requests, limit)
-		if err != nil {
-			return nil, err
-		}
-		if len(out) >= limit || len(requests) < requestWindow || requestWindow >= maxRequestWindow {
-			return out, nil
-		}
-		requestWindow *= 2
-	}
-}
-
-func (r *Reporter) joinRequestsToWebRequests(ctx context.Context, requests []toolCallRequest, limit int) ([]WebRequestRow, error) {
-	if len(requests) == 0 {
-		return nil, nil
-	}
-	byID := make(map[string]toolCallRequest, len(requests))
-	ids := make([]any, len(requests))
-	placeholders := make([]string, len(requests))
-	for i, req := range requests {
-		byID[req.ID] = req
-		ids[i] = req.ID
-		placeholders[i] = "?"
-	}
-	rows, err := r.store.DB().QueryContext(ctx, `
+	return expandingJoin(ctx, r, where, args, limit,
+		func(ctx context.Context, requests []toolCallRequest, limit int) ([]WebRequestRow, error) {
+			return joinChildRows(ctx, r, requests, limit, childRowQuery[WebRequestRow]{
+				label: "web requests for candidate requests",
+				sql: `
 SELECT request_id, ordinal, COALESCE(web_request_id, ''), name,
   COALESCE(query, ''), COALESCE(url, ''), COALESCE(domain, ''), COALESCE(arguments_json, '')
-FROM web_requests WHERE request_id IN (`+strings.Join(placeholders, ", ")+`)`, ids...)
-	if err != nil {
-		return nil, fmt.Errorf("query web requests for candidate requests: %w", err)
-	}
-	defer rows.Close()
-	byRequest := make(map[string][]WebRequestRow, len(requests))
-	for rows.Next() {
-		var (
-			requestID string
-			row       WebRequestRow
-		)
-		if err := rows.Scan(&requestID, &row.Ordinal, &row.ID, &row.Name, &row.Query, &row.URL, &row.Domain, &row.ArgumentsJSON); err != nil {
-			return nil, fmt.Errorf("scan web request for candidate requests: %w", err)
-		}
-		if !provider.IsWebToolName(row.Name) {
-			continue
-		}
-		req := byID[requestID]
-		row.RequestID = requestID
-		row.StartedAt = req.StartedAt
-		row.Provider = req.Provider
-		row.Client = req.Client
-		row.Model = req.Model
-		byRequest[requestID] = append(byRequest[requestID], row)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate web requests for candidate requests: %w", err)
-	}
-
-	out := make([]WebRequestRow, 0, limit)
-	for _, req := range requests {
-		webRequests := byRequest[req.ID]
-		sort.Slice(webRequests, func(i, j int) bool { return webRequests[i].Ordinal < webRequests[j].Ordinal })
-		out = append(out, webRequests...)
-	}
-	if len(out) > limit {
-		out = out[:limit]
-	}
-	return out, nil
+FROM web_requests`,
+				scan: func(rows *sql.Rows, row *WebRequestRow) (string, error) {
+					err := rows.Scan(&row.RequestID, &row.Ordinal, &row.ID, &row.Name,
+						&row.Query, &row.URL, &row.Domain, &row.ArgumentsJSON)
+					return row.RequestID, err
+				},
+				// Older ledgers may hold forward-proxy rows that predate the
+				// write-side gate, so filter on read as well.
+				keep: func(row WebRequestRow) bool { return provider.IsWebToolName(row.Name) },
+				attach: func(row *WebRequestRow, req toolCallRequest) {
+					row.StartedAt = req.StartedAt
+					row.Provider, row.Client, row.Model = req.Provider, req.Client, req.Model
+				},
+				ordinal: func(row WebRequestRow) int { return row.Ordinal },
+			})
+		})
 }
 
 func (r *Reporter) queryInspectRows(ctx context.Context, whereClause, orderBy string, limit int, args ...any) ([]InspectRow, error) {
@@ -999,32 +798,24 @@ func (r *Reporter) queryInspectRows(ctx context.Context, whereClause, orderBy st
 	if schema.sessionExpression != "" {
 		sessionExpression = "COALESCE(" + schema.sessionExpression + ", '')"
 	}
-	rows, err := r.store.DB().QueryContext(ctx, buildInspectQuery(whereClause, orderBy, sessionExpression), append(args, limit)...)
+	// The row scan must fully complete before the per-request child queries
+	// below run: a Quack-attached remote catalog cannot stream-scan two tables
+	// at once, and queryRows closes its cursor before returning.
+	out, err := queryRows(ctx, r.store.DB(), "inspect",
+		buildInspectQuery(whereClause, orderBy, sessionExpression), append(args, limit),
+		func(rows *sql.Rows, row *InspectRow) error {
+			return rows.Scan(
+				&row.ID, &row.ResponseID, &row.Source, &row.Host, &row.StartedAt, &row.CompletedAt,
+				&row.DurationMS, &row.Method, &row.Path, &row.Provider, &row.UpstreamURL,
+				&row.ModelRequested, &row.ModelReported, &row.Stream, &row.HTTPStatus,
+				&row.UpstreamRequestID, &row.UserAgent, &row.Originator, &row.Client, &row.SessionID,
+				&row.Directory, &row.GitBranch,
+				&row.ErrorType, &row.ErrorMessage, &row.Input, &row.Cached, &row.CacheWrite,
+				&row.Output, &row.Reasoning, &row.Total, &row.UsageJSON,
+			)
+		})
 	if err != nil {
-		return nil, fmt.Errorf("query inspect: %w", err)
-	}
-	defer rows.Close()
-	var out []InspectRow
-	for rows.Next() {
-		var row InspectRow
-		if err := rows.Scan(
-			&row.ID, &row.ResponseID, &row.Source, &row.Host, &row.StartedAt, &row.CompletedAt,
-			&row.DurationMS, &row.Method, &row.Path, &row.Provider, &row.UpstreamURL,
-			&row.ModelRequested, &row.ModelReported, &row.Stream, &row.HTTPStatus,
-			&row.UpstreamRequestID, &row.UserAgent, &row.Originator, &row.Client, &row.SessionID,
-			&row.Directory, &row.GitBranch,
-			&row.ErrorType, &row.ErrorMessage, &row.Input, &row.Cached, &row.CacheWrite,
-			&row.Output, &row.Reasoning, &row.Total, &row.UsageJSON,
-		); err != nil {
-			return nil, fmt.Errorf("scan inspect: %w", err)
-		}
-		out = append(out, row)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate inspect: %w", err)
-	}
-	if err := rows.Close(); err != nil {
-		return nil, fmt.Errorf("close inspect rows: %w", err)
+		return nil, err
 	}
 	for i := range out {
 		calls, err := r.toolCalls(ctx, out[i].ID)
@@ -1042,52 +833,30 @@ func (r *Reporter) queryInspectRows(ctx context.Context, whereClause, orderBy st
 }
 
 func (r *Reporter) toolCalls(ctx context.Context, requestID string) ([]ToolCall, error) {
-	rows, err := r.store.DB().QueryContext(ctx, `SELECT ordinal, COALESCE(tool_call_id, ''), name,
+	return queryRows(ctx, r.store.DB(), "tool calls for request "+requestID,
+		`SELECT ordinal, COALESCE(tool_call_id, ''), name,
  COALESCE(command, ''), COALESCE(description, ''), COALESCE(arguments_json, '')
-FROM tool_calls WHERE request_id = ? ORDER BY ordinal`, requestID)
-	if err != nil {
-		return nil, fmt.Errorf("query tool calls for request %s: %w", requestID, err)
-	}
-	defer rows.Close()
-	var out []ToolCall
-	for rows.Next() {
-		var call ToolCall
-		if err := rows.Scan(&call.Ordinal, &call.ID, &call.Name, &call.Command, &call.Description, &call.ArgumentsJSON); err != nil {
-			return nil, fmt.Errorf("scan tool call for request %s: %w", requestID, err)
-		}
-		out = append(out, call)
-	}
-	return out, rows.Err()
+FROM tool_calls WHERE request_id = ? ORDER BY ordinal`,
+		[]any{requestID}, func(rows *sql.Rows, call *ToolCall) error {
+			return rows.Scan(&call.Ordinal, &call.ID, &call.Name, &call.Command, &call.Description, &call.ArgumentsJSON)
+		})
 }
 
 func (r *Reporter) webRequests(ctx context.Context, requestID string) ([]WebRequest, error) {
-	rows, err := r.store.DB().QueryContext(ctx, `
+	return queryRowsInto(ctx, r.store.DB(), "web requests for request "+requestID, `
 SELECT ordinal, COALESCE(web_request_id, ''), name,
   COALESCE(query, ''), COALESCE(url, ''), COALESCE(domain, ''), COALESCE(arguments_json, '')
 FROM web_requests
 WHERE request_id = ?
-ORDER BY ordinal`, requestID)
-	if err != nil {
-		return nil, fmt.Errorf("query web requests for request %s: %w", requestID, err)
-	}
-	defer rows.Close()
-
-	var out []WebRequest
-	for rows.Next() {
-		var request WebRequest
+ORDER BY ordinal`, []any{requestID}, func(rows *sql.Rows, request *WebRequest) (bool, error) {
 		if err := rows.Scan(&request.Ordinal, &request.ID, &request.Name, &request.Query,
 			&request.URL, &request.Domain, &request.ArgumentsJSON); err != nil {
-			return nil, fmt.Errorf("scan web request for request %s: %w", requestID, err)
+			return false, err
 		}
-		if !provider.IsWebToolName(request.Name) {
-			continue
-		}
-		out = append(out, request)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate web requests for request %s: %w", requestID, err)
-	}
-	return out, nil
+		// Older ledgers can hold forward-proxy rows recorded before the
+		// write-side gate existed, so filter them out on read too.
+		return provider.IsWebToolName(request.Name), nil
+	})
 }
 
 func summaryGrouping(groupBy string) (selectGroup, groupExpr, orderBy string, err error) {

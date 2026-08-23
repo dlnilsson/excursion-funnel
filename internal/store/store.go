@@ -612,21 +612,31 @@ WHERE table_name = ? AND constraint_type = 'PRIMARY KEY'`, table).Scan(&count); 
 }
 
 func orderedColumns(db *sql.DB, table string) ([]string, error) {
-	rows, err := db.Query(`SELECT column_name FROM information_schema.columns
+	cols, err := scanStrings(db, `SELECT column_name FROM information_schema.columns
 WHERE table_name = ? ORDER BY ordinal_position`, table)
 	if err != nil {
 		return nil, fmt.Errorf("read columns for %s: %w", table, err)
 	}
-	defer rows.Close()
-	var cols []string
-	for rows.Next() {
-		var name string
-		if err := rows.Scan(&name); err != nil {
-			return nil, fmt.Errorf("scan column for %s: %w", table, err)
-		}
-		cols = append(cols, name)
+	return cols, nil
+}
+
+// scanStrings runs a single-column query and collects every value. The schema
+// probes in this file all have that shape.
+func scanStrings(db *sql.DB, query string, args ...any) ([]string, error) {
+	rows, err := db.Query(query, args...)
+	if err != nil {
+		return nil, err
 	}
-	return cols, rows.Err()
+	defer rows.Close()
+	var values []string
+	for rows.Next() {
+		var value string
+		if err := rows.Scan(&value); err != nil {
+			return nil, err
+		}
+		values = append(values, value)
+	}
+	return values, rows.Err()
 }
 
 func validateSchema(db *sql.DB) error {
@@ -688,24 +698,16 @@ func addColumnIfMissing(db *sql.DB, table, column, columnType string) error {
 }
 
 func tableColumns(db *sql.DB, table string) (map[string]bool, error) {
-	rows, err := db.Query(`SELECT column_name FROM information_schema.columns WHERE table_name = ?`, table)
+	names, err := scanStrings(db, `SELECT column_name FROM information_schema.columns WHERE table_name = ?`, table)
 	if err != nil {
 		return nil, fmt.Errorf("read table info %s: %w", table, err)
 	}
-	defer rows.Close()
-	cols := map[string]bool{}
-	for rows.Next() {
-		var name string
-		if err := rows.Scan(&name); err != nil {
-			return nil, fmt.Errorf("scan table info %s: %w", table, err)
-		}
-		cols[strings.ToLower(name)] = true
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate table info %s: %w", table, err)
-	}
-	if len(cols) == 0 {
+	if len(names) == 0 {
 		return nil, fmt.Errorf("table %q does not exist", table)
+	}
+	cols := make(map[string]bool, len(names))
+	for _, name := range names {
+		cols[strings.ToLower(name)] = true
 	}
 	return cols, nil
 }
