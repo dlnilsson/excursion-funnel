@@ -785,6 +785,7 @@
   <table id="summary-table">
     <thead><tr><th>Client</th><th>Model</th><th>Requests</th><th>Errors</th><th>Input</th><th>Cached</th><th>Cache write</th><th>Output</th><th>Reasoning</th><th>Total</th></tr></thead>
     <tbody></tbody>
+    <tfoot><tr><th colspan="2">Total</th><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td></tr></tfoot>
   </table>
 </details>
 
@@ -1336,10 +1337,28 @@ function renderStats(rows, kpis, sessions) {
 
 function renderSummary(rows) {
   const tbody = document.querySelector("#summary-table tbody");
+  const tfoot = document.querySelector("#summary-table tfoot");
   if (rows.length === 0) {
     tbody.innerHTML = '<tr><td colspan="10" class="empty">No requests recorded today</td></tr>';
+    tfoot.hidden = true;
     return;
   }
+  const totals = rows.reduce((summary, row) => {
+    summary.Requests += Number(row.Requests) || 0;
+    summary.Errors += Number(row.Errors) || 0;
+    summary.Input += Number(freshInput(row)) || 0;
+    summary.Cached += Number(row.Cached) || 0;
+    summary.CacheWrite += Number(row.CacheWrite) || 0;
+    summary.Output += Number(row.Output) || 0;
+    summary.Reasoning += Number(row.Reasoning) || 0;
+    summary.Total += Number(row.Total) || 0;
+    return summary;
+  }, { Requests: 0, Errors: 0, Input: 0, Cached: 0, CacheWrite: 0, Output: 0, Reasoning: 0, Total: 0 });
+  tfoot.hidden = false;
+  tfoot.innerHTML = `<tr>
+    <th colspan="2">Total</th><td>${totals.Requests.toLocaleString()}</td><td>${totals.Errors.toLocaleString()}</td>
+    ${tokenCell(totals.Input)}${tokenCell(totals.Cached)}${tokenCell(totals.CacheWrite)}${tokenCell(totals.Output)}${tokenCell(totals.Reasoning)}${tokenCell(totals.Total)}
+  </tr>`;
   tbody.innerHTML = rows.map(r => `<tr>
     <td>${escapeHTML(clientLabel(r))}</td><td>${escapeHTML(r.Model)}</td><td>${r.Requests}</td><td>${r.Errors}</td>
     ${tokenCell(freshInput(r))}${tokenCell(r.Cached)}${tokenCell(r.CacheWrite)}${tokenCell(r.Output)}${tokenCell(r.Reasoning)}${tokenCell(r.Total)}
