@@ -845,6 +845,7 @@
   <table id="model-activity-table">
     <thead><tr><th>Model</th><th>Input tokens</th><th>Output tokens</th><th>Total tokens</th><th>Requests</th><th>Avg tokens/request</th><th>Share</th></tr></thead>
     <tbody></tbody>
+    <tfoot><tr><th>Total</th><td></td><td></td><td></td><td></td><td></td><td></td></tr></tfoot>
   </table>
 </details>
 
@@ -1710,15 +1711,29 @@ function renderHistoryStackedChart(rows) {
 function renderModelActivityTable(rows) {
   const modelRows = aggregateModelActivityRows(rows);
   const topRows = modelRows.sort((a, b) => b.Total - a.Total).slice(0, 12);
-  const total = modelRows.reduce((sum, r) => sum + r.Total, 0);
+  const totals = modelRows.reduce((summary, row) => {
+    summary.Input += row.Input;
+    summary.Output += row.Output;
+    summary.Total += row.Total;
+    summary.Requests += row.Requests;
+    return summary;
+  }, { Input: 0, Output: 0, Total: 0, Requests: 0 });
   const tbody = document.querySelector("#model-activity-table tbody");
+  const tfoot = document.querySelector("#model-activity-table tfoot");
   if (topRows.length === 0) {
     tbody.innerHTML = '<tr><td colspan="7" class="empty">No model history yet</td></tr>';
+    tfoot.hidden = true;
     return;
   }
+  tfoot.hidden = false;
+  const average = totals.Requests > 0 ? Math.round(totals.Total / totals.Requests) : 0;
+  tfoot.innerHTML = `<tr>
+    <th>Total</th>${tokenCell(totals.Input)}${tokenCell(totals.Output)}${tokenCell(totals.Total)}
+    <td>${totals.Requests.toLocaleString()}</td><td>${average.toLocaleString()}</td><td>100.0%</td>
+  </tr>`;
   tbody.innerHTML = topRows.map(r => {
     const average = r.Requests > 0 ? Math.round(r.Total / r.Requests) : 0;
-    const share = total > 0 ? `${(100 * r.Total / total).toFixed(1)}%` : "0.0%";
+    const share = totals.Total > 0 ? `${(100 * r.Total / totals.Total).toFixed(1)}%` : "0.0%";
     return `<tr>
       <td>${escapeHTML(modelLabel(r))}</td>${tokenCell(r.Input)}${tokenCell(r.Output)}${tokenCell(r.Total)}
       <td>${r.Requests.toLocaleString()}</td><td>${average.toLocaleString()}</td><td>${share}</td>
