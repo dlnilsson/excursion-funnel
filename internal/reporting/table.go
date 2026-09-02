@@ -15,6 +15,8 @@ import (
 type Table struct {
 	Headers []string
 	Rows    [][]string
+	// FooterRows styles the final number of rows as a table footer.
+	FooterRows int
 	// BorderRow draws a separator between data rows. Wrapping tables need it to
 	// keep multi-line cells distinguishable; compact tables read better without.
 	BorderRow bool
@@ -44,6 +46,9 @@ func RenderTable(out io.Writer, t Table) error {
 			style := cellStyle
 			if row == table.HeaderRow {
 				style = headerStyle
+			}
+			if t.FooterRows > 0 && row >= len(t.Rows)-t.FooterRows {
+				style = style.Bold(true)
 			}
 			if t.RightAlign != nil && t.RightAlign(column) {
 				style = style.Align(lipgloss.Right)

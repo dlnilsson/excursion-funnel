@@ -70,7 +70,7 @@ func TestPrintRowsRendersEveryGroupingAsTable(t *testing.T) {
 				t.Fatalf("redirected output contains ANSI escapes: %q", text)
 			}
 			lines := strings.Split(strings.TrimSuffix(text, "\n"), "\n")
-			if len(lines) != 5 || !strings.HasPrefix(lines[0], "╭") || !strings.HasSuffix(lines[0], "╮") ||
+			if len(lines) != 6 || !strings.HasPrefix(lines[0], "╭") || !strings.HasSuffix(lines[0], "╮") ||
 				!strings.HasPrefix(lines[len(lines)-1], "╰") || !strings.HasSuffix(lines[len(lines)-1], "╯") {
 				t.Fatalf("output does not have the expected compact rounded table shape:\n%s", text)
 			}
@@ -94,8 +94,8 @@ func TestPrintRowsRightAlignsNumbersWithoutRowSeparators(t *testing.T) {
 	}
 
 	lines := strings.Split(strings.TrimSuffix(output.String(), "\n"), "\n")
-	if len(lines) != 6 {
-		t.Fatalf("line count = %d, want 6 without data-row separators:\n%s", len(lines), output.String())
+	if len(lines) != 7 {
+		t.Fatalf("line count = %d, want 7 without data-row separators:\n%s", len(lines), output.String())
 	}
 	firstCells := strings.Split(lines[3], "│")
 	secondCells := strings.Split(lines[4], "│")
@@ -104,6 +104,46 @@ func TestPrintRowsRightAlignsNumbersWithoutRowSeparators(t *testing.T) {
 	}
 	if first := strings.Index(firstCells[2], "1"); first <= strings.Index(secondCells[2], "1000") {
 		t.Fatalf("REQ values are not right-aligned: %q and %q", firstCells[2], secondCells[2])
+	}
+}
+
+func TestPrintRowsAppendsGrandTotals(t *testing.T) {
+	rows := []report.SummaryRow{
+		{Provider: "openai", Requests: 1, Errors: 2, FreshInput: 3, Cached: 4, CacheWrite: 5, Output: 6, Reasoning: 7, Total: 8},
+		{Provider: "anthropic", Requests: 10, Errors: 20, FreshInput: 30, Cached: 40, CacheWrite: 50, Output: 60, Reasoning: 70, Total: 80},
+	}
+	var output bytes.Buffer
+	if err := printRows(&output, rows, "provider"); err != nil {
+		t.Fatal(err)
+	}
+
+	text := output.String()
+	for _, want := range []string{"TOTAL", "11", "22", "33", "44", "55", "66", "77", "88"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("output missing total %q:\n%s", want, text)
+		}
+	}
+}
+
+func TestSummaryTotalRowCompactsTokenCounts(t *testing.T) {
+	columns := summaryColumns("provider")
+	got := summaryTotalRow(columns, []report.SummaryRow{{
+		Requests:   1_000,
+		Errors:     1_000_000,
+		FreshInput: 1_000,
+		Cached:     1_000_000,
+		CacheWrite: 1_000_000_000,
+		Output:     1_500,
+		Reasoning:  1_500_000,
+		Total:      1_500_000_000,
+	}})
+	want := []string{"TOTAL", "1000", "1000000", "1.0k", "1.0M", "1.0B", "1.5k", "1.5M", "1.5B"}
+	var (
+		gotText  = strings.Join(got, ",")
+		wantText = strings.Join(want, ",")
+	)
+	if gotText != wantText {
+		t.Errorf("summaryTotalRow() = %s, want %s", gotText, wantText)
 	}
 }
 

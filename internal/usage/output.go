@@ -10,9 +10,10 @@ import (
 )
 
 type summaryColumn struct {
-	header  string
-	value   func(report.SummaryRow) string
-	numeric bool
+	header      string
+	value       func(report.SummaryRow) string
+	footerValue func(report.SummaryRow) string
+	numeric     bool
 }
 
 func printJSON(out io.Writer, rows []report.SummaryRow) error {
@@ -40,12 +41,41 @@ func printRows(out io.Writer, rows []report.SummaryRow, groupBy string) error {
 		}
 		values = append(values, cells)
 	}
+	values = append(values, summaryTotalRow(columns, rows))
 
 	return reporting.RenderTable(out, reporting.Table{
 		Headers:    headers,
 		Rows:       values,
+		FooterRows: 1,
 		RightAlign: func(column int) bool { return numeric[column] },
 	})
+}
+
+func summaryTotalRow(columns []summaryColumn, rows []report.SummaryRow) []string {
+	var total report.SummaryRow
+	for _, row := range rows {
+		total.Requests += row.Requests
+		total.Errors += row.Errors
+		total.Input += row.Input
+		total.FreshInput += row.FreshInput
+		total.Cached += row.Cached
+		total.CacheWrite += row.CacheWrite
+		total.Output += row.Output
+		total.Reasoning += row.Reasoning
+		total.Total += row.Total
+	}
+
+	cells := make([]string, len(columns))
+	for index, column := range columns {
+		if index == 0 {
+			cells[index] = "TOTAL"
+			continue
+		}
+		if column.footerValue != nil {
+			cells[index] = column.footerValue(total)
+		}
+	}
+	return cells
 }
 
 func summaryColumns(groupBy string) []summaryColumn {
@@ -54,23 +84,29 @@ func summaryColumns(groupBy string) []summaryColumn {
 	}
 	number := func(header string, value func(report.SummaryRow) int64) summaryColumn {
 		return summaryColumn{
-			header:  header,
-			numeric: true,
+			header:      header,
+			footerValue: func(row report.SummaryRow) string { return strconv.FormatInt(value(row), 10) },
+			numeric:     true,
 			value: func(row report.SummaryRow) string {
 				return strconv.FormatInt(value(row), 10)
 			},
 		}
 	}
+	tokenCount := func(header string, value func(report.SummaryRow) int64) summaryColumn {
+		column := number(header, value)
+		column.footerValue = func(row report.SummaryRow) string { return formatTokenCount(value(row)) }
+		return column
+	}
 
 	usage := []summaryColumn{
 		number("REQ", func(row report.SummaryRow) int64 { return row.Requests }),
 		number("ERR", func(row report.SummaryRow) int64 { return row.Errors }),
-		number("INPUT", func(row report.SummaryRow) int64 { return row.FreshInput }),
-		number("CACHED", func(row report.SummaryRow) int64 { return row.Cached }),
-		number("CACHE_WRITE", func(row report.SummaryRow) int64 { return row.CacheWrite }),
-		number("OUTPUT", func(row report.SummaryRow) int64 { return row.Output }),
-		number("REASONING", func(row report.SummaryRow) int64 { return row.Reasoning }),
-		number("TOTAL", func(row report.SummaryRow) int64 { return row.Total }),
+		tokenCount("INPUT", func(row report.SummaryRow) int64 { return row.FreshInput }),
+		tokenCount("CACHED", func(row report.SummaryRow) int64 { return row.Cached }),
+		tokenCount("CACHE_WRITE", func(row report.SummaryRow) int64 { return row.CacheWrite }),
+		tokenCount("OUTPUT", func(row report.SummaryRow) int64 { return row.Output }),
+		tokenCount("REASONING", func(row report.SummaryRow) int64 { return row.Reasoning }),
+		tokenCount("TOTAL", func(row report.SummaryRow) int64 { return row.Total }),
 	}
 
 	var dimensions []summaryColumn
@@ -99,4 +135,17 @@ func summaryColumns(groupBy string) []summaryColumn {
 	}
 
 	return append(dimensions, usage...)
+}
+
+func formatTokenCount(value int64) string {
+	switch {
+	case value > -1_000 && value < 1_000:
+		return strconv.FormatInt(value, 10)
+	case value > -1_000_000 && value < 1_000_000:
+		return fmt.Sprintf("%.1fk", float64(value)/1_000)
+	case value > -1_000_000_000 && value < 1_000_000_000:
+		return fmt.Sprintf("%.1fM", float64(value)/1_000_000)
+	default:
+		return fmt.Sprintf("%.1fB", float64(value)/1_000_000_000)
+	}
 }
