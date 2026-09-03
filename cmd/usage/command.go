@@ -3,11 +3,9 @@ package usage
 
 import (
 	"io"
-	"os"
 
 	"github.com/dlnilsson/excursion-funnel/cmd/loading"
 	"github.com/dlnilsson/excursion-funnel/cmd/reportflags"
-	"github.com/dlnilsson/excursion-funnel/internal/config"
 	appusage "github.com/dlnilsson/excursion-funnel/internal/usage"
 	"github.com/spf13/cobra"
 )
@@ -47,13 +45,6 @@ func New() *cobra.Command {
 
 func run(opts *options, today bool) func(*cobra.Command, []string) error {
 	return func(cmd *cobra.Command, _ []string) error {
-		source := ""
-		if !opts.all {
-			source = os.Getenv("EF_SOURCE")
-			if source == "" {
-				source = config.Default().Source
-			}
-		}
 		appOpts := appusage.Options{
 			Connection: opts.connection.Resolve(cmd.Flags()),
 			Since:      opts.since,
@@ -61,7 +52,7 @@ func run(opts *options, today bool) func(*cobra.Command, []string) error {
 			GroupBy:    opts.groupBy,
 			Directory:  opts.directory,
 			Branch:     opts.branch,
-			Source:     source,
+			Source:     reportflags.CurrentSource(opts.all),
 			JSON:       opts.json,
 			Today:      today,
 		}

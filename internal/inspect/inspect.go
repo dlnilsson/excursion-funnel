@@ -15,6 +15,7 @@ import (
 type Options struct {
 	Connection reporting.Connection
 	Limit      int
+	Source     string
 }
 
 // Run opens a recent-request picker when id is empty, otherwise it queries and
@@ -29,7 +30,7 @@ func Run(ctx context.Context, in io.Reader, out io.Writer, id string, opts Optio
 	}
 	defer reporter.Close()
 	if id == "" {
-		rows, err := reporter.RecentRequests(ctx, report.DefaultRecentRequestLimit)
+		rows, err := reporter.RecentRequests(ctx, report.DefaultRecentRequestLimit, opts.Source)
 		if err != nil {
 			return err
 		}
@@ -45,11 +46,11 @@ func Run(ctx context.Context, in io.Reader, out io.Writer, id string, opts Optio
 			return err
 		}
 	}
-	return printInspect(ctx, out, reporter, id, opts.Limit)
+	return printInspect(ctx, out, reporter, id, opts.Limit, opts.Source)
 }
 
-func printInspect(ctx context.Context, out io.Writer, reporter *report.Reporter, id string, limit int) error {
-	rows, err := reporter.Inspect(ctx, id, limit+1)
+func printInspect(ctx context.Context, out io.Writer, reporter *report.Reporter, id string, limit int, source string) error {
+	rows, err := reporter.Inspect(ctx, id, limit+1, source)
 	if err != nil {
 		return err
 	}

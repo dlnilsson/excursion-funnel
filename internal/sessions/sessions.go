@@ -17,6 +17,7 @@ type Options struct {
 	Until      string
 	GroupBy    string
 	Shortcut   string
+	Source     string
 	JSON       bool
 }
 
@@ -43,7 +44,7 @@ func Run(ctx context.Context, out io.Writer, opts Options) error {
 	defer reporter.Close()
 
 	rows, err := reporter.Sessions(ctx, report.SessionOptions{
-		Since: window.Since, Until: window.Until, GroupBy: groupBy,
+		Since: window.Since, Until: window.Until, GroupBy: groupBy, Source: opts.Source,
 	})
 	if err != nil {
 		return err

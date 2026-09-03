@@ -255,6 +255,18 @@ ef usage
 # Usage from every source.
 ef usage --all
 
+# Other reports also default to the current EF_SOURCE.
+ef requests today
+ef sessions today
+ef tools today
+ef inspect
+
+# Add --all to any report to include every source.
+ef requests today --all
+ef sessions today --all
+ef tools today --all
+ef inspect --all
+
 # Today's usage only.
 ef usage today
 

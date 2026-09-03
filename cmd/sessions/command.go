@@ -15,6 +15,7 @@ type options struct {
 	since      string
 	until      string
 	groupBy    string
+	all        bool
 	json       bool
 }
 
@@ -23,6 +24,7 @@ func New() *cobra.Command {
 	opts := options{connection: reportflags.New(), groupBy: "day"}
 	cmd := &cobra.Command{Use: "sessions", Short: "Summarize sessions started and used", Args: cobra.NoArgs}
 	opts.connection.Bind(cmd.PersistentFlags())
+	cmd.PersistentFlags().BoolVar(&opts.all, "all", false, "include sessions recorded from all sources")
 	cmd.PersistentFlags().BoolVar(&opts.json, "json", false, "print the summary as JSON")
 	cmd.Flags().StringVar(&opts.since, "since", "", "start date, inclusive (YYYY-MM-DD)")
 	cmd.Flags().StringVar(&opts.until, "until", "", "end date, inclusive (YYYY-MM-DD)")
@@ -43,6 +45,7 @@ func run(opts *options, shortcut string) func(*cobra.Command, []string) error {
 			Until:      opts.until,
 			GroupBy:    opts.groupBy,
 			Shortcut:   shortcut,
+			Source:     reportflags.CurrentSource(opts.all),
 			JSON:       opts.json,
 		}
 		return loading.RunBuffered(cmd.Context(), cmd.OutOrStdout(), cmd.ErrOrStderr(), appOpts.JSON,

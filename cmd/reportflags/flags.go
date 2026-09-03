@@ -44,3 +44,14 @@ func (f *Flags) Resolve(fs *pflag.FlagSet) reporting.Connection {
 	}
 	return connection
 }
+
+// CurrentSource returns the configured source filter unless all sources were requested.
+func CurrentSource(all bool) string {
+	if all {
+		return ""
+	}
+	if source := os.Getenv("EF_SOURCE"); source != "" {
+		return source
+	}
+	return config.Default().Source
+}

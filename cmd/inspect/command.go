@@ -11,6 +11,7 @@ import (
 type options struct {
 	connection *reportflags.Flags
 	limit      int
+	all        bool
 }
 
 // New creates the inspect command.
@@ -23,6 +24,7 @@ func New() *cobra.Command {
 	}
 	opts.connection.Bind(cmd.Flags())
 	cmd.Flags().IntVar(&opts.limit, "limit", opts.limit, "maximum matching requests to print when an ID is provided")
+	cmd.Flags().BoolVar(&opts.all, "all", false, "include requests recorded from all sources")
 	cmd.RunE = func(cmd *cobra.Command, args []string) error {
 		id := ""
 		if len(args) == 1 {
@@ -31,6 +33,7 @@ func New() *cobra.Command {
 		return appinspect.Run(cmd.Context(), cmd.InOrStdin(), cmd.OutOrStdout(), id, appinspect.Options{
 			Connection: opts.connection.Resolve(cmd.Flags()),
 			Limit:      opts.limit,
+			Source:     reportflags.CurrentSource(opts.all),
 		})
 	}
 	return cmd

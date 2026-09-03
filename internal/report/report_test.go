@@ -265,7 +265,7 @@ func TestSessions_LegacySchemaThroughQuack(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertSessionRow(t, rows, "2026-08-03", "openai", 1, 1)
-	inspected, err := reporter.Inspect(t.Context(), "legacy-remote", 1)
+	inspected, err := reporter.Inspect(t.Context(), "legacy-remote", 1, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -490,7 +490,7 @@ func TestKPIs_QuackRemote(t *testing.T) {
 		stats.Anthropic.CacheWriteUnclassifiedTokens != 10 {
 		t.Fatalf("remote Anthropic KPI stats = %+v, want thinking=10 cache=100/40/50/10", stats.Anthropic)
 	}
-	recent, err := rep.RecentRequests(t.Context(), 1)
+	recent, err := rep.RecentRequests(t.Context(), 1, "")
 	if err != nil {
 		t.Fatalf("remote RecentRequests() error = %v", err)
 	}
@@ -567,7 +567,7 @@ func TestSummary_GroupsAndFiltersByProjectContext(t *testing.T) {
 		t.Fatalf("git branch rows = %+v", branches)
 	}
 
-	rows, err := rep.Inspect(t.Context(), "feature-api", 1)
+	rows, err := rep.Inspect(t.Context(), "feature-api", 1, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -686,7 +686,7 @@ func TestInspect_FindsByResponseID(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = r.Close() })
 
-	rows, err := r.Inspect(t.Context(), "resp-openai-1", 0)
+	rows, err := r.Inspect(t.Context(), "resp-openai-1", 0, "")
 	if err != nil {
 		t.Fatalf("Inspect() error = %v", err)
 	}
@@ -711,7 +711,7 @@ func TestRecentRequests_ReturnsNewestLightweightRows(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = r.Close() })
 
-	rows, err := r.RecentRequests(t.Context(), 2)
+	rows, err := r.RecentRequests(t.Context(), 2, "")
 	if err != nil {
 		t.Fatalf("RecentRequests() error = %v", err)
 	}
@@ -764,7 +764,7 @@ func TestInspect_IncludesToolCalls(t *testing.T) {
 		t.Fatalf("OpenWithHubKey() error = %v", err)
 	}
 	t.Cleanup(func() { _ = r.Close() })
-	rows, err := r.Inspect(t.Context(), "resp-tool", 1)
+	rows, err := r.Inspect(t.Context(), "resp-tool", 1, "")
 	if err != nil {
 		t.Fatalf("Inspect() error = %v", err)
 	}
@@ -936,7 +936,7 @@ func TestInspect_IncludesWebRequests(t *testing.T) {
 		t.Fatalf("OpenWithHubKey() error = %v", err)
 	}
 	t.Cleanup(func() { _ = r.Close() })
-	rows, err := r.Inspect(t.Context(), "resp-web", 1)
+	rows, err := r.Inspect(t.Context(), "resp-web", 1, "")
 	if err != nil {
 		t.Fatalf("Inspect() error = %v", err)
 	}
@@ -1026,7 +1026,7 @@ func TestNew_ReusesExistingStore(t *testing.T) {
 	t.Cleanup(func() { _ = st.Close() })
 
 	r := New(st)
-	rows, err := r.Inspect(t.Context(), "resp-openai-1", 0)
+	rows, err := r.Inspect(t.Context(), "resp-openai-1", 0, "")
 	if err != nil {
 		t.Fatalf("Inspect() error = %v", err)
 	}
@@ -1115,6 +1115,55 @@ func seedReportDBWithError(t *testing.T) string {
 		t.Fatalf("InsertBatch() error = %v", err)
 	}
 	return dbPath
+}
+
+func TestSourceFilters(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "usage.duckdb")
+	st, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	total := int64(14)
+	started := time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC)
+	if err := st.InsertBatch(t.Context(), []queue.UsageEvent{
+		{
+			RequestID: "daniel-request", Source: "daniel", SessionID: "daniel-session", StartedAt: started,
+			Method: "POST", Path: "/v1/responses", UpstreamURL: "/", Usage: queue.Usage{TotalTokens: &total},
+			ToolCalls:   []queue.ToolCall{{Name: "Bash", Command: "go test ./..."}},
+			WebRequests: []queue.WebRequest{{Name: "web_search_call", Query: "Go release"}},
+		},
+		{
+			RequestID: "teammate-request", Source: "teammate", SessionID: "teammate-session", StartedAt: started.Add(time.Minute),
+			Method: "POST", Path: "/v1/responses", UpstreamURL: "/", Usage: queue.Usage{TotalTokens: &total},
+			ToolCalls:   []queue.ToolCall{{Name: "Bash", Command: "go vet ./..."}},
+			WebRequests: []queue.WebRequest{{Name: "web_search_call", Query: "DuckDB"}},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	reporter := New(st)
+
+	webRequests, err := reporter.WebRequests(t.Context(), ToolCallOptions{Source: "daniel"})
+	if err != nil || len(webRequests) != 1 || webRequests[0].RequestID != "daniel-request" {
+		t.Fatalf("WebRequests() = %+v, %v", webRequests, err)
+	}
+	toolCalls, err := reporter.ToolCalls(t.Context(), ToolCallOptions{Source: "daniel"})
+	if err != nil || len(toolCalls) != 1 || toolCalls[0].RequestID != "daniel-request" {
+		t.Fatalf("ToolCalls() = %+v, %v", toolCalls, err)
+	}
+	sessions, err := reporter.Sessions(t.Context(), SessionOptions{Source: "daniel"})
+	if err != nil || len(sessions) != 1 || sessions[0].Started != 1 || sessions[0].Used != 1 {
+		t.Fatalf("Sessions() = %+v, %v", sessions, err)
+	}
+	recent, err := reporter.RecentRequests(t.Context(), 10, "daniel")
+	if err != nil || len(recent) != 1 || recent[0].ID != "daniel-request" {
+		t.Fatalf("RecentRequests() = %+v, %v", recent, err)
+	}
+	inspected, err := reporter.Inspect(t.Context(), "teammate-request", 1, "daniel")
+	if err != nil || len(inspected) != 0 {
+		t.Fatalf("Inspect() = %+v, %v", inspected, err)
+	}
 }
 
 func seedReportDB(t *testing.T) string {

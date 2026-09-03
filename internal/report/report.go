@@ -216,6 +216,7 @@ type SessionOptions struct {
 	Since   time.Time
 	Until   time.Time
 	GroupBy string
+	Source  string
 }
 
 // SessionRow contains distinct session lifecycle counts for one provider and
@@ -335,9 +336,10 @@ type WebRequestRow struct {
 // ToolCallOptions controls a tool-call query. Since is inclusive and Until is
 // exclusive, matching the usage-reporting date range semantics.
 type ToolCallOptions struct {
-	Since time.Time
-	Until time.Time
-	Limit int
+	Since  time.Time
+	Until  time.Time
+	Limit  int
+	Source string
 	// CommandsOnly excludes tool calls whose command is empty.
 	CommandsOnly bool
 }
@@ -514,19 +516,27 @@ func (r *Reporter) Sessions(ctx context.Context, opts SessionOptions) ([]Session
 FROM sessions
 ` + startedWhere + `
 GROUP BY period, provider`
-	if !schema.hasRegistry {
+	if !schema.hasRegistry || opts.Source != "" {
+		sourceWhere := ""
+		var sourceArgs []any
+		if opts.Source != "" {
+			sourceWhere = "WHERE COALESCE(source, 'unknown') = ?"
+			sourceArgs = []any{opts.Source}
+		}
 		startedQuery = `SELECT ` + periodFromFirstSeen + ` AS period, provider, COUNT(*)
 FROM (
   SELECT provider, session_id, MIN(started_at) AS first_seen_at
   FROM (
     SELECT ` + provider.SQLForPath("path") + ` AS provider, ` + schema.sessionExpression + ` AS session_id, started_at
     FROM requests
+    ` + sourceWhere + `
   ) observations
   WHERE session_id IS NOT NULL AND session_id != '' AND provider != 'unknown'
   GROUP BY provider, session_id
 ) legacy_sessions
 ` + startedWhere + `
 GROUP BY period, provider`
+		startedArgs = append(sourceArgs, startedArgs...)
 	}
 	// Each scan must finish before the next begins: a Quack-attached remote
 	// catalog cannot stream-scan two tables at once, and queryRows closes its
@@ -545,6 +555,10 @@ GROUP BY period, provider`
 	usedWhere, usedArgs := timeRange("started_at", opts.Since, opts.Until)
 	usedWhere = appendWherePredicate(usedWhere, schema.sessionExpression+" IS NOT NULL")
 	usedWhere = appendWherePredicate(usedWhere, provider.SQLForPath("path")+" != 'unknown'")
+	if opts.Source != "" {
+		usedWhere = appendWherePredicate(usedWhere, "COALESCE(source, 'unknown') = ?")
+		usedArgs = append(usedArgs, opts.Source)
+	}
 	used, err := queryRows(ctx, r.store.DB(), "sessions used",
 		`SELECT `+periodFromRequest+` AS period, `+provider.SQLForPath("path")+` AS provider,
   COUNT(DISTINCT `+schema.sessionExpression+`)
@@ -706,26 +720,40 @@ const DefaultRecentToolCallLimit = 50
 
 // RecentRequests returns lightweight metadata for the newest recorded
 // requests without loading their tool calls or web requests.
-func (r *Reporter) RecentRequests(ctx context.Context, limit int) ([]RecentRequestRow, error) {
+func (r *Reporter) RecentRequests(ctx context.Context, limit int, source string) ([]RecentRequestRow, error) {
 	if limit <= 0 {
 		limit = DefaultRecentRequestLimit
 	}
+	where := ""
+	var args []any
+	if source != "" {
+		where = "WHERE COALESCE(source, 'unknown') = ?"
+		args = append(args, source)
+	}
+	args = append(args, limit)
 	return queryRows(ctx, r.store.DB(), "recent requests", `
 SELECT id, COALESCE(response_id, ''), started_at, `+provider.SQLForPath("path")+`, `+provider.ClientSQL()+`,
   COALESCE(model_reported, model_requested, ''), http_status, method, path
 FROM requests
+`+where+`
 ORDER BY started_at DESC, id DESC
-LIMIT ?`, []any{limit}, func(rows *sql.Rows, row *RecentRequestRow) error {
+LIMIT ?`, args, func(rows *sql.Rows, row *RecentRequestRow) error {
 		return rows.Scan(&row.ID, &row.ResponseID, &row.StartedAt, &row.Provider, &row.Client,
 			&row.Model, &row.HTTPStatus, &row.Method, &row.Path)
 	})
 }
 
-func (r *Reporter) Inspect(ctx context.Context, id string, limit int) ([]InspectRow, error) {
+func (r *Reporter) Inspect(ctx context.Context, id string, limit int, source string) ([]InspectRow, error) {
 	if limit <= 0 {
 		limit = DefaultInspectLimit
 	}
-	return r.queryInspectRows(ctx, "WHERE id = ? OR response_id = ?", "started_at DESC", limit, id, id)
+	where := "WHERE id = ? OR response_id = ?"
+	args := []any{id, id}
+	if source != "" {
+		where = "WHERE (id = ? OR response_id = ?) AND COALESCE(source, 'unknown') = ?"
+		args = append(args, source)
+	}
+	return r.queryInspectRows(ctx, where, "started_at DESC", limit, args...)
 }
 
 func (r *Reporter) RecentErrorsWithin(ctx context.Context, since, until time.Time, limit int) ([]InspectRow, error) {
@@ -746,6 +774,10 @@ func (r *Reporter) ToolCalls(ctx context.Context, opts ToolCallOptions) ([]ToolC
 		limit = DefaultRecentToolCallLimit
 	}
 	where, args := timeRange("started_at", opts.Since, opts.Until)
+	if opts.Source != "" {
+		where = appendWherePredicate(where, "COALESCE(source, 'unknown') = ?")
+		args = append(args, opts.Source)
+	}
 	return expandingJoin(ctx, r, where, args, limit,
 		func(ctx context.Context, requests []toolCallRequest, limit int) ([]ToolCallRow, error) {
 			filter := ""
@@ -779,6 +811,10 @@ func (r *Reporter) WebRequests(ctx context.Context, opts ToolCallOptions) ([]Web
 		limit = DefaultRecentToolCallLimit
 	}
 	where, args := timeRange("started_at", opts.Since, opts.Until)
+	if opts.Source != "" {
+		where = appendWherePredicate(where, "COALESCE(source, 'unknown') = ?")
+		args = append(args, opts.Source)
+	}
 	return expandingJoin(ctx, r, where, args, limit,
 		func(ctx context.Context, requests []toolCallRequest, limit int) ([]WebRequestRow, error) {
 			return joinChildRows(ctx, r, requests, limit, childRowQuery[WebRequestRow]{

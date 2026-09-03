@@ -17,6 +17,7 @@ type Options struct {
 	Limit      int
 	Since      string
 	Until      string
+	Source     string
 	JSON       bool
 	Today      bool
 }
@@ -41,9 +42,10 @@ func Run(ctx context.Context, out io.Writer, opts Options) error {
 	}
 	defer reporter.Close()
 	rows, err := reporter.WebRequests(ctx, report.ToolCallOptions{
-		Since: window.Since,
-		Until: window.Until,
-		Limit: opts.Limit,
+		Since:  window.Since,
+		Until:  window.Until,
+		Limit:  opts.Limit,
+		Source: opts.Source,
 	})
 	if err != nil {
 		return err

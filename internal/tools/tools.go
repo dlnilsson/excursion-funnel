@@ -16,6 +16,7 @@ import (
 type Options struct {
 	Connection reporting.Connection
 	Limit      int
+	Source     string
 	JSON       bool
 	Verbose    bool
 }
@@ -35,6 +36,7 @@ func Load(ctx context.Context, opts Options) ([]report.ToolCallRow, error) {
 		Since:        since,
 		Until:        since.AddDate(0, 0, 1),
 		Limit:        opts.Limit,
+		Source:       opts.Source,
 		CommandsOnly: !opts.JSON,
 	})
 	if err != nil {

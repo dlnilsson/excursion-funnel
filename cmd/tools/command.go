@@ -12,6 +12,7 @@ import (
 type options struct {
 	connection *reportflags.Flags
 	limit      int
+	all        bool
 	json       bool
 	verbose    bool
 }
@@ -24,6 +25,7 @@ func New() *cobra.Command {
 	cmd := &cobra.Command{Use: "tools", Short: "Inspect recorded tool calls"}
 	opts.connection.Bind(cmd.PersistentFlags())
 	cmd.PersistentFlags().IntVar(&opts.limit, "limit", opts.limit, "maximum entries to show")
+	cmd.PersistentFlags().BoolVar(&opts.all, "all", false, "include tool calls recorded from all sources")
 	cmd.PersistentFlags().BoolVar(&opts.json, "json", false, "print tool calls as JSON")
 	cmd.PersistentFlags().BoolVar(&opts.verbose, "verbose", false, "include tool-call metadata in output")
 	cmd.AddCommand(&cobra.Command{
@@ -39,6 +41,7 @@ func New() *cobra.Command {
 				appOpts   = apptools.Options{
 					Connection: opts.connection.Resolve(cmd.Flags()),
 					Limit:      opts.limit,
+					Source:     reportflags.CurrentSource(opts.all),
 					JSON:       opts.json,
 					Verbose:    opts.verbose,
 				}

@@ -16,6 +16,7 @@ type options struct {
 	limit      int
 	since      string
 	until      string
+	all        bool
 	json       bool
 }
 
@@ -29,6 +30,7 @@ func New() *cobra.Command {
 	cmd.PersistentFlags().IntVar(&opts.limit, "limit", opts.limit, "maximum web requests to print")
 	cmd.PersistentFlags().StringVar(&opts.since, "since", "", "start date, inclusive (YYYY-MM-DD)")
 	cmd.PersistentFlags().StringVar(&opts.until, "until", "", "end date, inclusive (YYYY-MM-DD)")
+	cmd.PersistentFlags().BoolVar(&opts.all, "all", false, "include requests recorded from all sources")
 	cmd.PersistentFlags().BoolVar(&opts.json, "json", false, "print web requests as JSON")
 	cmd.RunE = run(&opts, false)
 	cmd.AddCommand(&cobra.Command{
@@ -47,6 +49,7 @@ func run(opts *options, today bool) func(*cobra.Command, []string) error {
 			Limit:      opts.limit,
 			Since:      opts.since,
 			Until:      opts.until,
+			Source:     reportflags.CurrentSource(opts.all),
 			JSON:       opts.json,
 			Today:      today,
 		}
