@@ -280,6 +280,7 @@ func (p *Proxy) handleProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	model, stream := peekModelStream(body)
+	effort := peekEffort(body)
 	directory, gitBranch := peekClientContext(body)
 
 	// Bind the upstream request to the client context so a Codex/Claude Code
@@ -429,6 +430,7 @@ func (p *Proxy) handleProxy(w http.ResponseWriter, r *http.Request) {
 		UpstreamURL:       target.String(),
 		ModelRequested:    model,
 		Stream:            stream,
+		Effort:            effort,
 		HTTPStatus:        resp.StatusCode,
 		UpstreamRequestID: pick.FirstFunc(resp.Header.Get, "X-Request-Id", "Request-Id"),
 		UserAgent:         r.Header.Get("User-Agent"),
@@ -928,6 +930,26 @@ func peekModelStream(body []byte) (model string, stream bool) {
 	}
 	_ = json.Unmarshal(body, &peek)
 	return peek.Model, peek.Stream
+}
+
+// peekEffort best-effort extracts the reasoning effort a client requested.
+// Each provider spells it differently: Anthropic puts it in output_config,
+// the OpenAI Responses API nests it under reasoning, and Chat Completions
+// uses a top-level reasoning_effort. They are mutually exclusive in practice,
+// so the first non-empty one wins. Effort set mid-conversation by an
+// output_config system message is not captured. Parse failures are ignored.
+func peekEffort(body []byte) string {
+	var peek struct {
+		OutputConfig struct {
+			Effort string `json:"effort"`
+		} `json:"output_config"`
+		Reasoning struct {
+			Effort string `json:"effort"`
+		} `json:"reasoning"`
+		ReasoningEffort string `json:"reasoning_effort"`
+	}
+	_ = json.Unmarshal(body, &peek)
+	return pick.First(peek.OutputConfig.Effort, peek.Reasoning.Effort, peek.ReasoningEffort)
 }
 
 // peekClientContext best-effort extracts the project context embedded by

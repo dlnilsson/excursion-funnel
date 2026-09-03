@@ -49,6 +49,68 @@ func TestOpenHubKeepsConstraintsAndAddsStaging(t *testing.T) {
 	}
 }
 
+func TestOpenHubUpgradesEffortColumns(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "hub.duckdb")
+	hub, err := OpenHub(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := hub.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	db, err := openDuckDB(path, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, query := range []string{
+		"DROP VIEW usage_by_day_model",
+		"DROP INDEX idx_requests_started_at",
+		"DROP INDEX idx_requests_model_requested",
+		"DROP INDEX idx_requests_response_id",
+		"DROP INDEX idx_requests_source",
+		"DROP INDEX idx_requests_session_id",
+		"DROP INDEX idx_requests_directory",
+		"DROP INDEX idx_requests_git_branch",
+	} {
+		if _, err := db.Exec(query); err != nil {
+			_ = db.Close()
+			t.Fatalf("%s: %v", query, err)
+		}
+	}
+	for _, table := range []string{"requests", "staging_requests"} {
+		if _, err := db.Exec("ALTER TABLE " + table + " DROP COLUMN effort"); err != nil {
+			_ = db.Close()
+			t.Fatalf("drop %s.effort: %v", table, err)
+		}
+	}
+	if hasStaging, err := remoteHasStagingTables(t.Context(), db); err != nil || hasStaging {
+		_ = db.Close()
+		t.Fatalf("remoteHasStagingTables() = %t, %v; want false, nil", hasStaging, err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	upgraded, err := OpenHub(path)
+	if err != nil {
+		t.Fatalf("OpenHub() upgrade error = %v", err)
+	}
+	t.Cleanup(func() { _ = upgraded.Close() })
+	for _, table := range []string{"requests", "staging_requests"} {
+		columns, err := tableColumns(upgraded.db, table)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !columns["effort"] {
+			t.Fatalf("%s missing effort after upgrade", table)
+		}
+	}
+	if hasStaging, err := remoteHasStagingTables(t.Context(), upgraded.db); err != nil || !hasStaging {
+		t.Fatalf("remoteHasStagingTables() = %t, %v; want true, nil", hasStaging, err)
+	}
+}
+
 func TestOpenHubRestoresDroppedPrimaryKey(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "hub.duckdb")
 	seed, err := Open(path)

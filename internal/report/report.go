@@ -256,6 +256,7 @@ type InspectRow struct {
 	ModelRequested    string
 	ModelReported     string
 	Stream            bool
+	Effort            string
 	HTTPStatus        sql.NullInt64
 	UpstreamRequestID string
 	UserAgent         string
@@ -817,7 +818,7 @@ func (r *Reporter) queryInspectRows(ctx context.Context, whereClause, orderBy st
 			return rows.Scan(
 				&row.ID, &row.ResponseID, &row.Source, &row.Host, &row.StartedAt, &row.CompletedAt,
 				&row.DurationMS, &row.Method, &row.Path, &row.Provider, &row.UpstreamURL,
-				&row.ModelRequested, &row.ModelReported, &row.Stream, &row.HTTPStatus,
+				&row.ModelRequested, &row.ModelReported, &row.Stream, &row.Effort, &row.HTTPStatus,
 				&row.UpstreamRequestID, &row.UserAgent, &row.Originator, &row.Client, &row.SessionID,
 				&row.Directory, &row.GitBranch,
 				&row.ErrorType, &row.ErrorMessage, &row.Input, &row.Cached, &row.CacheWrite,
@@ -917,7 +918,7 @@ ORDER BY ` + orderBy
 func buildInspectQuery(whereClause, orderBy, sessionExpression string) string {
 	return `SELECT id, COALESCE(response_id, ''), COALESCE(source, 'unknown'), COALESCE(host, ''),
  started_at, completed_at, duration_ms, method, path, ` + provider.SQLForPath("path") + `, upstream_url,
- COALESCE(model_requested, ''), COALESCE(model_reported, ''), stream, http_status,
+ COALESCE(model_requested, ''), COALESCE(model_reported, ''), stream, COALESCE(effort, ''), http_status,
  COALESCE(upstream_request_id, ''), COALESCE(user_agent, ''), COALESCE(originator, ''), ` + provider.ClientSQL() + `,
  ` + sessionExpression + `, COALESCE(directory, ''), COALESCE(git_branch, ''),
  COALESCE(error_type, ''), COALESCE(error_message, ''),

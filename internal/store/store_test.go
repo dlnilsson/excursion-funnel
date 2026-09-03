@@ -22,7 +22,7 @@ func TestOpenCreatesLiveDuckDBSchema(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"started_at", "source", "host", "session_id", "directory", "git_branch", "total_tokens"} {
+	for _, name := range []string{"started_at", "source", "host", "session_id", "directory", "git_branch", "effort", "total_tokens"} {
 		if !cols[name] {
 			t.Fatalf("requests missing %q", name)
 		}
@@ -178,6 +178,7 @@ func TestOpenUpgradesProjectContextColumns(t *testing.T) {
 		"DROP INDEX idx_requests_git_branch",
 		"ALTER TABLE requests DROP COLUMN directory",
 		"ALTER TABLE requests DROP COLUMN git_branch",
+		"ALTER TABLE requests DROP COLUMN effort",
 	} {
 		if _, err := db.Exec(query); err != nil {
 			_ = db.Close()
@@ -197,7 +198,7 @@ func TestOpenUpgradesProjectContextColumns(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !cols["directory"] || !cols["git_branch"] {
+	if !cols["directory"] || !cols["git_branch"] || !cols["effort"] {
 		t.Fatalf("upgraded columns = %+v", cols)
 	}
 }
