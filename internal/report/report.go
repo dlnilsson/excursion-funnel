@@ -694,15 +694,17 @@ FROM requests
 	return peak, nil
 }
 
-// HistoricalByModel computes all-time model totals directly from requests.
+// HistoricalByModel computes all-time model totals directly from requests,
+// broken out by source so callers can filter without a second query.
 func (r *Reporter) HistoricalByModel(ctx context.Context) ([]SummaryRow, error) {
-	selectGroup, groupExpr, _, _ := summaryGrouping("model")
+	selectGroup, groupExpr, _, _ := summaryGrouping("source_model")
 	return r.scanSummary(ctx, buildSummaryQuery(selectGroup, "", groupExpr, "total_tokens DESC, provider, client, model"))
 }
 
-// HistoricalByDay computes all-time daily totals directly from requests.
+// HistoricalByDay computes all-time daily totals directly from requests,
+// broken out by source so callers can filter without a second query.
 func (r *Reporter) HistoricalByDay(ctx context.Context) ([]SummaryRow, error) {
-	selectGroup, groupExpr, _, _ := summaryGrouping("day")
+	selectGroup, groupExpr, _, _ := summaryGrouping("source_day")
 	return r.scanSummary(ctx, buildSummaryQuery(selectGroup, "", groupExpr, "day DESC, total_tokens DESC, provider, client, model"))
 }
 
@@ -927,6 +929,16 @@ func summaryGrouping(groupBy string) (selectGroup, groupExpr, orderBy string, er
 	case "source":
 		sourceExpr := "COALESCE(source, 'unknown')"
 		return groupSelect("''", "''", "''", "''", sourceExpr, "''", "''"), sourceExpr, "source", nil
+	case "source_model":
+		sourceExpr := "COALESCE(source, 'unknown')"
+		return groupSelect("''", providerExpr, clientExpr, modelExpr, sourceExpr, "''", "''"),
+			joinSQLExprs(providerExpr, clientExpr, modelExpr, sourceExpr),
+			"source, provider, client, model", nil
+	case "source_day":
+		sourceExpr := "COALESCE(source, 'unknown')"
+		return groupSelect(dayExpr, providerExpr, clientExpr, modelExpr, sourceExpr, "''", "''"),
+			joinSQLExprs(dayExpr, providerExpr, clientExpr, modelExpr, sourceExpr),
+			"day, provider, client, model, source", nil
 	case "directory":
 		directoryExpr := "COALESCE(directory, 'unknown')"
 		return groupSelect("''", "''", "''", "''", "''", directoryExpr, "''"), directoryExpr, "directory", nil
@@ -934,7 +946,7 @@ func summaryGrouping(groupBy string) (selectGroup, groupExpr, orderBy string, er
 		branchExpr := "COALESCE(git_branch, 'unknown')"
 		return groupSelect("''", "''", "''", "''", "''", "''", branchExpr), branchExpr, "git_branch", nil
 	default:
-		return "", "", "", fmt.Errorf("unsupported group-by %q (want model, provider, day, source, directory, or git_branch)", groupBy)
+		return "", "", "", fmt.Errorf("unsupported group-by %q (want model, provider, day, source, source_model, source_day, directory, or git_branch)", groupBy)
 	}
 }
 

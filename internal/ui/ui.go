@@ -38,8 +38,7 @@ func New(rep *report.Reporter, log *slog.Logger) http.Handler {
 	mux.Handle("GET /ui/assets/", http.StripPrefix("/ui/assets/", http.FileServerFS(staticAssets)))
 	mux.HandleFunc("GET /ui/api/kpis", handleKPIs(rep, log))
 	mux.HandleFunc("GET /ui/api/sessions", handleSessions(rep, log))
-	mux.HandleFunc("GET /ui/api/summary", handleSummaryFor(rep, log, "summary", "model"))
-	mux.HandleFunc("GET /ui/api/sources", handleSummaryFor(rep, log, "sources", "source"))
+	mux.HandleFunc("GET /ui/api/summary", handleSummaryFor(rep, log, "summary", "source_model"))
 	mux.HandleFunc("GET /ui/api/directories", handleSummaryFor(rep, log, "directories", "directory"))
 	mux.HandleFunc("GET /ui/api/history", rowsHandler(log, "history", func(r *http.Request) ([]report.SummaryRow, error) {
 		rows, err := rep.HistoricalByDay(r.Context())

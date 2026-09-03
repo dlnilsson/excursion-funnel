@@ -106,7 +106,9 @@ func TestHandleIndex_ServesDashboardHTML(t *testing.T) {
 		`label: "Output tokens"`,
 		`Fresh input excludes cached input tokens and Anthropic cache-write tokens.`,
 		`id="history-stacked-chart"`,
+		`id="history-chart-source-filter"`,
 		`id="model-activity-table"`,
+		`id="model-activity-source-filter"`,
 		`<th>Input tokens</th>`,
 		`<th>Output tokens</th>`,
 		`aggregateModelActivityRows(rows)`,
@@ -124,7 +126,8 @@ func TestHandleIndex_ServesDashboardHTML(t *testing.T) {
 		`Anthropic cache writes`,
 		`anthropic?.Requests`,
 		`data-table-key="summary"`,
-		`data-table-key="sources"`,
+		`id="summary-source-filter"`,
+		`initSourceFilters();`,
 		`data-table-key="directories"`,
 		`data-table-key="model-activity"`,
 		`data-table-key="errors"`,
@@ -139,7 +142,6 @@ func TestHandleIndex_ServesDashboardHTML(t *testing.T) {
 		`hourlyTokenChart.resize();`,
 		`historyStackedChart.resize();`,
 		`fetch("/ui/api/history/models")`,
-		`fetch("/ui/api/sources")`,
 		`fetch("/ui/api/directories")`,
 		`id="tools-table"`,
 		`fetch("/ui/api/tools")`,
@@ -355,21 +357,11 @@ func TestBranchesEndpointNoLongerServesAPI(t *testing.T) {
 	}
 }
 
-func TestHandleSources_ReturnsTodaysSources(t *testing.T) {
+func TestSourcesEndpointNoLongerServesAPI(t *testing.T) {
 	h := newTestHandler(t)
 	rec := doRequest(t, h, http.MethodGet, "/ui/api/sources")
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
-	}
-	var rows []report.SummaryRow
-	if err := json.Unmarshal(rec.Body.Bytes(), &rows); err != nil {
-		t.Fatal(err)
-	}
-	if len(rows) != 2 || rows[0].Source != "alice" || rows[1].Source != "bob" {
-		t.Fatalf("source rows = %+v", rows)
-	}
-	if rows[0].Requests != 1 || rows[1].Errors != 1 {
-		t.Fatalf("source totals = %+v", rows)
+	if ct := rec.Header().Get("Content-Type"); strings.Contains(ct, "application/json") {
+		t.Fatalf("content-type = %q, sources endpoint still serves JSON", ct)
 	}
 }
 
@@ -495,13 +487,20 @@ func TestHandleSummary_ReturnsTodaysUsage(t *testing.T) {
 	for _, row := range rows {
 		if row.Provider == "openai" && row.Model == "gpt-5.3-codex" {
 			found = true
-			if row.Client != "Zed" || row.Requests != 1 || row.Input != 10 || row.Output != 4 || row.Total != 14 {
-				t.Fatalf("openai row = %+v, want client=Zed requests=1 input=10 output=4 total=14", row)
+			if row.Client != "Zed" || row.Source != "alice" || row.Requests != 1 ||
+				row.Input != 10 || row.Output != 4 || row.Total != 14 {
+				t.Fatalf("openai row = %+v, want client=Zed source=alice requests=1 input=10 output=4 total=14", row)
 			}
 		}
 	}
 	if !found {
 		t.Fatalf("no openai/gpt-5.3-codex row in %+v", rows)
+	}
+	// Rows must carry a source so the dashboard can filter them client-side.
+	for _, row := range rows {
+		if row.Source == "" {
+			t.Fatalf("row without source = %+v", row)
+		}
 	}
 }
 
@@ -541,8 +540,8 @@ func TestHandleHistory_ReturnsLiveAggregates(t *testing.T) {
 		t.Fatalf("rows len = %d, want 2: %+v", len(rows), rows)
 	}
 	for _, row := range rows {
-		if row.Day == "" {
-			t.Fatalf("history row missing day: %+v", row)
+		if row.Day == "" || row.Source == "" {
+			t.Fatalf("history row = %+v, want a day and a source", row)
 		}
 	}
 	var found bool
@@ -575,8 +574,8 @@ func TestHandleModelHistory_ReturnsLiveAggregates(t *testing.T) {
 		t.Fatalf("rows len = %d, want 2: %+v", len(rows), rows)
 	}
 	for _, row := range rows {
-		if row.Day != "" {
-			t.Fatalf("model history row has day: %+v", row)
+		if row.Day != "" || row.Source == "" {
+			t.Fatalf("model history row = %+v, want empty day and a source", row)
 		}
 	}
 	var found bool

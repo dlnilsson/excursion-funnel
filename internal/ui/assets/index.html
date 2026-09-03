@@ -264,6 +264,36 @@
     transform: rotate(45deg);
   }
 
+  .source-filter {
+    align-items: center;
+    color: var(--text-muted);
+    display: flex;
+    flex-wrap: wrap;
+    font-size: 0.85rem;
+    gap: 0.4rem 1rem;
+    padding: 0 0 0.75rem;
+  }
+
+  .source-filter:empty {
+    display: none;
+  }
+
+  .history-layout .source-filter {
+    padding-bottom: 0;
+  }
+
+  .source-filter label {
+    align-items: center;
+    cursor: pointer;
+    display: inline-flex;
+    gap: 0.35rem;
+  }
+
+  .source-filter input {
+    accent-color: var(--accent);
+    margin: 0;
+  }
+
   th,
   td {
     border-bottom: 1px solid var(--border-subtle);
@@ -782,18 +812,11 @@
 
 <details class="table-section" data-table-key="summary" open>
   <summary>Requests by model today</summary>
+  <div class="source-filter" id="summary-source-filter" role="group" aria-label="Filter requests by source"></div>
   <table id="summary-table">
-    <thead><tr><th>Client</th><th>Model</th><th>Requests</th><th>Errors</th><th>Input</th><th>Cached</th><th>Cache write</th><th>Output</th><th>Reasoning</th><th>Total</th></tr></thead>
+    <thead><tr><th>Source</th><th>Client</th><th>Model</th><th>Requests</th><th>Errors</th><th>Input</th><th>Cached</th><th>Cache write</th><th>Output</th><th>Reasoning</th><th>Total</th></tr></thead>
     <tbody></tbody>
-    <tfoot><tr><th colspan="2">Total</th><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td></tr></tfoot>
-  </table>
-</details>
-
-<details class="table-section" data-table-key="sources" open>
-  <summary>Requests by source today</summary>
-  <table id="sources-table">
-    <thead><tr><th>Source</th><th>Requests</th><th>Errors</th><th>Total tokens</th></tr></thead>
-    <tbody></tbody>
+    <tfoot><tr><th colspan="3">Total</th><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td></tr></tfoot>
   </table>
 </details>
 
@@ -826,6 +849,7 @@
 <details class="dashboard-section" data-section-key="model-activity-chart" open>
   <summary><h2>Model activity overall</h2></summary>
   <div class="history-layout">
+    <div class="source-filter" id="history-chart-source-filter" role="group" aria-label="Filter model activity by source"></div>
     <div class="history-actions">
       <div class="metric-toggle" aria-label="History metric">
         <button id="tokens-toggle" type="button" aria-pressed="true">Total Tokens</button>
@@ -843,6 +867,7 @@
 
 <details class="table-section" data-table-key="model-activity" open>
   <summary>Model activity table overall</summary>
+  <div class="source-filter" id="model-activity-source-filter" role="group" aria-label="Filter model activity by source"></div>
   <table id="model-activity-table">
     <thead><tr><th>Model</th><th>Input tokens</th><th>Output tokens</th><th>Total tokens</th><th>Requests</th><th>Avg tokens/request</th><th>Share</th></tr></thead>
     <tbody></tbody>
@@ -938,6 +963,10 @@ let latestHourlyTokenRows = [];
 let latestHistoryRows = [];
 let latestModelHistoryRows = [];
 let latestToolRows = [];
+let latestSummaryRows = [];
+let selectedSummarySources = null;
+let selectedModelActivitySources = null;
+let selectedHistoryChartSources = null;
 let selectedHistoryMetric = "tokens";
 let selectedTokenActivityRange = "24h";
 const heatmapWeeks = 53;
@@ -1057,6 +1086,38 @@ const checkIcon = `<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16
   <path d="M10.97 4.97a.75.75 0 0 1 1.07 1.05l-3.99 4.99a.75.75 0 0 1-1.08.02L4.324 8.384a.75.75 0 1 1 1.06-1.06l2.094 2.093 3.473-4.425z"/>
 </svg>`;
 
+function initSourceFilters() {
+  bindSourceFilter("summary-source-filter", input => {
+    toggleSource(selectedSummarySources, input);
+    renderSummaryTable();
+  });
+  bindSourceFilter("model-activity-source-filter", input => {
+    toggleSource(selectedModelActivitySources, input);
+    renderModelActivityTable();
+  });
+  bindSourceFilter("history-chart-source-filter", input => {
+    toggleSource(selectedHistoryChartSources, input);
+    renderHistoryStackedChart();
+  });
+}
+
+function bindSourceFilter(containerID, handle) {
+  document.getElementById(containerID).addEventListener("change", event => {
+    const input = event.target.closest("input[type=checkbox]");
+    if (input) {
+      handle(input);
+    }
+  });
+}
+
+function toggleSource(selected, input) {
+  if (input.checked) {
+    selected.add(input.value);
+  } else {
+    selected.delete(input.value);
+  }
+}
+
 function initToolCopy() {
   document.querySelector("#tools-table tbody").addEventListener("click", async event => {
     const button = event.target.closest("button[data-command-index]");
@@ -1134,11 +1195,10 @@ function setTokenActivityRange(range) {
 }
 
 async function load() {
-  const [kpis, sessions, summary, sources, directories, hourlyHistory, history, modelHistory, errors, tools, webRequests] = await Promise.all([
+  const [kpis, sessions, summary, directories, hourlyHistory, history, modelHistory, errors, tools, webRequests] = await Promise.all([
     fetch("/ui/api/kpis").then(r => r.json()),
     fetch("/ui/api/sessions").then(r => r.json()),
     fetch("/ui/api/summary").then(r => r.json()),
-    fetch("/ui/api/sources").then(r => r.json()),
     fetch("/ui/api/directories").then(r => r.json()),
     fetch("/ui/api/history/hourly").then(r => r.json()),
     fetch("/ui/api/history").then(r => r.json()),
@@ -1149,7 +1209,6 @@ async function load() {
   ]);
   renderStats(summary, kpis, sessions);
   renderSummary(summary);
-  renderSources(sources);
   renderDirectories(directories);
   latestHourlyTokenRows = Array.isArray(hourlyHistory) ? hourlyHistory : [];
   latestHistoryRows = Array.isArray(history) ? history : [];
@@ -1158,15 +1217,6 @@ async function load() {
   renderErrors(errors);
   renderTools(tools);
   renderWebRequests(webRequests);
-}
-
-function renderSources(rows) {
-  const tbody = document.querySelector("#sources-table tbody");
-  if (rows.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="4" class="empty">No source activity today</td></tr>';
-    return;
-  }
-  tbody.innerHTML = rows.map(r => `<tr><td>${escapeHTML(r.Source)}</td><td>${r.Requests}</td><td>${r.Errors}</td>${tokenCell(r.Total)}</tr>`).join("");
 }
 
 function renderDirectories(rows) {
@@ -1336,10 +1386,46 @@ function renderStats(rows, kpis, sessions) {
 }
 
 function renderSummary(rows) {
+  latestSummaryRows = Array.isArray(rows) ? rows : [];
+  selectedSummarySources = renderSourceFilter("summary-source-filter", latestSummaryRows, selectedSummarySources);
+  renderSummaryTable();
+}
+
+function sourceLabel(row) {
+  return row.Source || "unknown";
+}
+
+// renderSourceFilter rebuilds one table's source checkboxes and returns the
+// selection to keep. Sources missing from the previously rendered checkboxes
+// start out checked, so neither the first render nor a newly recorded source
+// silently hides rows.
+function renderSourceFilter(containerID, rows, selected) {
+  const container = document.getElementById(containerID);
+  const sources = [...new Set(rows.map(sourceLabel))].sort((a, b) => a.localeCompare(b));
+  const rendered = [...container.querySelectorAll("input")].map(input => input.value);
+  const keep = selected || new Set();
+  for (const source of sources) {
+    if (!rendered.includes(source)) {
+      keep.add(source);
+    }
+  }
+  container.innerHTML = sources.map(source => `<label><input type="checkbox" value="${escapeHTML(source)}"${
+    keep.has(source) ? " checked" : ""}>${escapeHTML(source)}</label>`).join("");
+  return keep;
+}
+
+function keepSelectedSources(rows, selected) {
+  return rows.filter(row => selected.has(sourceLabel(row)));
+}
+
+function renderSummaryTable() {
+  const rows = keepSelectedSources(latestSummaryRows, selectedSummarySources);
   const tbody = document.querySelector("#summary-table tbody");
   const tfoot = document.querySelector("#summary-table tfoot");
   if (rows.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="10" class="empty">No requests recorded today</td></tr>';
+    tbody.innerHTML = latestSummaryRows.length === 0
+      ? '<tr><td colspan="11" class="empty">No requests recorded today</td></tr>'
+      : '<tr><td colspan="11" class="empty">No requests for the selected sources</td></tr>';
     tfoot.hidden = true;
     return;
   }
@@ -1356,11 +1442,11 @@ function renderSummary(rows) {
   }, { Requests: 0, Errors: 0, Input: 0, Cached: 0, CacheWrite: 0, Output: 0, Reasoning: 0, Total: 0 });
   tfoot.hidden = false;
   tfoot.innerHTML = `<tr>
-    <th colspan="2">Total</th><td>${totals.Requests.toLocaleString()}</td><td>${totals.Errors.toLocaleString()}</td>
+    <th colspan="3">Total</th><td>${totals.Requests.toLocaleString()}</td><td>${totals.Errors.toLocaleString()}</td>
     ${tokenCell(totals.Input)}${tokenCell(totals.Cached)}${tokenCell(totals.CacheWrite)}${tokenCell(totals.Output)}${tokenCell(totals.Reasoning)}${tokenCell(totals.Total)}
   </tr>`;
   tbody.innerHTML = rows.map(r => `<tr>
-    <td>${escapeHTML(clientLabel(r))}</td><td>${escapeHTML(r.Model)}</td><td>${r.Requests}</td><td>${r.Errors}</td>
+    <td>${escapeHTML(sourceLabel(r))}</td><td>${escapeHTML(clientLabel(r))}</td><td>${escapeHTML(r.Model)}</td><td>${r.Requests}</td><td>${r.Errors}</td>
     ${tokenCell(freshInput(r))}${tokenCell(r.Cached)}${tokenCell(r.CacheWrite)}${tokenCell(r.Output)}${tokenCell(r.Reasoning)}${tokenCell(r.Total)}
   </tr>`).join("");
 }
@@ -1524,8 +1610,12 @@ function renderHistoryCharts(historyRows, modelRows) {
   latestHistoryRows = historyRows;
   latestModelHistoryRows = modelRows;
   renderTokenHeatmap(historyRows);
-  renderHistoryStackedChart(historyRows);
-  renderModelActivityTable(modelRows);
+  selectedHistoryChartSources = renderSourceFilter(
+    "history-chart-source-filter", latestHistoryRows, selectedHistoryChartSources);
+  renderHistoryStackedChart();
+  selectedModelActivitySources = renderSourceFilter(
+    "model-activity-source-filter", latestModelHistoryRows, selectedModelActivitySources);
+  renderModelActivityTable();
 }
 
 function renderTokenHeatmap(rows) {
@@ -1659,7 +1749,8 @@ function calendarDayKey(date) {
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
 }
 
-function renderHistoryStackedChart(rows) {
+function renderHistoryStackedChart() {
+  const rows = keepSelectedSources(latestHistoryRows, selectedHistoryChartSources);
   const metric = selectedHistoryMetric === "requests" ? "Requests" : "Total";
   const byDayModel = new Map();
   const byModel = new Map();
@@ -1727,7 +1818,8 @@ function renderHistoryStackedChart(rows) {
   renderHistoryLegend(datasets);
 }
 
-function renderModelActivityTable(rows) {
+function renderModelActivityTable() {
+  const rows = keepSelectedSources(latestModelHistoryRows, selectedModelActivitySources);
   const modelRows = aggregateModelActivityRows(rows);
   const topRows = modelRows.sort((a, b) => b.Total - a.Total).slice(0, 12);
   const totals = modelRows.reduce((summary, row) => {
@@ -1740,7 +1832,9 @@ function renderModelActivityTable(rows) {
   const tbody = document.querySelector("#model-activity-table tbody");
   const tfoot = document.querySelector("#model-activity-table tfoot");
   if (topRows.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="7" class="empty">No model history yet</td></tr>';
+    tbody.innerHTML = latestModelHistoryRows.length === 0
+      ? '<tr><td colspan="7" class="empty">No model history yet</td></tr>'
+      : '<tr><td colspan="7" class="empty">No model history for the selected sources</td></tr>';
     tfoot.hidden = true;
     return;
   }
@@ -1925,6 +2019,7 @@ initTableCollapse();
 initDashboardSectionCollapse();
 initThemeToggle();
 initToolCopy();
+initSourceFilters();
 load();
 </script>
 </body>

@@ -523,6 +523,118 @@ func TestSummary_GroupsBySourceWithMixedProviderInput(t *testing.T) {
 	}
 }
 
+func TestSummary_GroupsBySourceAndModel(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "usage.duckdb")
+	st, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	var (
+		started = time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC)
+		input   = int64(10)
+		output  = int64(4)
+		total   = int64(14)
+	)
+	usage := func() queue.Usage {
+		return queue.Usage{InputTokens: &input, OutputTokens: &output, TotalTokens: &total}
+	}
+	if err := st.InsertBatch(t.Context(), []queue.UsageEvent{
+		{
+			RequestID: "daniel-1", Source: "daniel", StartedAt: started,
+			Method: "POST", Path: "/v1/responses", UpstreamURL: "/",
+			ModelReported: "gpt-5.3-codex", Usage: usage(),
+		},
+		{
+			RequestID: "teammate-1", Source: "teammate", StartedAt: started.Add(time.Minute),
+			Method: "POST", Path: "/v1/responses", UpstreamURL: "/",
+			ModelReported: "gpt-5.3-codex", Usage: usage(),
+		},
+		{
+			RequestID: "teammate-2", Source: "teammate", StartedAt: started.Add(2 * time.Minute),
+			Method: "POST", Path: "/v1/responses", UpstreamURL: "/",
+			ModelReported: "gpt-5.3-codex", Usage: usage(),
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	rows, err := New(st).Summary(t.Context(), SummaryOptions{
+		Since:   started,
+		Until:   started.Add(time.Hour),
+		GroupBy: "source_model",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The same model recorded under two sources must stay on separate rows.
+	if len(rows) != 2 {
+		t.Fatalf("source_model rows = %+v, want one row per source", rows)
+	}
+	if rows[0].Source != "daniel" || rows[0].Model != "gpt-5.3-codex" ||
+		rows[0].Requests != 1 || rows[0].Total != 14 {
+		t.Fatalf("daniel row = %+v, want model=gpt-5.3-codex requests=1 total=14", rows[0])
+	}
+	if rows[1].Source != "teammate" || rows[1].Model != "gpt-5.3-codex" ||
+		rows[1].Requests != 2 || rows[1].Total != 28 {
+		t.Fatalf("teammate row = %+v, want model=gpt-5.3-codex requests=2 total=28", rows[1])
+	}
+}
+
+func TestSummary_GroupsBySourceAndDay(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "usage.duckdb")
+	st, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	var (
+		started = time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC)
+		input   = int64(10)
+		output  = int64(4)
+		total   = int64(14)
+	)
+	usage := func() queue.Usage {
+		return queue.Usage{InputTokens: &input, OutputTokens: &output, TotalTokens: &total}
+	}
+	if err := st.InsertBatch(t.Context(), []queue.UsageEvent{
+		{
+			RequestID: "daniel-1", Source: "daniel", StartedAt: started,
+			Method: "POST", Path: "/v1/responses", UpstreamURL: "/",
+			ModelReported: "gpt-5.3-codex", Usage: usage(),
+		},
+		{
+			RequestID: "teammate-1", Source: "teammate", StartedAt: started.Add(time.Minute),
+			Method: "POST", Path: "/v1/responses", UpstreamURL: "/",
+			ModelReported: "gpt-5.3-codex", Usage: usage(),
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	rows, err := New(st).Summary(t.Context(), SummaryOptions{
+		Since:   started,
+		Until:   started.Add(time.Hour),
+		GroupBy: "source_day",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// One day, one model, two sources must stay on separate rows so the
+	// dashboard chart can filter them client-side.
+	if len(rows) != 2 {
+		t.Fatalf("source_day rows = %+v, want one row per source", rows)
+	}
+	for _, row := range rows {
+		if row.Day != "2026-09-03" || row.Model != "gpt-5.3-codex" || row.Requests != 1 || row.Total != 14 {
+			t.Fatalf("source_day row = %+v, want day=2026-09-03 model=gpt-5.3-codex requests=1 total=14", row)
+		}
+	}
+	if rows[0].Source != "daniel" || rows[1].Source != "teammate" {
+		t.Fatalf("source_day sources = %q, %q", rows[0].Source, rows[1].Source)
+	}
+}
+
 func TestSummary_GroupsAndFiltersByProjectContext(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "usage.duckdb")
 	st, err := store.Open(dbPath)
