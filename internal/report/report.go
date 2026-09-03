@@ -134,6 +134,7 @@ type SummaryOptions struct {
 	GroupBy            string
 	Directory          string
 	Branch             string
+	Source             string
 	KnownProvidersOnly bool
 }
 
@@ -359,6 +360,10 @@ func (r *Reporter) Summary(ctx context.Context, opts SummaryOptions) ([]SummaryR
 	if opts.Branch != "" {
 		where = appendWherePredicate(where, "git_branch = ?")
 		args = append(args, opts.Branch)
+	}
+	if opts.Source != "" {
+		where = appendWherePredicate(where, "COALESCE(source, 'unknown') = ?")
+		args = append(args, opts.Source)
 	}
 	if opts.KnownProvidersOnly {
 		predicate := provider.SQLForPath("path") + " != 'unknown'"

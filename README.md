@@ -249,8 +249,11 @@ Use `ef -v` or `ef --version` for the short build version. The detailed
 To generate a manpage, run `ef man > ef.1`.
 
 ```sh
-# All recorded usage, one row per model (the default grouping).
+# Usage recorded under the current EF_SOURCE, one row per model.
 ef usage
+
+# Usage from every source.
+ef usage --all
 
 # Today's usage only.
 ef usage today

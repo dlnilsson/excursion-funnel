@@ -3,9 +3,11 @@ package usage
 
 import (
 	"io"
+	"os"
 
 	"github.com/dlnilsson/excursion-funnel/cmd/loading"
 	"github.com/dlnilsson/excursion-funnel/cmd/reportflags"
+	"github.com/dlnilsson/excursion-funnel/internal/config"
 	appusage "github.com/dlnilsson/excursion-funnel/internal/usage"
 	"github.com/spf13/cobra"
 )
@@ -17,6 +19,7 @@ type options struct {
 	groupBy    string
 	directory  string
 	branch     string
+	all        bool
 	json       bool
 }
 
@@ -30,6 +33,7 @@ func New() *cobra.Command {
 	cmd.PersistentFlags().StringVar(&opts.groupBy, "group-by", opts.groupBy, "grouping: model, provider, day, source, directory, or git_branch")
 	cmd.PersistentFlags().StringVar(&opts.directory, "directory", "", "only requests from this working directory")
 	cmd.PersistentFlags().StringVar(&opts.branch, "branch", "", "only requests from this git branch")
+	cmd.PersistentFlags().BoolVar(&opts.all, "all", false, "include usage recorded from all sources")
 	cmd.PersistentFlags().BoolVar(&opts.json, "json", false, "print the summary as JSON")
 	cmd.RunE = run(&opts, false)
 	cmd.AddCommand(&cobra.Command{
@@ -43,6 +47,13 @@ func New() *cobra.Command {
 
 func run(opts *options, today bool) func(*cobra.Command, []string) error {
 	return func(cmd *cobra.Command, _ []string) error {
+		source := ""
+		if !opts.all {
+			source = os.Getenv("EF_SOURCE")
+			if source == "" {
+				source = config.Default().Source
+			}
+		}
 		appOpts := appusage.Options{
 			Connection: opts.connection.Resolve(cmd.Flags()),
 			Since:      opts.since,
@@ -50,6 +61,7 @@ func run(opts *options, today bool) func(*cobra.Command, []string) error {
 			GroupBy:    opts.groupBy,
 			Directory:  opts.directory,
 			Branch:     opts.branch,
+			Source:     source,
 			JSON:       opts.json,
 			Today:      today,
 		}

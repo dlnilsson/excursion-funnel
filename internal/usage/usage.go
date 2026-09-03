@@ -18,6 +18,7 @@ type Options struct {
 	GroupBy    string
 	Directory  string
 	Branch     string
+	Source     string
 	JSON       bool
 	Today      bool
 }
@@ -45,6 +46,7 @@ func Run(ctx context.Context, out io.Writer, opts Options) error {
 		GroupBy:   opts.GroupBy,
 		Directory: opts.Directory,
 		Branch:    opts.Branch,
+		Source:    opts.Source,
 	})
 	if err != nil {
 		return err

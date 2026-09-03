@@ -150,3 +150,48 @@ func TestProjectContextGroupingAndFilters(t *testing.T) {
 		t.Fatalf("project context output = %s", text)
 	}
 }
+
+func TestSourceFilter(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "usage.duckdb")
+	st, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	total := int64(14)
+	started := reporting.BeginningOfDay(time.Now()).Add(time.Hour)
+	if err := st.InsertBatch(t.Context(), []queue.UsageEvent{
+		{RequestID: "mine", Source: "daniel", StartedAt: started, Method: "POST", Path: "/v1/responses", UpstreamURL: "/", Usage: queue.Usage{TotalTokens: &total}},
+		{RequestID: "theirs", Source: "teammate", StartedAt: started, Method: "POST", Path: "/v1/responses", UpstreamURL: "/", Usage: queue.Usage{TotalTokens: &total}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	var output bytes.Buffer
+	options := Options{Today: true, JSON: true, GroupBy: "source", Source: "daniel", Connection: connection(t, dbPath)}
+	if err := Run(t.Context(), &output, options); err != nil {
+		t.Fatal(err)
+	}
+	var rows []report.SummaryRow
+	if err := json.Unmarshal(output.Bytes(), &rows); err != nil {
+		t.Fatalf("invalid JSON: %v: %s", err, output.String())
+	}
+	if len(rows) != 1 || rows[0].Source != "daniel" || rows[0].Requests != 1 {
+		t.Fatalf("filtered rows = %+v", rows)
+	}
+
+	output.Reset()
+	options.Source = ""
+	if err := Run(t.Context(), &output, options); err != nil {
+		t.Fatal(err)
+	}
+	rows = nil
+	if err := json.Unmarshal(output.Bytes(), &rows); err != nil {
+		t.Fatalf("invalid JSON: %v: %s", err, output.String())
+	}
+	if len(rows) != 2 {
+		t.Fatalf("all-source rows = %+v", rows)
+	}
+}
