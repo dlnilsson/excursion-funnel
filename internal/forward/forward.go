@@ -36,7 +36,19 @@ func New(outbox *store.Outbox, cfg Config, log *slog.Logger) *Forwarder {
 	if cfg.PollInterval <= 0 {
 		cfg.PollInterval = time.Second
 	}
-	return &Forwarder{outbox: outbox, cfg: cfg, log: log, done: make(chan struct{}), auth: hubauth.NewClient(hubauth.ClientConfig{Address: cfg.Address, KeyPath: cfg.KeyPath, Insecure: cfg.Insecure})}
+	return &Forwarder{
+		outbox: outbox,
+		cfg:    cfg,
+		log:    log,
+		done:   make(chan struct{}),
+		auth: hubauth.NewClient(
+			hubauth.ClientConfig{
+				Address:  cfg.Address,
+				KeyPath:  cfg.KeyPath,
+				Insecure: cfg.Insecure,
+			},
+		),
+	}
 }
 
 // Start launches the forwarding loop.
