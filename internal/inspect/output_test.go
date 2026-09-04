@@ -20,10 +20,11 @@ func TestPrintRowsUsesProvidedWriter(t *testing.T) {
 		Method:      "POST",
 		Path:        "/v1/responses",
 		UpstreamURL: "https://example.test",
+		Effort:      "xhigh",
 		Input:       sql.NullInt64{Int64: 10, Valid: true},
 		Cached:      sql.NullInt64{Int64: 3, Valid: true},
 	}})
-	if text := output.String(); !strings.Contains(text, "id: req-1") || !strings.Contains(text, "tokens: input=7") {
+	if text := output.String(); !strings.Contains(text, "id: req-1") || !strings.Contains(text, "effort: xhigh") || !strings.Contains(text, "tokens: input=7") {
 		t.Fatalf("unexpected output: %s", text)
 	}
 }

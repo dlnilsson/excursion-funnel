@@ -213,6 +213,7 @@ type UsageEvent struct {
 	ModelRequested string
 	ModelReported  string
 	Stream         bool
+	Effort         string
 
 	HTTPStatus        int
 	UpstreamRequestID string

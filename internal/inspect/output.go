@@ -41,6 +41,9 @@ func printRows(out io.Writer, rows []report.InspectRow) {
 		fmt.Fprintf(out, "model_requested: %s\n", reporting.EmptyAsDash(row.ModelRequested))
 		fmt.Fprintf(out, "model_reported: %s\n", reporting.EmptyAsDash(row.ModelReported))
 		fmt.Fprintf(out, "stream: %t\n", row.Stream)
+		if row.Effort != "" {
+			fmt.Fprintf(out, "effort: %s\n", row.Effort)
+		}
 		if row.HTTPStatus.Valid {
 			fmt.Fprintf(out, "http_status: %d\n", row.HTTPStatus.Int64)
 		}

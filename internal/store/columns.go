@@ -100,6 +100,7 @@ var requestsTable = table[requestRow]{
 		{name: "model_requested", ddl: "VARCHAR", value: func(r requestRow) any { return nullableString(r.event.ModelRequested) }},
 		{name: "model_reported", ddl: "VARCHAR", value: func(r requestRow) any { return nullableString(r.event.ModelReported) }},
 		{name: "stream", ddl: "BOOLEAN NOT NULL DEFAULT false", value: func(r requestRow) any { return r.event.Stream }},
+		{name: "effort", ddl: "VARCHAR", value: func(r requestRow) any { return nullableString(r.event.Effort) }},
 		{name: "http_status", ddl: "INTEGER", value: func(r requestRow) any { return r.event.HTTPStatus }},
 		{name: "upstream_request_id", ddl: "VARCHAR", value: func(r requestRow) any { return nullableString(r.event.UpstreamRequestID) }},
 		{name: "user_agent", ddl: "VARCHAR", value: func(r requestRow) any { return nullableString(r.event.UserAgent) }},

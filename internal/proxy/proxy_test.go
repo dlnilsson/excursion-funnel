@@ -63,7 +63,7 @@ data: {"type":"response.completed","response":{"id":"resp_stream","model":"gpt-5
 
 	sink := &recordingSink{}
 	p := newTestProxy(t, upstream.URL, upstream.URL, sink)
-	resp := postJSON(t, p.Handler(), "/v1/responses", `{"model":"gpt-5.3-codex","stream":true}`)
+	resp := postJSON(t, p.Handler(), "/v1/responses", `{"model":"gpt-5.3-codex","stream":true,"reasoning":{"effort":"high"}}`)
 	defer resp.Body.Close()
 	gotBody, _ := io.ReadAll(resp.Body)
 	if string(gotBody) != body {
@@ -73,6 +73,9 @@ data: {"type":"response.completed","response":{"id":"resp_stream","model":"gpt-5
 	ev := sink.one(t)
 	if !ev.Stream || ev.ResponseID != "resp_stream" || ev.ModelReported != "gpt-5.3-codex" {
 		t.Fatalf("event = %+v, want streaming OpenAI metadata", ev)
+	}
+	if ev.Effort != "high" {
+		t.Fatalf("Effort = %q, want %q", ev.Effort, "high")
 	}
 	checkUsagePtr(t, "InputTokens", ev.Usage.InputTokens, 11)
 	checkUsagePtr(t, "OutputTokens", ev.Usage.OutputTokens, 7)
@@ -952,6 +955,27 @@ func TestPeekClientContext(t *testing.T) {
 			directory, branch := peekClientContext([]byte(test.body))
 			if directory != test.directory || branch != test.gitBranch {
 				t.Fatalf("peekClientContext() = (%q, %q), want (%q, %q)", directory, branch, test.directory, test.gitBranch)
+			}
+		})
+	}
+}
+
+func TestPeekEffort(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		want string
+	}{
+		{name: "anthropic", body: `{"output_config":{"effort":"xhigh"}}`, want: "xhigh"},
+		{name: "openai responses", body: `{"reasoning":{"effort":"low"}}`, want: "low"},
+		{name: "openai chat completions", body: `{"reasoning_effort":"minimal"}`, want: "minimal"},
+		{name: "missing", body: `{"model":"gpt-5.6-sol"}`},
+		{name: "malformed field preserves others", body: `{"reasoning":"invalid","reasoning_effort":"high"}`, want: "high"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := peekEffort([]byte(test.body)); got != test.want {
+				t.Fatalf("peekEffort() = %q, want %q", got, test.want)
 			}
 		})
 	}

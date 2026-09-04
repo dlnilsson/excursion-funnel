@@ -806,8 +806,8 @@ func TestInspect_FindsByResponseID(t *testing.T) {
 		t.Fatalf("rows len = %d, want 1: %+v", len(rows), rows)
 	}
 	got := rows[0]
-	if got.ID != "req-openai-1" || got.Provider != "openai" || got.Client != "Codex CLI" || got.ModelReported != "gpt-5.3-codex" {
-		t.Fatalf("inspect row = %+v, want req-openai-1/openai/Codex CLI/gpt-5.3-codex", got)
+	if got.ID != "req-openai-1" || got.Provider != "openai" || got.Client != "Codex CLI" || got.ModelReported != "gpt-5.3-codex" || got.Effort != "high" {
+		t.Fatalf("inspect row = %+v, want req-openai-1/openai/Codex CLI/gpt-5.3-codex/high", got)
 	}
 	if !got.Total.Valid || got.Total.Int64 != 15 {
 		t.Fatalf("total = %+v, want valid 15", got.Total)
@@ -1311,6 +1311,7 @@ func seedReportDB(t *testing.T) string {
 			Path:          "/v1/responses",
 			UpstreamURL:   "https://api.openai.com/v1/responses",
 			ModelReported: "gpt-5.3-codex",
+			Effort:        "high",
 			HTTPStatus:    200,
 			UserAgent:     "codex-tui/0.146.0",
 			Usage: queue.Usage{

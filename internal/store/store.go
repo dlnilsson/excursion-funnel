@@ -158,12 +158,29 @@ func OpenRemote(ctx context.Context, address, token string, disableSSL bool) (*S
 func remoteHasStagingTables(ctx context.Context, db *sql.DB) (bool, error) {
 	// Query information_schema.columns rather than .tables: attached Quack
 	// catalogs populate the column view but not the table view.
-	var count int
-	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM information_schema.columns
-WHERE table_name = 'staging_requests'`).Scan(&count); err != nil {
+	rows, err := db.QueryContext(ctx, `SELECT column_name FROM information_schema.columns
+WHERE table_name = 'staging_requests'`)
+	if err != nil {
 		return false, err
 	}
-	return count > 0, nil
+	defer rows.Close()
+	columns := make(map[string]bool, len(requestsTable.columns))
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return false, err
+		}
+		columns[strings.ToLower(name)] = true
+	}
+	if err := rows.Err(); err != nil {
+		return false, err
+	}
+	for _, name := range requestsTable.names() {
+		if !columns[strings.ToLower(name)] {
+			return false, nil
+		}
+	}
+	return true, nil
 }
 
 func openDuckDB(path string, readOnly bool) (*sql.DB, error) {
@@ -375,7 +392,7 @@ func ensureLedgerSchema(db *sql.DB) error {
 	for _, col := range []struct{ name, typ string }{
 		{"originator", "VARCHAR"}, {"client_name", "VARCHAR"},
 		{"session_id", "VARCHAR"},
-		{"directory", "VARCHAR"}, {"git_branch", "VARCHAR"},
+		{"directory", "VARCHAR"}, {"git_branch", "VARCHAR"}, {"effort", "VARCHAR"},
 		{"source", "VARCHAR DEFAULT 'unknown'"}, {"host", "VARCHAR"},
 	} {
 		if err := addColumnIfMissing(db, "requests", col.name, col.typ); err != nil {
@@ -434,7 +451,7 @@ func ensureStagingSchema(db *sql.DB) error {
 	if _, err := db.Exec(create); err != nil {
 		return fmt.Errorf("create staging schema: %w", err)
 	}
-	return nil
+	return addColumnIfMissing(db, "staging_requests", "effort", "VARCHAR")
 }
 
 func backfillSessions(db *sql.DB) error {
