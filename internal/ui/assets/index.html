@@ -751,6 +751,17 @@
     padding: 1rem;
   }
 
+  .version-info {
+    color: var(--text-muted);
+    font-size: 0.75rem;
+    margin: 1.5rem 0 0;
+    text-align: center;
+  }
+
+  .version-info:empty {
+    display: none;
+  }
+
   @media (max-width: 960px) {
     .tool-command-cell {
       min-width: 16rem;
@@ -993,6 +1004,8 @@ requires_openai_auth = true</code></pre>
       </div>
     </section>
   </details>
+
+  <p class="version-info" id="version-info"></p>
 </footer>
 
 <script src="/ui/assets/vendor/chart.umd.min.js"></script>
@@ -1261,6 +1274,17 @@ async function load() {
   renderErrors(errors);
   renderTools(tools);
   renderWebRequests(webRequests);
+}
+
+// renderVersion mirrors the "ef version" output. It is fetched separately from
+// load() so a failing usage query still shows the build, and vice versa.
+async function loadVersion() {
+  try {
+    const metadata = await fetch("/ui/api/version").then(r => r.json());
+    document.getElementById("version-info").textContent =
+      `ef ${metadata.Version} (duckdb ${metadata.DuckDBVersion}; driver ${metadata.DuckDBDriverVersion})`;
+  } catch {
+  }
 }
 
 // hideLoadingOverlay fades the overlay out and removes it once the transition
@@ -2075,6 +2099,7 @@ initThemeToggle();
 initToolCopy();
 initSourceFilters();
 load().finally(hideLoadingOverlay);
+loadVersion();
 </script>
 </body>
 </html>

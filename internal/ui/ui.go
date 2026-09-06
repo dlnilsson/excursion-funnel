@@ -12,6 +12,7 @@ import (
 
 	"github.com/dlnilsson/excursion-funnel/internal/report"
 	"github.com/dlnilsson/excursion-funnel/internal/reporting"
+	"github.com/dlnilsson/excursion-funnel/internal/version"
 )
 
 //go:embed assets/index.html assets/vendor/*
@@ -36,6 +37,7 @@ func New(rep *report.Reporter, log *slog.Logger) http.Handler {
 	mux.Handle("GET /ui", http.RedirectHandler("/ui/", http.StatusMovedPermanently))
 	mux.HandleFunc("GET /ui/", handleIndex)
 	mux.Handle("GET /ui/assets/", http.StripPrefix("/ui/assets/", http.FileServerFS(staticAssets)))
+	mux.HandleFunc("GET /ui/api/version", handleVersion(version.Current()))
 	mux.HandleFunc("GET /ui/api/kpis", handleKPIs(rep, log))
 	mux.HandleFunc("GET /ui/api/sessions", handleSessions(rep, log))
 	mux.HandleFunc("GET /ui/api/summary", handleSummaryFor(rep, log, "summary", "source_model"))
@@ -134,6 +136,14 @@ func handleKPIs(rep *report.Reporter, log *slog.Logger) http.HandlerFunc {
 			return
 		}
 		writeJSON(w, stats)
+	}
+}
+
+// handleVersion reports the same build metadata the "ef version" command
+// prints, resolved once at handler construction.
+func handleVersion(metadata version.Metadata) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, metadata)
 	}
 }
 
