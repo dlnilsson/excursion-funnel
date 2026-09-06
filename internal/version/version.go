@@ -2,6 +2,7 @@
 package version
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -20,23 +21,29 @@ var Build string
 
 // Metadata identifies the ef build and its DuckDB dependencies.
 type Metadata struct {
-	Version             string
-	DuckDBVersion       string
-	DuckDBDriverVersion string
+	Version             string `json:"version"`
+	GoVersion           string `json:"go_version"`
+	DuckDBVersion       string `json:"duckdb_version"`
+	DuckDBDriverVersion string `json:"duckdb_driver_version"`
 }
 
-// Run writes build information to out.
-func Run(args []string, out io.Writer) error {
-	return RunTo(args, out, Current())
+// Run writes build information to out, as JSON when asJSON is set.
+func Run(args []string, out io.Writer, asJSON bool) error {
+	return RunTo(args, out, Current(), asJSON)
 }
 
 // RunTo writes metadata to out. It exists to make command output testable.
-func RunTo(args []string, out io.Writer, metadata Metadata) error {
+func RunTo(args []string, out io.Writer, metadata Metadata, asJSON bool) error {
 	if len(args) != 0 {
 		return fmt.Errorf("unexpected argument %q", args[0])
 	}
-	fmt.Fprintf(out, "ef %s (duckdb %s; driver %s)\n",
-		metadata.Version, metadata.DuckDBVersion, metadata.DuckDBDriverVersion)
+	if asJSON {
+		encoder := json.NewEncoder(out)
+		encoder.SetIndent("", "  ")
+		return encoder.Encode(metadata)
+	}
+	fmt.Fprintf(out, "ef %s (%s; duckdb %s; driver %s)\n",
+		metadata.Version, metadata.GoVersion, metadata.DuckDBVersion, metadata.DuckDBDriverVersion)
 	return nil
 }
 
@@ -50,6 +57,7 @@ func Current() Metadata {
 func Resolve(injectedVersion string, info *debug.BuildInfo, duckDBVersion string) Metadata {
 	metadata := Metadata{
 		Version:             strings.TrimSpace(injectedVersion),
+		GoVersion:           "unknown",
 		DuckDBVersion:       strings.TrimSpace(duckDBVersion),
 		DuckDBDriverVersion: "unknown",
 	}
@@ -57,6 +65,9 @@ func Resolve(injectedVersion string, info *debug.BuildInfo, duckDBVersion string
 		metadata.DuckDBVersion = "unknown"
 	}
 	if info != nil {
+		if goVersion := strings.TrimSpace(info.GoVersion); goVersion != "" {
+			metadata.GoVersion = goVersion
+		}
 		if metadata.Version == "" {
 			for _, setting := range info.Settings {
 				if setting.Key == "vcs.revision" {
@@ -123,6 +134,7 @@ func allCharacters(value, allowed string) bool {
 func LogStartup(log *slog.Logger, command string, metadata Metadata) {
 	log.Info("excursion-funnel starting", "command", command,
 		"version", metadata.Version,
+		"go_version", metadata.GoVersion,
 		"duckdb_version", metadata.DuckDBVersion,
 		"duckdb_driver_version", metadata.DuckDBDriverVersion)
 }

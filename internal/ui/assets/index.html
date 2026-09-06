@@ -1282,7 +1282,7 @@ async function loadVersion() {
   try {
     const metadata = await fetch("/ui/api/version").then(r => r.json());
     document.getElementById("version-info").textContent =
-      `ef ${metadata.Version} (duckdb ${metadata.DuckDBVersion}; driver ${metadata.DuckDBDriverVersion})`;
+      `ef ${metadata.version} (${metadata.go_version}; duckdb ${metadata.duckdb_version}; driver ${metadata.duckdb_driver_version})`;
   } catch {
   }
 }

@@ -100,8 +100,8 @@ func TestExecuteKeepsDetailedVersionCommand(t *testing.T) {
 		t.Fatalf("version returned %v: %s", err, stderr)
 	}
 	metadata := appversion.Current()
-	want := fmt.Sprintf("ef %s (duckdb %s; driver %s)",
-		metadata.Version, metadata.DuckDBVersion, metadata.DuckDBDriverVersion)
+	want := fmt.Sprintf("ef %s (%s; duckdb %s; driver %s)",
+		metadata.Version, metadata.GoVersion, metadata.DuckDBVersion, metadata.DuckDBDriverVersion)
 	if !strings.Contains(stdout, want) {
 		t.Fatalf("detailed version output missing %q:\n%s", want, stdout)
 	}
