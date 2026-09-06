@@ -49,6 +49,41 @@ To build a Linux x86-64 binary from Windows using an Ubuntu WSL distribution:
 The binary is written to `dist\ef-linux-amd64`. Pass `-Output` to choose a
 different path.
 
+### Building a Linux binary that runs on other machines
+
+A binary built with `go build` only runs on machines whose glibc is at least as
+new as the glibc it was built against. Build on a rolling distribution such as
+Arch and the result will fail to start on a stable server:
+
+```
+/usr/local/bin/ef: /lib/x86_64-linux-gnu/libm.so.6: version `GLIBC_2.43' not found
+```
+
+To produce a portable binary from Linux, build inside the GoReleaser Cross
+container, which ships an older glibc:
+
+```sh
+./scripts/goreleaser-build.sh
+```
+
+This needs `docker` (running), `goreleaser`, `go`, and `npm` on the host. The
+binary is written to `dist/ef-linux-amd64`, and currently requires glibc 2.38 or
+newer on the target. Set `IMAGE` to an older GoReleaser Cross image if you need
+to support an older target.
+
+Check what a binary actually requires before shipping it:
+
+```sh
+objdump -T dist/ef-linux-amd64 | grep -oP 'GLIBC_\d+\.\d+' | sort -uV | tail -1
+```
+
+> [!WARNING]
+> Linking statically (`-extldflags "-static"`) does not solve this. `ef hub`
+> runs `LOAD quack`, and DuckDB loads extensions with `dlopen`, which a
+> statically linked glibc binary cannot do. It builds and passes `--help`, then
+> aborts at startup with
+> `Fatal glibc error: rtld_static_init.c:90: assertion failed: guard_sym != NULL`.
+
 ## 2. Run it locally (standalone mode)
 
 This is the normal way to use it on your own computer. One command starts
