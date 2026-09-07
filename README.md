@@ -368,8 +368,8 @@ variable (flags win if both are set).
 | `EF_ADDR` | `-addr` | `127.0.0.1:8787` | Address the proxy/dashboard listens on. |
 | `EF_OPENAI_UPSTREAM` | `-openai-upstream` | `https://chatgpt.com/backend-api/codex` | Where Codex requests actually get sent. Use `https://api.openai.com/v1` if you use a platform API key. |
 | `EF_ANTHROPIC_UPSTREAM` | `-anthropic-upstream` | `https://api.anthropic.com` | Where Claude Code requests actually get sent. |
-| `EF_DB` | `-db` | `%LOCALAPPDATA%\excursion-funnel\usage.duckdb` | Where the usage database file lives. |
-| `EF_OUTBOX` | `-outbox` | next to the database, `outbox.sqlite` | Local backup file used in team mode so nothing's lost if the hub is down. |
+| `EF_DB` | `-db` | platform data directory below, `usage.duckdb` | Where the usage database file lives. |
+| `EF_OUTBOX` | `-outbox` | platform data directory below, `outbox.sqlite` | Local backup file used in team mode so nothing's lost if the hub is down. |
 | `EF_QUACK_ADDR` | `-quack-addr` | `127.0.0.1:9494` | Internal address used for reading the local database. |
 | `EF_HUB_ADDR` | `-hub-addr` | (none) | Address of the shared hub. Setting this turns on team mode. |
 | `EF_HUB_TOKEN` | `-hub-token` | (none) | Hub-only internal Quack token; never configure it on clients. |
@@ -387,6 +387,14 @@ variable (flags win if both are set).
 | `EF_UI_ENABLED` | `-ui-enabled` | `true` | Turns the web dashboard on or off. |
 
 Time values use plain Go-style durations: `500ms`, `5s`, `2m`, etc.
+
+On Unix, the default data directory is `$XDG_DATA_HOME/excursion-funnel`,
+falling back to `~/.local/state/excursion-funnel` when `XDG_DATA_HOME` is unset,
+empty, or relative. On Windows, it is `%LOCALAPPDATA%\excursion-funnel`,
+falling back to the home directory's `excursion-funnel` folder.
+`EF_DB` and `EF_OUTBOX` override their respective file paths independently.
+Existing files are not moved automatically. Stop `ef` before moving files
+from the old `~/excursion-funnel` directory to the new location.
 
 
 </details>

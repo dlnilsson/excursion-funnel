@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"time"
 
@@ -221,13 +222,21 @@ func Validate(cfg Config) error {
 	return nil
 }
 
-// defaultDBPath mirrors the Windows-first layout from the plan:
-// %LOCALAPPDATA%\excursion-funnel\usage.duckdb, with a home-dir fallback.
+// defaultDBPath uses XDG_DATA_HOME on Unix, falling back to ~/.local/state.
+// Windows uses LOCALAPPDATA with a home-directory fallback.
 func defaultDBPath() string {
-	base := os.Getenv("LOCALAPPDATA")
+	base := os.Getenv("XDG_DATA_HOME")
+	if runtime.GOOS == "windows" {
+		base = os.Getenv("LOCALAPPDATA")
+	} else if !filepath.IsAbs(base) {
+		base = ""
+	}
 	if base == "" {
 		if home, err := os.UserHomeDir(); err == nil {
 			base = home
+			if runtime.GOOS != "windows" {
+				base = filepath.Join(base, ".local", "state")
+			}
 		} else {
 			base = "."
 		}
