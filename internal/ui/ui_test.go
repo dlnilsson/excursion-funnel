@@ -82,6 +82,7 @@ func TestHandleIndex_ServesDashboardHTML(t *testing.T) {
 		t.Fatalf("body contains CDN dependency: %s", rec.Body.String())
 	}
 	for _, marker := range []string{
+		`/ui/assets/favicon.svg`,
 		`/ui/assets/vendor/chart.umd.min.js`,
 		`/ui/assets/vendor/highlight.min.js`,
 		`/ui/assets/vendor/github-dark.min.css`,
@@ -306,6 +307,7 @@ func TestHandleAssets_ServesEmbeddedDependencies(t *testing.T) {
 		contentType string
 		marker      string
 	}{
+		{"/ui/assets/favicon.svg", "image/svg+xml", "viewBox=\"0 0 64 64\""},
 		{"/ui/assets/vendor/chart.umd.min.js", "javascript", "Chart"},
 		{"/ui/assets/vendor/highlight.min.js", "javascript", "hljs"},
 		{"/ui/assets/vendor/github-dark.min.css", "text/css", ".hljs"},

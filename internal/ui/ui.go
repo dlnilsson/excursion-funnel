@@ -15,7 +15,7 @@ import (
 	"github.com/dlnilsson/excursion-funnel/internal/version"
 )
 
-//go:embed assets/index.html assets/vendor/*
+//go:embed assets/favicon.svg assets/index.html assets/vendor/*
 var assets embed.FS
 
 const recentErrorsLimit = 20
