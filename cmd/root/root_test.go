@@ -34,7 +34,7 @@ func TestRoot_RegistersCommandsAndCompletion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"serve", "hub", "version", "usage", "sessions", "tools", "requests", "inspect", "completion"} {
+	for _, name := range []string{"serve", "setup", "hub", "version", "usage", "sessions", "tools", "requests", "inspect", "completion"} {
 		if !strings.Contains(stdout, name) {
 			t.Fatalf("help missing command %q:\n%s", name, stdout)
 		}
@@ -71,7 +71,7 @@ func TestRoot_UnknownCommandReturnsSuggestionError(t *testing.T) {
 }
 
 func TestRoot_SubcommandHelpSucceeds(t *testing.T) {
-	for _, args := range [][]string{{"serve", "--help"}, {"usage", "--help"}, {"sessions", "--help"}, {"sessions", "today", "--help"}, {"sessions", "week", "--help"}, {"tools", "--help"}, {"requests", "--help"}} {
+	for _, args := range [][]string{{"setup", "--help"}, {"setup", "claude", "--help"}, {"serve", "--help"}, {"usage", "--help"}, {"sessions", "--help"}, {"sessions", "today", "--help"}, {"sessions", "week", "--help"}, {"tools", "--help"}, {"requests", "--help"}} {
 		if _, _, err := execute(t, args...); err != nil {
 			t.Fatalf("%v returned %v", args, err)
 		}

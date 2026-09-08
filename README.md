@@ -106,7 +106,14 @@ Once it's running:
 
 ### Point Codex at it
 
-Create `~/.codex/excursion-funnel.config.toml`:
+Run:
+
+```sh
+ef setup codex
+```
+
+This adds the ef provider to `$HOME/.codex/config.toml` on Linux or
+`%USERPROFILE%\.codex\config.toml` on Windows:
 
 ```toml
 model_provider = "excursion-funnel"
@@ -120,7 +127,15 @@ requires_openai_auth = true
 
 ### Point Claude Code at it
 
-Edit `$HOME/.claude/settings.json`:
+Run:
+
+```sh
+ef setup claude
+```
+
+This sets `env.ANTHROPIC_BASE_URL` in your Claude Code settings to the default
+local proxy URL. The settings file is `$HOME/.claude/settings.json` on Linux
+and `%USERPROFILE%\.claude\settings.json` on Windows:
 
 ```json
 {
@@ -130,6 +145,9 @@ Edit `$HOME/.claude/settings.json`:
 }
 ```
 
+Setup creates missing settings and fills an empty URL while preserving other
+settings. If the URL already matches, it leaves the file untouched. If another
+URL is set or the file is invalid, it reports an error without modifying it.
 That's it. Claude Code and Codex will now route through Excursion Funnel, and
 every request gets logged.
 
