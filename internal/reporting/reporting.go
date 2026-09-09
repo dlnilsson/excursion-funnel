@@ -3,6 +3,7 @@ package reporting
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -61,4 +62,18 @@ func ParseDate(value string) (time.Time, error) {
 		return time.Time{}, fmt.Errorf("expected YYYY-MM-DD: %w", err)
 	}
 	return parsed, nil
+}
+
+// FormatTokenCount renders a token count using k/M/B suffixes for readability.
+func FormatTokenCount(value int64) string {
+	switch {
+	case value > -1_000 && value < 1_000:
+		return strconv.FormatInt(value, 10)
+	case value > -1_000_000 && value < 1_000_000:
+		return fmt.Sprintf("%.1fk", float64(value)/1_000)
+	case value > -1_000_000_000 && value < 1_000_000_000:
+		return fmt.Sprintf("%.1fM", float64(value)/1_000_000)
+	default:
+		return fmt.Sprintf("%.1fB", float64(value)/1_000_000_000)
+	}
 }

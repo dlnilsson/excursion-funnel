@@ -94,7 +94,7 @@ func summaryColumns(groupBy string) []summaryColumn {
 	}
 	tokenCount := func(header string, value func(report.SummaryRow) int64) summaryColumn {
 		column := number(header, value)
-		column.footerValue = func(row report.SummaryRow) string { return formatTokenCount(value(row)) }
+		column.footerValue = func(row report.SummaryRow) string { return reporting.FormatTokenCount(value(row)) }
 		return column
 	}
 
@@ -135,17 +135,4 @@ func summaryColumns(groupBy string) []summaryColumn {
 	}
 
 	return append(dimensions, usage...)
-}
-
-func formatTokenCount(value int64) string {
-	switch {
-	case value > -1_000 && value < 1_000:
-		return strconv.FormatInt(value, 10)
-	case value > -1_000_000 && value < 1_000_000:
-		return fmt.Sprintf("%.1fk", float64(value)/1_000)
-	case value > -1_000_000_000 && value < 1_000_000_000:
-		return fmt.Sprintf("%.1fM", float64(value)/1_000_000)
-	default:
-		return fmt.Sprintf("%.1fB", float64(value)/1_000_000_000)
-	}
 }
