@@ -94,6 +94,7 @@ func summaryColumns(groupBy string) []summaryColumn {
 	}
 	tokenCount := func(header string, value func(report.SummaryRow) int64) summaryColumn {
 		column := number(header, value)
+		column.value = func(row report.SummaryRow) string { return reporting.FormatTokenCount(value(row)) }
 		column.footerValue = func(row report.SummaryRow) string { return reporting.FormatTokenCount(value(row)) }
 		return column
 	}
