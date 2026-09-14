@@ -3,6 +3,7 @@ package usage
 import (
 	"bytes"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -161,4 +162,36 @@ type errorWriter struct {
 
 func (w errorWriter) Write([]byte) (int, error) {
 	return 0, w.err
+}
+
+func TestPrintRowsSortsByTotalDescending(t *testing.T) {
+	rows := []report.SummaryRow{
+		{Provider: "openai", Total: 10},
+		{Provider: "empty", Total: 0},
+		{Provider: "anthropic", Total: 300},
+		{Provider: "tied-first", Total: 200},
+		{Provider: "tied-second", Total: 200},
+	}
+	original := append([]report.SummaryRow(nil), rows...)
+	var output bytes.Buffer
+	if err := printRows(&output, rows, "provider"); err != nil {
+		t.Fatal(err)
+	}
+
+	text := output.String()
+	want := []string{"anthropic", "tied-first", "tied-second", "openai", "empty"}
+	previous := -1
+	for _, provider := range want {
+		at := strings.Index(text, provider)
+		if at < 0 {
+			t.Fatalf("output missing provider %q:\n%s", provider, text)
+		}
+		if at < previous {
+			t.Errorf("provider %q out of order, want order %v:\n%s", provider, want, text)
+		}
+		previous = at
+	}
+	if !reflect.DeepEqual(rows, original) {
+		t.Errorf("printRows() mutated caller rows = %v, want %v", rows, original)
+	}
 }

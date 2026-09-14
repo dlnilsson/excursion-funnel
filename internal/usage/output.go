@@ -3,6 +3,7 @@ package usage
 import (
 	"fmt"
 	"io"
+	"sort"
 	"strconv"
 
 	"github.com/dlnilsson/excursion-funnel/internal/report"
@@ -26,6 +27,7 @@ func printRows(out io.Writer, rows []report.SummaryRow, groupBy string) error {
 		return err
 	}
 
+	rows = sortedByTotal(rows)
 	columns := summaryColumns(groupBy)
 	headers := make([]string, len(columns))
 	numeric := make([]bool, len(columns))
@@ -49,6 +51,15 @@ func printRows(out io.Writer, rows []report.SummaryRow, groupBy string) error {
 		FooterRows: 1,
 		RightAlign: func(column int) bool { return numeric[column] },
 	})
+}
+
+// sortedByTotal orders the table view by the TOTAL column, highest first,
+// without mutating the caller's slice.
+func sortedByTotal(rows []report.SummaryRow) []report.SummaryRow {
+	sorted := make([]report.SummaryRow, len(rows))
+	copy(sorted, rows)
+	sort.SliceStable(sorted, func(i, j int) bool { return sorted[i].Total > sorted[j].Total })
+	return sorted
 }
 
 func summaryTotalRow(columns []summaryColumn, rows []report.SummaryRow) []string {
