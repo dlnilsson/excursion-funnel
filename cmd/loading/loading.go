@@ -97,6 +97,8 @@ func clearLine(out io.Writer) error {
 // Run displays a loading animation while task executes and returns its result.
 func Run[T any](ctx context.Context, statusOut io.Writer, text string, task func() (T, error)) (T, error) {
 	var zero T
+	unlock := termio.LockEcho()
+	defer unlock()
 	cmd := func() tea.Msg {
 		value, err := task()
 		return finishedMsg[T]{value: value, err: err}
