@@ -133,7 +133,7 @@ func writeHeader(page *strings.Builder, opts Options, rangeLabel string, stats S
 	page.WriteString(labelStyle.Render(rangeLabel))
 	page.WriteByte('\n')
 
-	chips := make([]string, 0, 3+len(opts.Extra))
+	chips := make([]string, 0, 4+len(opts.Extra))
 	chips = append(chips, fmt.Sprintf("%s %s across %d active %s",
 		reporting.FormatTokenCount(stats.Total), opts.Unit, stats.ActiveCount, bucketUnit))
 	if stats.Peak.Total > 0 {
@@ -144,8 +144,9 @@ func writeHeader(page *strings.Builder, opts Options, rangeLabel string, stats S
 		chips = append(chips, fmt.Sprintf("Peak %s %s %s",
 			reporting.FormatTokenCount(stats.Peak.Total), preposition, when))
 	}
-	if stats.StreakDays > 0 {
-		chips = append(chips, fmt.Sprintf("Streak %dd", stats.StreakDays))
+	if stats.LongestStreakDays > 0 {
+		chips = append(chips, fmt.Sprintf("Streak %dd", stats.StreakDays),
+			fmt.Sprintf("Longest streak %dd", stats.LongestStreakDays))
 	}
 	chips = append(chips, opts.Extra...)
 	page.WriteString(wrapChips(chips, opts.Width))

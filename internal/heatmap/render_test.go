@@ -141,6 +141,7 @@ func TestRenderCalendarShowsStatsAndExtraChips(t *testing.T) {
 		"2.0M tokens across 3 active days",
 		"Peak 2.0M on 2026-09-15",
 		"Streak 3d",
+		"Longest streak 3d",
 		"Longest session 5h 6m",
 	} {
 		if !strings.Contains(text, want) {

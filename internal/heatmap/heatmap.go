@@ -57,7 +57,10 @@ type Stats struct {
 	Total       int64
 	ActiveCount int
 	Peak        Bucket
-	StreakDays  int
+	// StreakDays is the run of active days ending now; LongestStreakDays is the
+	// longest run anywhere in the buckets. Both are zero for hour buckets.
+	StreakDays        int
+	LongestStreakDays int
 }
 
 // levels holds the shading ramp. Glyph and color both carry the level so the
@@ -109,34 +112,50 @@ func Summarize(buckets []Bucket, now time.Time) Stats {
 			stats.Peak = bucket
 		}
 	}
-	stats.StreakDays = streak(buckets, now)
+	stats.StreakDays, stats.LongestStreakDays = streaks(buckets, now)
 	return stats
 }
 
-// streak counts consecutive active days ending today, or ending yesterday when
-// today has no activity yet, so checking early in the morning does not report a
-// broken streak. It returns zero unless buckets are whole days.
-func streak(buckets []Bucket, now time.Time) int {
+// streaks returns the run of consecutive active days ending today — or ending
+// yesterday when today has no activity yet, so checking early in the morning
+// does not report a broken streak — and the longest run anywhere in the
+// buckets. Both are zero unless the buckets are whole days.
+func streaks(buckets []Bucket, now time.Time) (current, longest int) {
+	if len(buckets) == 0 {
+		return 0, 0
+	}
 	active := make(map[string]bool, len(buckets))
 	for _, bucket := range buckets {
+		if !bucket.At.Equal(reporting.BeginningOfDay(bucket.At)) {
+			return 0, 0
+		}
 		if bucket.Total > 0 {
 			active[dayKey(bucket.At)] = true
 		}
-		if !bucket.At.Equal(reporting.BeginningOfDay(bucket.At)) {
-			return 0
+	}
+
+	// Walk the calendar rather than the slice so a caller that passes gappy
+	// buckets cannot join two runs that are not actually adjacent.
+	run := 0
+	last := reporting.BeginningOfDay(buckets[len(buckets)-1].At)
+	for day := reporting.BeginningOfDay(buckets[0].At); !day.After(last); day = day.AddDate(0, 0, 1) {
+		if !active[dayKey(day)] {
+			run = 0
+			continue
 		}
+		run++
+		longest = max(longest, run)
 	}
 
 	day := reporting.BeginningOfDay(now)
 	if !active[dayKey(day)] {
 		day = day.AddDate(0, 0, -1)
 	}
-	count := 0
 	for active[dayKey(day)] {
-		count++
+		current++
 		day = day.AddDate(0, 0, -1)
 	}
-	return count
+	return current, longest
 }
 
 func dayKey(value time.Time) string { return value.Format("2006-01-02") }

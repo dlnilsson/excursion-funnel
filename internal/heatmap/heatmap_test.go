@@ -81,47 +81,63 @@ func TestSummarizeCountsActiveBucketsAndPeak(t *testing.T) {
 	}
 }
 
-func TestSummarizeStreak(t *testing.T) {
+func TestSummarizeStreaks(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 9, 16, 9, 0, 0, 0, time.Local)
 	tests := []struct {
-		name    string
-		buckets []Bucket
-		want    int
+		name                  string
+		buckets               []Bucket
+		wantCurrent, wantLong int
 	}{
 		{
-			name:    "run ending today",
-			buckets: []Bucket{day(t, 2026, 9, 14, 1), day(t, 2026, 9, 15, 1), day(t, 2026, 9, 16, 1)},
-			want:    3,
+			name:        "run ending today",
+			buckets:     []Bucket{day(t, 2026, 9, 14, 1), day(t, 2026, 9, 15, 1), day(t, 2026, 9, 16, 1)},
+			wantCurrent: 3, wantLong: 3,
 		},
 		{
 			// Checking early in the morning must not report a broken streak.
-			name:    "run ending yesterday",
-			buckets: []Bucket{day(t, 2026, 9, 14, 1), day(t, 2026, 9, 15, 1), day(t, 2026, 9, 16, 0)},
-			want:    2,
+			name:        "run ending yesterday",
+			buckets:     []Bucket{day(t, 2026, 9, 14, 1), day(t, 2026, 9, 15, 1), day(t, 2026, 9, 16, 0)},
+			wantCurrent: 2, wantLong: 2,
 		},
 		{
-			name:    "two day gap ends the run",
-			buckets: []Bucket{day(t, 2026, 9, 13, 1), day(t, 2026, 9, 14, 0), day(t, 2026, 9, 15, 0), day(t, 2026, 9, 16, 0)},
-			want:    0,
+			name:        "two day gap ends the run",
+			buckets:     []Bucket{day(t, 2026, 9, 13, 1), day(t, 2026, 9, 14, 0), day(t, 2026, 9, 15, 0), day(t, 2026, 9, 16, 0)},
+			wantCurrent: 0, wantLong: 1,
 		},
 		{
-			name:    "no activity at all",
-			buckets: []Bucket{day(t, 2026, 9, 15, 0), day(t, 2026, 9, 16, 0)},
-			want:    0,
+			name:        "no activity at all",
+			buckets:     []Bucket{day(t, 2026, 9, 15, 0), day(t, 2026, 9, 16, 0)},
+			wantCurrent: 0, wantLong: 0,
+		},
+		{
+			// The shape the real ledger had: a longer run earlier in the window
+			// than the one still going.
+			name: "earlier run is longer than the current one",
+			buckets: []Bucket{
+				day(t, 2026, 9, 6, 1), day(t, 2026, 9, 7, 1), day(t, 2026, 9, 8, 1),
+				day(t, 2026, 9, 9, 1), day(t, 2026, 9, 10, 1), day(t, 2026, 9, 11, 1),
+				day(t, 2026, 9, 12, 1), day(t, 2026, 9, 13, 0),
+				day(t, 2026, 9, 14, 1), day(t, 2026, 9, 15, 1), day(t, 2026, 9, 16, 1),
+			},
+			wantCurrent: 3, wantLong: 7,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			if got := Summarize(tt.buckets, now).StreakDays; got != tt.want {
-				t.Errorf("StreakDays = %d, want %d", got, tt.want)
+			stats := Summarize(tt.buckets, now)
+			if stats.StreakDays != tt.wantCurrent {
+				t.Errorf("StreakDays = %d, want %d", stats.StreakDays, tt.wantCurrent)
+			}
+			if stats.LongestStreakDays != tt.wantLong {
+				t.Errorf("LongestStreakDays = %d, want %d", stats.LongestStreakDays, tt.wantLong)
 			}
 		})
 	}
 }
 
-func TestSummarizeLeavesStreakZeroForHourBuckets(t *testing.T) {
+func TestSummarizeLeavesStreaksZeroForHourBuckets(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 9, 16, 9, 0, 0, 0, time.Local)
 	start := time.Date(2026, 9, 16, 0, 0, 0, 0, time.Local)
@@ -130,8 +146,10 @@ func TestSummarizeLeavesStreakZeroForHourBuckets(t *testing.T) {
 		buckets = append(buckets, Bucket{At: start.Add(time.Duration(hour) * time.Hour), Total: 5})
 	}
 
-	if got := Summarize(buckets, now).StreakDays; got != 0 {
-		t.Fatalf("StreakDays = %d for hourly buckets, want 0", got)
+	stats := Summarize(buckets, now)
+	if stats.StreakDays != 0 || stats.LongestStreakDays != 0 {
+		t.Fatalf("streaks = %d and %d for hourly buckets, want 0 and 0",
+			stats.StreakDays, stats.LongestStreakDays)
 	}
 }
 
