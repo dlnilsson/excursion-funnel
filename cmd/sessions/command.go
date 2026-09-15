@@ -2,13 +2,14 @@
 package sessions
 
 import (
-	"io"
-
 	"github.com/dlnilsson/excursion-funnel/cmd/loading"
 	"github.com/dlnilsson/excursion-funnel/cmd/reportflags"
+	"github.com/dlnilsson/excursion-funnel/internal/report"
 	appsessions "github.com/dlnilsson/excursion-funnel/internal/sessions"
 	"github.com/spf13/cobra"
 )
+
+const loadingSessionsText = "Loading sessions…"
 
 type options struct {
 	connection *reportflags.Flags
@@ -39,18 +40,29 @@ func New() *cobra.Command {
 
 func run(opts *options, shortcut string) func(*cobra.Command, []string) error {
 	return func(cmd *cobra.Command, _ []string) error {
-		appOpts := appsessions.Options{
-			Connection: opts.connection.Resolve(cmd.Flags()),
-			Since:      opts.since,
-			Until:      opts.until,
-			GroupBy:    opts.groupBy,
-			Shortcut:   shortcut,
-			Source:     reportflags.CurrentSource(opts.all),
-			JSON:       opts.json,
+		var (
+			ctx       = cmd.Context()
+			out       = cmd.OutOrStdout()
+			statusOut = cmd.ErrOrStderr()
+			appOpts   = appsessions.Options{
+				Connection: opts.connection.Resolve(cmd.Flags()),
+				Since:      opts.since,
+				Until:      opts.until,
+				GroupBy:    opts.groupBy,
+				Shortcut:   shortcut,
+				Source:     reportflags.CurrentSource(opts.all),
+				JSON:       opts.json,
+			}
+		)
+		if !loading.ShouldAnimate(appOpts.JSON, loading.IsTerminalWriter(out), loading.IsTerminalWriter(statusOut)) {
+			return appsessions.Run(ctx, out, appOpts)
 		}
-		return loading.RunBuffered(cmd.Context(), cmd.OutOrStdout(), cmd.ErrOrStderr(), appOpts.JSON,
-			"Loading sessions…", func(out io.Writer) error {
-				return appsessions.Run(cmd.Context(), out, appOpts)
-			})
+		rows, err := loading.Run(ctx, statusOut, loadingSessionsText, func() ([]report.SessionRow, error) {
+			return appsessions.Load(ctx, appOpts)
+		})
+		if err != nil {
+			return err
+		}
+		return appsessions.Render(out, rows, appOpts)
 	}
 }
