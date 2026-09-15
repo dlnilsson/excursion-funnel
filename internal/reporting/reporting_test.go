@@ -65,3 +65,33 @@ func TestFormatTokenCount(t *testing.T) {
 		})
 	}
 }
+
+func TestFormatDuration(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		value time.Duration
+		want  string
+	}{
+		{"zero", 0, "0s"},
+		{"sub second", 999 * time.Millisecond, "0s"},
+		{"negative", -time.Hour, "0s"},
+		{"seconds", 12 * time.Second, "12s"},
+		{"boundary 59s", 59 * time.Second, "59s"},
+		{"one minute", time.Minute, "1m"},
+		{"minutes", 47 * time.Minute, "47m"},
+		{"boundary 59m", 59*time.Minute + 59*time.Second, "59m"},
+		{"whole hour", time.Hour, "1h"},
+		{"hours and minutes", 5*time.Hour + 6*time.Minute, "5h 6m"},
+		{"hours drop seconds", 5*time.Hour + 6*time.Minute + 30*time.Second, "5h 6m"},
+		{"many hours", 49*time.Hour + 1*time.Minute, "49h 1m"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := FormatDuration(tt.value); got != tt.want {
+				t.Errorf("FormatDuration(%v) = %q, want %q", tt.value, got, tt.want)
+			}
+		})
+	}
+}

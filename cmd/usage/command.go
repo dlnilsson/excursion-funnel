@@ -2,13 +2,24 @@
 package usage
 
 import (
-	"io"
+	"errors"
 
 	"github.com/dlnilsson/excursion-funnel/cmd/loading"
 	"github.com/dlnilsson/excursion-funnel/cmd/reportflags"
+	"github.com/dlnilsson/excursion-funnel/internal/heatmap"
+	"github.com/dlnilsson/excursion-funnel/internal/reporting"
 	appusage "github.com/dlnilsson/excursion-funnel/internal/usage"
 	"github.com/spf13/cobra"
 )
+
+const loadingUsageText = "Loading usage…"
+
+// ErrHeatmapWithGroupBy reports --heatmap combined with an explicit --group-by,
+// which would silently ignore the grouping.
+// The message deliberately leads with a word rather than a flag name: Fang
+// capitalizes the first letter of every rendered error, which would print
+// "--Heatmap".
+var ErrHeatmapWithGroupBy = errors.New("the calendar always groups by time; drop --group-by to use --heatmap")
 
 type options struct {
 	connection *reportflags.Flags
@@ -19,6 +30,7 @@ type options struct {
 	branch     string
 	all        bool
 	json       bool
+	heatmap    bool
 }
 
 // New creates the usage command and its today child command.
@@ -33,6 +45,7 @@ func New() *cobra.Command {
 	cmd.PersistentFlags().StringVar(&opts.branch, "branch", "", "only requests from this git branch")
 	cmd.PersistentFlags().BoolVar(&opts.all, "all", false, "include usage recorded from all sources")
 	cmd.PersistentFlags().BoolVar(&opts.json, "json", false, "print the summary as JSON")
+	cmd.PersistentFlags().BoolVar(&opts.heatmap, "heatmap", false, "render a token-activity calendar instead of the summary table")
 	cmd.RunE = run(&opts, false)
 	cmd.AddCommand(&cobra.Command{
 		Use:   "today",
@@ -45,20 +58,39 @@ func New() *cobra.Command {
 
 func run(opts *options, today bool) func(*cobra.Command, []string) error {
 	return func(cmd *cobra.Command, _ []string) error {
-		appOpts := appusage.Options{
-			Connection: opts.connection.Resolve(cmd.Flags()),
-			Since:      opts.since,
-			Until:      opts.until,
-			GroupBy:    opts.groupBy,
-			Directory:  opts.directory,
-			Branch:     opts.branch,
-			Source:     reportflags.CurrentSource(opts.all),
-			JSON:       opts.json,
-			Today:      today,
+		if opts.heatmap && cmd.Flags().Changed("group-by") {
+			return ErrHeatmapWithGroupBy
 		}
-		return loading.RunBuffered(cmd.Context(), cmd.OutOrStdout(), cmd.ErrOrStderr(), appOpts.JSON,
-			"Loading usage…", func(out io.Writer) error {
-				return appusage.Run(cmd.Context(), out, appOpts)
-			})
+		var (
+			ctx       = cmd.Context()
+			out       = cmd.OutOrStdout()
+			statusOut = cmd.ErrOrStderr()
+			appOpts   = appusage.Options{
+				Connection: opts.connection.Resolve(cmd.Flags()),
+				Since:      opts.since,
+				Until:      opts.until,
+				GroupBy:    opts.groupBy,
+				Directory:  opts.directory,
+				Branch:     opts.branch,
+				Source:     reportflags.CurrentSource(opts.all),
+				JSON:       opts.json,
+				Today:      today,
+				Heatmap:    opts.heatmap,
+			}
+		)
+		// Measure the real output stream: rendering may happen after the
+		// loading animation, but never into it.
+		appOpts.Width = reporting.TerminalWidth(out, heatmap.FullWidth, heatmap.FullWidth)
+
+		if !loading.ShouldAnimate(appOpts.JSON, loading.IsTerminalWriter(out), loading.IsTerminalWriter(statusOut)) {
+			return appusage.Run(ctx, out, appOpts)
+		}
+		data, err := loading.Run(ctx, statusOut, loadingUsageText, func() (appusage.Data, error) {
+			return appusage.Load(ctx, appOpts)
+		})
+		if err != nil {
+			return err
+		}
+		return appusage.Render(out, data, appOpts)
 	}
 }

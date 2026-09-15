@@ -323,6 +323,12 @@ ef inspect --all
 # Today's usage only.
 ef usage today
 
+# Token activity as a calendar heatmap, the same view as the dashboard panel.
+ef usage --heatmap
+
+# For a single day the heatmap becomes an hour-by-hour strip.
+ef usage today --heatmap
+
 # Usage per provider, for a specific date range.
 ef usage --since 2026-08-01 --until 2026-08-07 --group-by provider
 

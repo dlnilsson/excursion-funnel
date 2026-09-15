@@ -173,6 +173,23 @@ type HourlyTokenRow struct {
 	Output     int64
 }
 
+// TokenActivityOptions controls a bucketed token-activity query. Since is
+// inclusive and Until is exclusive.
+type TokenActivityOptions struct {
+	Since     time.Time
+	Until     time.Time
+	Bucket    string // "day" or "hour"
+	Directory string
+	Branch    string
+	Source    string
+}
+
+// TokenActivityRow is one zero-filled bucket of total token activity.
+type TokenActivityRow struct {
+	At    time.Time
+	Total int64
+}
+
 // KPIOptions controls a dashboard KPI query. Since is inclusive and Until is
 // exclusive, matching the usage-reporting date range semantics.
 type KPIOptions struct {
@@ -417,6 +434,118 @@ ORDER BY hour`, args, func(rows *sql.Rows, row *HourlyTokenRow) error {
 	}
 	return out, nil
 }
+
+// TokenActivity returns zero-filled token totals for every bucket in the
+// selected interval, which the terminal and web heatmaps both shade.
+//
+// It is deliberately separate from HourlyTokens: that method reports fresh
+// input and output for the dashboard's throughput chart, while a heatmap needs
+// one total per bucket and the same directory/branch/source filters the rest of
+// the usage report honors.
+func (r *Reporter) TokenActivity(ctx context.Context, opts TokenActivityOptions) ([]TokenActivityRow, error) {
+	if opts.Bucket != "day" && opts.Bucket != "hour" {
+		return nil, fmt.Errorf("unsupported token activity bucket %q (want day or hour)", opts.Bucket)
+	}
+	if opts.Since.IsZero() || opts.Until.IsZero() {
+		return nil, errors.New("token activity range requires since and until")
+	}
+	if !opts.Since.Before(opts.Until) {
+		return nil, errors.New("token activity range must have since before until")
+	}
+
+	where, args := r.activityWhere(opts)
+	scanned, err := queryRows(ctx, r.store.DB(), "token activity", `SELECT
+  date_trunc('`+opts.Bucket+`', started_at) AS bucket,
+  SUM(COALESCE(total_tokens, 0)) AS total_tokens
+FROM requests
+`+where+`
+GROUP BY bucket
+ORDER BY bucket`, args, func(rows *sql.Rows, row *TokenActivityRow) error {
+		return rows.Scan(&row.At, &row.Total)
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	// Key by formatted local time rather than by instant: TIMESTAMPTZ values
+	// can arrive in a different Location than the one the boundaries are built
+	// in, and a day boundary is not a fixed offset across a DST change.
+	aggregated := make(map[string]int64, len(scanned))
+	for _, row := range scanned {
+		aggregated[activityKey(row.At)] += row.Total
+	}
+
+	start := reporting.BeginningOfHour(opts.Since)
+	step := func(at time.Time) time.Time { return at.Add(time.Hour) }
+	if opts.Bucket == "day" {
+		start = reporting.BeginningOfDay(opts.Since)
+		step = func(at time.Time) time.Time { return at.AddDate(0, 0, 1) }
+	}
+	out := make([]TokenActivityRow, 0, int(opts.Until.Sub(start)/time.Hour)+1)
+	for at := start; at.Before(opts.Until); at = step(at) {
+		out = append(out, TokenActivityRow{At: at, Total: aggregated[activityKey(at)]})
+	}
+	return out, nil
+}
+
+// LongestSession returns the span between the first and last request of the
+// longest session in the selected interval. The final request's own duration is
+// not included, because a session is measured from the request timestamps the
+// ledger retains. ok is false when no session qualifies.
+func (r *Reporter) LongestSession(ctx context.Context, opts TokenActivityOptions) (time.Duration, bool, error) {
+	schema, err := r.sessionSchema(ctx)
+	if err != nil {
+		return 0, false, err
+	}
+	if schema.sessionExpression == "" {
+		return 0, false, nil
+	}
+
+	where, args := r.activityWhere(opts)
+	where = appendWherePredicate(where, schema.sessionExpression+" IS NOT NULL")
+	// Grouping inside a subquery keeps this a single-table scan, which a
+	// Quack-attached remote catalog requires.
+	var seconds sql.NullInt64
+	err = r.store.DB().QueryRowContext(ctx, `SELECT MAX(span_seconds) FROM (
+  SELECT date_diff('second', MIN(started_at), MAX(started_at)) AS span_seconds
+  FROM requests
+  `+where+`
+  GROUP BY `+schema.sessionExpression+`
+) spans`, args...).Scan(&seconds)
+	if err != nil {
+		return 0, false, fmt.Errorf("query longest session: %w", err)
+	}
+	if !seconds.Valid || seconds.Int64 <= 0 {
+		return 0, false, nil
+	}
+	return time.Duration(seconds.Int64) * time.Second, true, nil
+}
+
+// activityWhere builds the shared WHERE clause for the heatmap queries.
+func (r *Reporter) activityWhere(opts TokenActivityOptions) (string, []any) {
+	where, args := timeRange("started_at", opts.Since, opts.Until)
+	if opts.Directory != "" {
+		where = appendWherePredicate(where, "directory = ?")
+		args = append(args, opts.Directory)
+	}
+	if opts.Branch != "" {
+		where = appendWherePredicate(where, "git_branch = ?")
+		args = append(args, opts.Branch)
+	}
+	if opts.Source != "" {
+		where = appendWherePredicate(where, "COALESCE(source, 'unknown') = ?")
+		args = append(args, opts.Source)
+	}
+	return where, args
+}
+
+// activityKey identifies a bucket by its local wall-clock hour.
+//
+// Normalizing to local is what makes the key match on both sides: DuckDB
+// truncates in its session zone, which is the process-local zone, but hands the
+// value back as the equivalent UTC instant, so local midnight arrives as the
+// previous day in UTC.
+func activityKey(at time.Time) string { return at.Local().Format("2006-01-02T15") }
 
 // KPIs returns operational request metrics for the selected interval. The
 // aggregate and concurrency inputs are fetched in separate single-table scans

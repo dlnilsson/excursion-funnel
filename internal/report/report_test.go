@@ -1361,3 +1361,180 @@ func seedReportDB(t *testing.T) string {
 	}
 	return dbPath
 }
+
+func TestTokenActivity_FillsEmptyBucketsAndHonorsFilters(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "usage.duckdb")
+	st, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatalf("store.Open() error = %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+
+	var (
+		day     = time.Date(2026, 8, 2, 0, 0, 0, 0, time.Local)
+		mine    = int64(100)
+		theirs  = int64(7)
+		started = day.Add(13 * time.Hour)
+	)
+	if err := st.InsertBatch(t.Context(), []queue.UsageEvent{
+		{
+			RequestID: "mine", Source: "daniel", StartedAt: started,
+			Method: "POST", Path: "/v1/messages", UpstreamURL: "https://api.anthropic.com/v1/messages",
+			Directory: "/work/api", GitBranch: "main",
+			Usage: queue.Usage{TotalTokens: &mine},
+		},
+		{
+			RequestID: "theirs", Source: "teammate", StartedAt: started,
+			Method: "POST", Path: "/v1/messages", UpstreamURL: "https://api.anthropic.com/v1/messages",
+			Directory: "/work/ui", GitBranch: "feature",
+			Usage: queue.Usage{TotalTokens: &theirs},
+		},
+	}); err != nil {
+		t.Fatalf("InsertBatch() error = %v", err)
+	}
+	reporter := New(st)
+
+	t.Run("days are zero filled", func(t *testing.T) {
+		rows, err := reporter.TokenActivity(t.Context(), TokenActivityOptions{
+			Since: day.AddDate(0, 0, -1), Until: day.AddDate(0, 0, 2), Bucket: "day",
+		})
+		if err != nil {
+			t.Fatalf("TokenActivity() error = %v", err)
+		}
+		if len(rows) != 3 {
+			t.Fatalf("returned %d rows, want 3: %+v", len(rows), rows)
+		}
+		if rows[0].Total != 0 || rows[2].Total != 0 {
+			t.Fatalf("empty days = %+v and %+v, want zero totals", rows[0], rows[2])
+		}
+		if rows[1].Total != mine+theirs {
+			t.Fatalf("active day = %+v, want total %d", rows[1], mine+theirs)
+		}
+		if !rows[1].At.Equal(day) {
+			t.Fatalf("active day At = %s, want %s", rows[1].At, day)
+		}
+	})
+
+	t.Run("hours are zero filled", func(t *testing.T) {
+		rows, err := reporter.TokenActivity(t.Context(), TokenActivityOptions{
+			Since: day, Until: day.AddDate(0, 0, 1), Bucket: "hour",
+		})
+		if err != nil {
+			t.Fatalf("TokenActivity() error = %v", err)
+		}
+		if len(rows) != 24 {
+			t.Fatalf("returned %d rows, want 24", len(rows))
+		}
+		if rows[13].Total != mine+theirs {
+			t.Fatalf("hour 13 = %+v, want total %d", rows[13], mine+theirs)
+		}
+		for index, row := range rows {
+			if index != 13 && row.Total != 0 {
+				t.Fatalf("hour %d = %+v, want zero", index, row)
+			}
+		}
+	})
+
+	t.Run("filters narrow the totals", func(t *testing.T) {
+		for name, opts := range map[string]TokenActivityOptions{
+			"source":    {Source: "daniel"},
+			"directory": {Directory: "/work/api"},
+			"branch":    {Branch: "main"},
+		} {
+			opts.Since, opts.Until, opts.Bucket = day, day.AddDate(0, 0, 1), "day"
+			rows, err := reporter.TokenActivity(t.Context(), opts)
+			if err != nil {
+				t.Fatalf("%s: TokenActivity() error = %v", name, err)
+			}
+			if len(rows) != 1 || rows[0].Total != mine {
+				t.Fatalf("%s filter = %+v, want a single row totaling %d", name, rows, mine)
+			}
+		}
+	})
+
+	// Regression: DuckDB truncates in its session zone but returns the value as
+	// the equivalent UTC instant, so local midnight arrives as the previous day
+	// in UTC. Keying the zero-fill by the raw value dropped every bucket.
+	t.Run("early morning local activity lands on its local day", func(t *testing.T) {
+		earlyPath := filepath.Join(t.TempDir(), "early.duckdb")
+		early, err := store.Open(earlyPath)
+		if err != nil {
+			t.Fatalf("store.Open() error = %v", err)
+		}
+		t.Cleanup(func() { _ = early.Close() })
+
+		tokens := int64(64)
+		if err := early.InsertBatch(t.Context(), []queue.UsageEvent{{
+			RequestID: "early", StartedAt: day.Add(30 * time.Minute),
+			Method: "POST", Path: "/v1/messages", UpstreamURL: "https://api.anthropic.com/v1/messages",
+			Usage: queue.Usage{TotalTokens: &tokens},
+		}}); err != nil {
+			t.Fatalf("InsertBatch() error = %v", err)
+		}
+
+		rows, err := New(early).TokenActivity(t.Context(), TokenActivityOptions{
+			Since: day, Until: day.AddDate(0, 0, 1), Bucket: "day",
+		})
+		if err != nil {
+			t.Fatalf("TokenActivity() error = %v", err)
+		}
+		if len(rows) != 1 || !rows[0].At.Equal(day) || rows[0].Total != tokens {
+			t.Fatalf("rows = %+v, want %d tokens on %s", rows, tokens, day)
+		}
+	})
+
+	t.Run("invalid ranges and buckets are rejected", func(t *testing.T) {
+		for name, opts := range map[string]TokenActivityOptions{
+			"unknown bucket": {Since: day, Until: day.AddDate(0, 0, 1), Bucket: "week"},
+			"zero since":     {Until: day, Bucket: "day"},
+			"zero until":     {Since: day, Bucket: "day"},
+			"inverted":       {Since: day.AddDate(0, 0, 1), Until: day, Bucket: "day"},
+		} {
+			if _, err := reporter.TokenActivity(t.Context(), opts); err == nil {
+				t.Fatalf("%s returned nil error", name)
+			}
+		}
+	})
+}
+
+func TestLongestSession(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "usage.duckdb")
+	st, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatalf("store.Open() error = %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+
+	day := time.Date(2026, 8, 2, 0, 0, 0, 0, time.Local)
+	window := TokenActivityOptions{Since: day, Until: day.AddDate(0, 0, 1), Bucket: "day"}
+
+	if _, ok, err := New(st).LongestSession(t.Context(), window); err != nil || ok {
+		t.Fatalf("LongestSession() on an empty ledger = ok %v, err %v, want false and nil", ok, err)
+	}
+
+	event := func(id, session string, at time.Time) queue.UsageEvent {
+		return queue.UsageEvent{
+			RequestID: id, SessionID: session, StartedAt: at,
+			Method: "POST", Path: "/v1/messages", UpstreamURL: "https://api.anthropic.com/v1/messages",
+		}
+	}
+	if err := st.InsertBatch(t.Context(), []queue.UsageEvent{
+		event("a1", "short", day.Add(time.Hour)),
+		event("a2", "short", day.Add(time.Hour+20*time.Minute)),
+		event("b1", "long", day.Add(2*time.Hour)),
+		event("b2", "long", day.Add(7*time.Hour+6*time.Minute)),
+	}); err != nil {
+		t.Fatalf("InsertBatch() error = %v", err)
+	}
+
+	got, ok, err := New(st).LongestSession(t.Context(), window)
+	if err != nil {
+		t.Fatalf("LongestSession() error = %v", err)
+	}
+	if !ok {
+		t.Fatal("LongestSession() ok = false, want true")
+	}
+	if want := 5*time.Hour + 6*time.Minute; got != want {
+		t.Fatalf("LongestSession() = %s, want %s", got, want)
+	}
+}

@@ -77,3 +77,25 @@ func FormatTokenCount(value int64) string {
 		return fmt.Sprintf("%.1fB", float64(value)/1_000_000_000)
 	}
 }
+
+// FormatDuration renders a wall-clock span compactly: hours with minutes
+// ("5h 6m"), then minutes ("47m"), then seconds ("12s"). Sub-second and
+// negative spans render as "0s".
+func FormatDuration(value time.Duration) string {
+	if value < time.Second {
+		return "0s"
+	}
+	switch {
+	case value >= time.Hour:
+		hours := value / time.Hour
+		minutes := (value % time.Hour) / time.Minute
+		if minutes == 0 {
+			return fmt.Sprintf("%dh", hours)
+		}
+		return fmt.Sprintf("%dh %dm", hours, minutes)
+	case value >= time.Minute:
+		return fmt.Sprintf("%dm", value/time.Minute)
+	default:
+		return fmt.Sprintf("%ds", value/time.Second)
+	}
+}
