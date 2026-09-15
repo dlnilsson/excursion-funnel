@@ -2,8 +2,6 @@
 package requests
 
 import (
-	"io"
-
 	"github.com/dlnilsson/excursion-funnel/cmd/loading"
 	"github.com/dlnilsson/excursion-funnel/cmd/reportflags"
 	"github.com/dlnilsson/excursion-funnel/internal/report"
@@ -44,18 +42,29 @@ func New() *cobra.Command {
 
 func run(opts *options, today bool) func(*cobra.Command, []string) error {
 	return func(cmd *cobra.Command, _ []string) error {
-		appOpts := apprequests.Options{
-			Connection: opts.connection.Resolve(cmd.Flags()),
-			Limit:      opts.limit,
-			Since:      opts.since,
-			Until:      opts.until,
-			Source:     reportflags.CurrentSource(opts.all),
-			JSON:       opts.json,
-			Today:      today,
+		var (
+			ctx       = cmd.Context()
+			out       = cmd.OutOrStdout()
+			statusOut = cmd.ErrOrStderr()
+			appOpts   = apprequests.Options{
+				Connection: opts.connection.Resolve(cmd.Flags()),
+				Limit:      opts.limit,
+				Since:      opts.since,
+				Until:      opts.until,
+				Source:     reportflags.CurrentSource(opts.all),
+				JSON:       opts.json,
+				Today:      today,
+			}
+		)
+		if !loading.ShouldAnimate(appOpts.JSON, loading.IsTerminalWriter(out), loading.IsTerminalWriter(statusOut)) {
+			return apprequests.Run(ctx, out, appOpts)
 		}
-		return loading.RunBuffered(cmd.Context(), cmd.OutOrStdout(), cmd.ErrOrStderr(), appOpts.JSON,
-			loadingRequestsText, func(out io.Writer) error {
-				return apprequests.Run(cmd.Context(), out, appOpts)
-			})
+		rows, err := loading.Run(ctx, statusOut, loadingRequestsText, func() ([]report.WebRequestRow, error) {
+			return apprequests.Load(ctx, appOpts)
+		})
+		if err != nil {
+			return err
+		}
+		return apprequests.Render(out, rows, appOpts)
 	}
 }

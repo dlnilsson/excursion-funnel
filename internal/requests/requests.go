@@ -22,10 +22,15 @@ type Options struct {
 	Today      bool
 }
 
-// Run queries and writes web requests in the selected date range.
-func Run(ctx context.Context, out io.Writer, opts Options) error {
+// Load queries the ledger without writing anything.
+//
+// Loading is separated from rendering so a caller can show a loading animation
+// while the query runs and still render styled output straight to the terminal.
+// Rendering into a buffer would strip every color, because the color profile is
+// detected from the writer.
+func Load(ctx context.Context, opts Options) ([]report.WebRequestRow, error) {
 	if opts.Limit <= 0 {
-		return fmt.Errorf("--limit must be positive, got %d", opts.Limit)
+		return nil, fmt.Errorf("--limit must be positive, got %d", opts.Limit)
 	}
 	shortcut := reporting.ShortcutNone
 	if opts.Today {
@@ -33,25 +38,35 @@ func Run(ctx context.Context, out io.Writer, opts Options) error {
 	}
 	window, err := reporting.ResolveRange("requests", shortcut, opts.Since, opts.Until, time.Now())
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	reporter, err := report.OpenConnection(opts.Connection)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer reporter.Close()
-	rows, err := reporter.WebRequests(ctx, report.ToolCallOptions{
+	return reporter.WebRequests(ctx, report.ToolCallOptions{
 		Since:  window.Since,
 		Until:  window.Until,
 		Limit:  opts.Limit,
 		Source: opts.Source,
 	})
-	if err != nil {
-		return err
-	}
+}
+
+// Render writes loaded web requests in the requested output format.
+func Render(out io.Writer, rows []report.WebRequestRow, opts Options) error {
 	if opts.JSON {
 		return printJSON(out, rows)
 	}
 	return printRows(out, rows, opts.Today)
+}
+
+// Run queries and writes web requests in the selected date range.
+func Run(ctx context.Context, out io.Writer, opts Options) error {
+	rows, err := Load(ctx, opts)
+	if err != nil {
+		return err
+	}
+	return Render(out, rows, opts)
 }
