@@ -127,7 +127,7 @@ func TestPrintRowsAppendsGrandTotals(t *testing.T) {
 }
 
 func TestSummaryTotalRowCompactsTokenCounts(t *testing.T) {
-	columns := summaryColumns("provider")
+	columns := summaryColumns("provider", 1_500_000_000)
 	got := summaryTotalRow(columns, []report.SummaryRow{{
 		Requests:   1_000,
 		Errors:     1_000_000,
@@ -138,13 +138,71 @@ func TestSummaryTotalRowCompactsTokenCounts(t *testing.T) {
 		Reasoning:  1_500_000,
 		Total:      1_500_000_000,
 	}})
-	want := []string{"TOTAL", "1000", "1000000", "1.0k", "1.0M", "1.0B", "1.5k", "1.5M", "1.5B"}
+	want := []string{"TOTAL", "1000", "1000000", "1.0k", "1.0M", "1.0B", "1.5k", "1.5M", "1.5B", "100.0%"}
 	var (
 		gotText  = strings.Join(got, ",")
 		wantText = strings.Join(want, ",")
 	)
 	if gotText != wantText {
 		t.Errorf("summaryTotalRow() = %s, want %s", gotText, wantText)
+	}
+}
+
+func TestPrintRowsRendersShareOfTotal(t *testing.T) {
+	rows := []report.SummaryRow{
+		{Provider: "openai", Total: 750},
+		{Provider: "anthropic", Total: 250},
+	}
+	var output bytes.Buffer
+	if err := printRows(&output, rows, "provider"); err != nil {
+		t.Fatal(err)
+	}
+
+	text := output.String()
+	if !strings.Contains(text, "SHARE") {
+		t.Errorf("output missing SHARE header:\n%s", text)
+	}
+	for _, want := range []struct{ label, share string }{
+		{"openai", "75.0%"},
+		{"anthropic", "25.0%"},
+		{"TOTAL", "100.0%"},
+	} {
+		line := lineContaining(t, text, want.label)
+		if !strings.Contains(line, want.share) {
+			t.Errorf("row %q share = %q, want %q", want.label, line, want.share)
+		}
+	}
+}
+
+// lineContaining returns the last rendered line holding label, which is the
+// data or footer row rather than the header repeating the same word.
+func lineContaining(t *testing.T, text, label string) string {
+	t.Helper()
+	found := ""
+	for _, line := range strings.Split(text, "\n") {
+		if strings.Contains(line, label) {
+			found = line
+		}
+	}
+	if found == "" {
+		t.Fatalf("output missing row %q:\n%s", label, text)
+	}
+	return found
+}
+
+func TestPrintRowsShareIsZeroWithoutTokens(t *testing.T) {
+	var output bytes.Buffer
+	if err := printRows(&output, []report.SummaryRow{{Provider: "openai"}}, "provider"); err != nil {
+		t.Fatal(err)
+	}
+	text := output.String()
+	if strings.Contains(text, "100.0%") {
+		t.Errorf("zero-token grand total must not report a full share:\n%s", text)
+	}
+	for _, label := range []string{"openai", "TOTAL"} {
+		if line := lineContaining(t, text, label); !strings.Contains(line, "0.0%") {
+			t.Errorf("row %q share = %q, want 0.0%%", label, line)
+		}
 	}
 }
 

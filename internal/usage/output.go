@@ -28,7 +28,7 @@ func printRows(out io.Writer, rows []report.SummaryRow, groupBy string) error {
 	}
 
 	rows = sortedByTotal(rows)
-	columns := summaryColumns(groupBy)
+	columns := summaryColumns(groupBy, summaryTotals(rows).Total)
 	headers := make([]string, len(columns))
 	numeric := make([]bool, len(columns))
 	values := make([][]string, 0, len(rows))
@@ -62,7 +62,8 @@ func sortedByTotal(rows []report.SummaryRow) []report.SummaryRow {
 	return sorted
 }
 
-func summaryTotalRow(columns []summaryColumn, rows []report.SummaryRow) []string {
+// summaryTotals sums every row into a single grand-total row.
+func summaryTotals(rows []report.SummaryRow) report.SummaryRow {
 	var total report.SummaryRow
 	for _, row := range rows {
 		total.Requests += row.Requests
@@ -75,6 +76,11 @@ func summaryTotalRow(columns []summaryColumn, rows []report.SummaryRow) []string
 		total.Reasoning += row.Reasoning
 		total.Total += row.Total
 	}
+	return total
+}
+
+func summaryTotalRow(columns []summaryColumn, rows []report.SummaryRow) []string {
+	total := summaryTotals(rows)
 
 	cells := make([]string, len(columns))
 	for index, column := range columns {
@@ -89,7 +95,7 @@ func summaryTotalRow(columns []summaryColumn, rows []report.SummaryRow) []string
 	return cells
 }
 
-func summaryColumns(groupBy string) []summaryColumn {
+func summaryColumns(groupBy string, grandTotal int64) []summaryColumn {
 	text := func(header string, value func(report.SummaryRow) string) summaryColumn {
 		return summaryColumn{header: header, value: value}
 	}
@@ -110,6 +116,18 @@ func summaryColumns(groupBy string) []summaryColumn {
 		return column
 	}
 
+	// share reports the row's portion of the grand total, so the footer row
+	// prints 100.0% whenever that total is positive.
+	share := func(header string) summaryColumn {
+		format := func(row report.SummaryRow) string {
+			if grandTotal <= 0 {
+				return "0.0%"
+			}
+			return fmt.Sprintf("%.1f%%", 100*float64(row.Total)/float64(grandTotal))
+		}
+		return summaryColumn{header: header, value: format, footerValue: format, numeric: true}
+	}
+
 	usage := []summaryColumn{
 		number("REQ", func(row report.SummaryRow) int64 { return row.Requests }),
 		number("ERR", func(row report.SummaryRow) int64 { return row.Errors }),
@@ -119,6 +137,7 @@ func summaryColumns(groupBy string) []summaryColumn {
 		tokenCount("OUTPUT", func(row report.SummaryRow) int64 { return row.Output }),
 		tokenCount("REASONING", func(row report.SummaryRow) int64 { return row.Reasoning }),
 		tokenCount("TOTAL", func(row report.SummaryRow) int64 { return row.Total }),
+		share("SHARE"),
 	}
 
 	var dimensions []summaryColumn
