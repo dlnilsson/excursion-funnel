@@ -37,7 +37,7 @@ func New(rep *report.Reporter, log *slog.Logger) http.Handler {
 	mux.Handle("GET /ui", http.RedirectHandler("/ui/", http.StatusMovedPermanently))
 	mux.HandleFunc("GET /ui/", handleIndex)
 	mux.Handle("GET /ui/assets/", http.StripPrefix("/ui/assets/", http.FileServerFS(staticAssets)))
-	mux.HandleFunc("GET /ui/api/version", handleVersion(version.Current()))
+	mux.HandleFunc("GET /ui/api/version", handleVersion(version.Current(), log))
 	mux.HandleFunc("GET /ui/api/kpis", handleKPIs(rep, log))
 	mux.HandleFunc("GET /ui/api/sessions", handleSessions(rep, log))
 	mux.HandleFunc("GET /ui/api/summary", handleSummaryFor(rep, log, "summary", "source_model"))
@@ -106,7 +106,7 @@ func handleSessions(rep *report.Reporter, log *slog.Logger) http.HandlerFunc {
 		response := sessionDashboard{Daily: daily, Weekly: weekly,
 			Today:    sessionCountsForPeriod(daily, reporting.BeginningOfDay(now).Format("2006-01-02")),
 			ThisWeek: sessionCountsForPeriod(weekly, reporting.BeginningOfWeek(now).Format("2006-01-02"))}
-		writeJSON(w, response)
+		writeJSON(w, log, response)
 	}
 }
 
@@ -135,15 +135,15 @@ func handleKPIs(rep *report.Reporter, log *slog.Logger) http.HandlerFunc {
 			http.Error(w, "internal error", http.StatusInternalServerError)
 			return
 		}
-		writeJSON(w, stats)
+		writeJSON(w, log, stats)
 	}
 }
 
 // handleVersion reports the same build metadata the "ef version" command
 // prints, resolved once at handler construction.
-func handleVersion(metadata version.Metadata) http.HandlerFunc {
+func handleVersion(metadata version.Metadata, log *slog.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, metadata)
+		writeJSON(w, log, metadata)
 	}
 }
 
@@ -162,7 +162,7 @@ func rowsHandler[T any](log *slog.Logger, label string, query func(*http.Request
 		if rows == nil {
 			rows = []T{}
 		}
-		writeJSON(w, rows)
+		writeJSON(w, log, rows)
 	}
 }
 
@@ -200,13 +200,17 @@ func handleHourlyHistory(rep *report.Reporter, log *slog.Logger) http.HandlerFun
 			http.Error(w, "internal error", http.StatusInternalServerError)
 			return
 		}
-		writeJSON(w, rows)
+		writeJSON(w, log, rows)
 	}
 }
 
-func writeJSON(w http.ResponseWriter, v any) {
+// writeJSON encodes v as the response body. Encoding errors are logged only:
+// the status line may already be sent, so the response cannot be replaced.
+func writeJSON(w http.ResponseWriter, log *slog.Logger, v any) {
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(v)
+	if err := json.NewEncoder(w).Encode(v); err != nil {
+		log.Error("ui: encode JSON response", "err", err)
+	}
 }
 
 // knownProviderRows keeps non-model requests (for example, curl health
