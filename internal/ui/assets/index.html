@@ -870,9 +870,9 @@
   <summary>Requests by model today</summary>
   <div class="source-filter" id="summary-source-filter" role="group" aria-label="Filter requests by source"></div>
   <table id="summary-table">
-    <thead><tr><th>Source</th><th>Client</th><th>Model</th><th>Requests</th><th>Errors</th><th>Input</th><th>Cached</th><th>Cache write</th><th>Output</th><th>Reasoning</th><th>Total</th></tr></thead>
+    <thead><tr><th>Source</th><th>Client</th><th>Model</th><th>Requests</th><th>Errors</th><th>Input</th><th>Cached</th><th>Cache write</th><th>Output</th><th>Reasoning</th><th>Total</th><th>Share</th></tr></thead>
     <tbody></tbody>
-    <tfoot><tr><th colspan="3">Total</th><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td></tr></tfoot>
+    <tfoot><tr><th colspan="3">Total</th><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td></tr></tfoot>
   </table>
 </details>
 
@@ -1507,8 +1507,8 @@ function renderSummaryTable() {
   const tfoot = document.querySelector("#summary-table tfoot");
   if (rows.length === 0) {
     tbody.innerHTML = latestSummaryRows.length === 0
-      ? '<tr><td colspan="11" class="empty">No requests recorded today</td></tr>'
-      : '<tr><td colspan="11" class="empty">No requests for the selected sources</td></tr>';
+      ? '<tr><td colspan="12" class="empty">No requests recorded today</td></tr>'
+      : '<tr><td colspan="12" class="empty">No requests for the selected sources</td></tr>';
     tfoot.hidden = true;
     return;
   }
@@ -1523,14 +1523,15 @@ function renderSummaryTable() {
     summary.Total += Number(row.Total) || 0;
     return summary;
   }, { Requests: 0, Errors: 0, Input: 0, Cached: 0, CacheWrite: 0, Output: 0, Reasoning: 0, Total: 0 });
+  const share = total => totals.Total > 0 ? `${(100 * (Number(total) || 0) / totals.Total).toFixed(1)}%` : "0.0%";
   tfoot.hidden = false;
   tfoot.innerHTML = `<tr>
     <th colspan="3">Total</th><td>${totals.Requests.toLocaleString()}</td><td>${totals.Errors.toLocaleString()}</td>
-    ${tokenCell(totals.Input)}${tokenCell(totals.Cached)}${tokenCell(totals.CacheWrite)}${tokenCell(totals.Output)}${tokenCell(totals.Reasoning)}${tokenCell(totals.Total)}
+    ${tokenCell(totals.Input)}${tokenCell(totals.Cached)}${tokenCell(totals.CacheWrite)}${tokenCell(totals.Output)}${tokenCell(totals.Reasoning)}${tokenCell(totals.Total)}<td>${share(totals.Total)}</td>
   </tr>`;
   tbody.innerHTML = rows.map(r => `<tr>
     <td>${escapeHTML(sourceLabel(r))}</td><td>${escapeHTML(clientLabel(r))}</td><td>${escapeHTML(r.Model)}</td><td>${r.Requests}</td><td>${r.Errors}</td>
-    ${tokenCell(freshInput(r))}${tokenCell(r.Cached)}${tokenCell(r.CacheWrite)}${tokenCell(r.Output)}${tokenCell(r.Reasoning)}${tokenCell(r.Total)}
+    ${tokenCell(freshInput(r))}${tokenCell(r.Cached)}${tokenCell(r.CacheWrite)}${tokenCell(r.Output)}${tokenCell(r.Reasoning)}${tokenCell(r.Total)}<td>${share(r.Total)}</td>
   </tr>`).join("");
 }
 
