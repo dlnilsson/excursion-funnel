@@ -117,7 +117,12 @@ func Run(ctx context.Context, cfg config.Config, out io.Writer) error {
 }
 
 func remoteDashboard(cfg config.Config, log *slog.Logger) http.Handler {
+	static := ui.New(nil, log)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !ui.NeedsReporter(r.URL.Path) {
+			static.ServeHTTP(w, r)
+			return
+		}
 		reporter, err := report.OpenHubRemote(cfg.HubAddr, cfg.HubKey, cfg.HubInsecure)
 		if err != nil {
 			log.Warn("hub dashboard unavailable", "err", err)
