@@ -53,7 +53,13 @@ func Run(ctx context.Context, cfg config.Config, out io.Writer) error {
 		defer forwarder.Stop()
 		writer = outbox
 		if cfg.UIEnabled {
-			dashboard = remoteDashboard(cfg, log)
+			hubUI := newHubDashboard(cfg, log)
+			defer func() {
+				if err := hubUI.Close(); err != nil {
+					log.Error("close hub dashboard", "err", err)
+				}
+			}()
+			dashboard = hubUI
 		}
 	} else {
 		mode = "standalone"
@@ -114,24 +120,6 @@ func Run(ctx context.Context, cfg config.Config, out io.Writer) error {
 		"openai_upstream", cfg.OpenAIUpstream, "anthropic_upstream", cfg.AnthropicUpstream,
 		"request_timeout", cfg.RequestTimeout, "idle_timeout", cfg.IdleTimeout, "ui_enabled", cfg.UIEnabled)
 	return runHTTPServer(ctx, cfg.Addr, handler, cfg.ShutdownTimeout, log, "excursion-funnel serving")
-}
-
-func remoteDashboard(cfg config.Config, log *slog.Logger) http.Handler {
-	static := ui.New(nil, log)
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !ui.NeedsReporter(r.URL.Path) {
-			static.ServeHTTP(w, r)
-			return
-		}
-		reporter, err := report.OpenHubRemote(cfg.HubAddr, cfg.HubKey, cfg.HubInsecure)
-		if err != nil {
-			log.Warn("hub dashboard unavailable", "err", err)
-			http.Error(w, "hub unavailable; usage is still being spooled: "+err.Error(), http.StatusServiceUnavailable)
-			return
-		}
-		defer reporter.Close()
-		ui.New(reporter, log).ServeHTTP(w, r)
-	})
 }
 
 func runHTTPServer(ctx context.Context, addr string, handler http.Handler, shutdownTimeout time.Duration, log *slog.Logger, message string) error {

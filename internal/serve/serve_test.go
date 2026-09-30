@@ -30,7 +30,7 @@ func TestRemoteDashboardServesStaticRoutesWithoutHub(t *testing.T) {
 		HubAddr: "127.0.0.1:1",
 		HubKey:  filepath.Join(t.TempDir(), "missing_key"),
 	}
-	handler := remoteDashboard(cfg, slog.New(slog.DiscardHandler))
+	handler := newHubDashboard(cfg, slog.New(slog.DiscardHandler))
 
 	for _, tc := range []struct {
 		path string
