@@ -25,26 +25,35 @@ func TestRunHTTPServerStopsOnContextCancellation(t *testing.T) {
 	testutil.AssertNoGoroutineLeaks(t, "internal/serve.runHTTPServer.func")
 }
 
-func TestRemoteDashboardServesStaticRoutesWithoutHub(t *testing.T) {
-	cfg := config.Config{
-		HubAddr: "127.0.0.1:1",
-		HubKey:  filepath.Join(t.TempDir(), "missing_key"),
-	}
-	handler := newHubDashboard(cfg, slog.New(slog.DiscardHandler))
-
+func TestRemoteDashboardRedirectsWithoutHub(t *testing.T) {
 	for _, tc := range []struct {
-		path string
-		want int
+		name     string
+		address  string
+		insecure bool
+		want     string
 	}{
-		{"/ui/", http.StatusOK},
-		{"/ui/assets/favicon.svg", http.StatusOK},
-		{"/ui/api/version", http.StatusOK},
-		{"/ui/api/kpis", http.StatusServiceUnavailable},
+		{"tls", "hub.example.test:9494", false, "https://hub.example.test:9494/ui/"},
+		{"insecure", "127.0.0.1:9494", true, "http://127.0.0.1:9494/ui/"},
+		{"quack URI", "quack://hub.example.test:9494", false, "https://hub.example.test:9494/ui/"},
+		{"quack address", " quack:hub.example.test:9494 ", false, "https://hub.example.test:9494/ui/"},
+		{"ipv6", "[::1]:9494", true, "http://[::1]:9494/ui/"},
 	} {
-		rec := httptest.NewRecorder()
-		handler.ServeHTTP(rec, httptest.NewRequestWithContext(t.Context(), http.MethodGet, tc.path, nil))
-		if rec.Code != tc.want {
-			t.Errorf("GET %s status = %d, want %d", tc.path, rec.Code, tc.want)
-		}
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := config.Config{
+				HubAddr: tc.address, HubInsecure: tc.insecure,
+				HubKey: filepath.Join(t.TempDir(), "missing_key"),
+			}
+			handler := newHubDashboard(cfg)
+			for _, path := range []string{"/ui", "/ui/", "/ui/api/kpis"} {
+				rec := httptest.NewRecorder()
+				handler.ServeHTTP(rec, httptest.NewRequestWithContext(t.Context(), http.MethodGet, path, nil))
+				if rec.Code != http.StatusFound {
+					t.Errorf("GET %s status = %d, want %d", path, rec.Code, http.StatusFound)
+				}
+				if got := rec.Header().Get("Location"); got != tc.want {
+					t.Errorf("GET %s Location = %q, want %q", path, got, tc.want)
+				}
+			}
+		})
 	}
 }

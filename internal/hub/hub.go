@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"strings"
 	"time"
 
 	"github.com/dlnilsson/excursion-funnel/internal/config"
@@ -78,6 +79,10 @@ func Run(ctx context.Context, cfg config.Config, out io.Writer) error {
 	quackProxy := httputil.NewSingleHostReverseProxy(upstream)
 	authHandler := auth.Handler()
 	gateway := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/ui" || strings.HasPrefix(r.URL.Path, "/ui/") {
+			mux.ServeHTTP(w, r)
+			return
+		}
 		if (r.Method == http.MethodGet && r.URL.Path == "/api/v1/auth/challenge") || (r.Method == http.MethodPost && r.URL.Path == "/api/v1/auth") {
 			authHandler.ServeHTTP(w, r)
 			return

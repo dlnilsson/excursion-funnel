@@ -8,7 +8,6 @@ import (
 	"io/fs"
 	"log/slog"
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/dlnilsson/excursion-funnel/internal/report"
@@ -26,12 +25,6 @@ const recentToolCallsLimit = 50
 const recentWebRequestsLimit = 50
 
 const hourlyHistoryBuckets = 24
-
-// NeedsReporter reports whether a dashboard request path reads the usage
-// ledger. Other paths are static and served without a Reporter.
-func NeedsReporter(path string) bool {
-	return strings.HasPrefix(path, "/ui/api/") && path != "/ui/api/version"
-}
 
 // New builds the dashboard handler, rooted at /ui/.
 func New(rep *report.Reporter, log *slog.Logger) http.Handler {

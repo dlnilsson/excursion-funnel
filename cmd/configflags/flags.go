@@ -34,7 +34,7 @@ func (f *Flags) BindServe(fs *pflag.FlagSet) {
 	fs.DurationVar(&f.values.QueueDrainTimeout, "queue-drain-timeout", f.values.QueueDrainTimeout, "usage queue drain timeout during shutdown")
 	fs.DurationVar(&f.values.ForwardInterval, "forward-interval", f.values.ForwardInterval, "distributed outbox polling interval")
 	fs.IntVar(&f.values.RetentionDays, "retention-days", f.values.RetentionDays, "delete usage rows older than this many days at startup (0 disables)")
-	fs.BoolVar(&f.values.UIEnabled, "ui-enabled", f.values.UIEnabled, "serve the read-only dashboard at /ui/")
+	fs.BoolVar(&f.values.UIEnabled, "ui-enabled", f.values.UIEnabled, "enable /ui/ (redirects to the hub in distributed mode)")
 	fs.BoolVar(&f.values.WebProxyEnabled, "web-proxy", f.values.WebProxyEnabled, "act as a forward/CONNECT proxy for non-provider web traffic (opt-in; default off)")
 }
 

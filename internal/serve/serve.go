@@ -53,13 +53,7 @@ func Run(ctx context.Context, cfg config.Config, out io.Writer) error {
 		defer forwarder.Stop()
 		writer = outbox
 		if cfg.UIEnabled {
-			hubUI := newHubDashboard(cfg, log)
-			defer func() {
-				if err := hubUI.Close(); err != nil {
-					log.Error("close hub dashboard", "err", err)
-				}
-			}()
-			dashboard = hubUI
+			dashboard = newHubDashboard(cfg)
 		}
 	} else {
 		mode = "standalone"
@@ -109,7 +103,7 @@ func Run(ctx context.Context, cfg config.Config, out io.Writer) error {
 	if dashboard != nil {
 		proxyHandler := p.Handler()
 		handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.Method != http.MethodConnect && !r.URL.IsAbs() && strings.HasPrefix(r.URL.Path, "/ui/") {
+			if r.Method != http.MethodConnect && !r.URL.IsAbs() && (r.URL.Path == "/ui" || strings.HasPrefix(r.URL.Path, "/ui/")) {
 				dashboard.ServeHTTP(w, r)
 				return
 			}

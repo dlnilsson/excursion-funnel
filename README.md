@@ -194,7 +194,9 @@ sudo tailscale serve \
 The hub requires PROXY protocol from a loopback peer so authentication logs
 and rate limits use each client's source address.
 
-The team dashboard is now at `http://<server-address>:8788/ui/`.
+The team dashboard is available through the TLS gateway at
+`https://<server-address>:9494/ui/`, and locally on the hub at
+`http://127.0.0.1:8788/ui/`.
 
 **On each person's machine**, set a few environment variables before starting
 `ef serve` so it reports to the hub instead of only saving locally:
@@ -204,6 +206,10 @@ export EF_HUB_ADDR=hub.example.test:9494
 export EF_SOURCE='daniel@workstation'
 ef serve
 ```
+
+In distributed mode, the local `/ui/` redirects to the hub's `/ui/` instead of
+serving a local dashboard. The redirect uses HTTPS unless `--insecure` or
+`EF_HUB_INSECURE=true` is set. `--ui-enabled=false` disables the local redirect.
 
 Clients use an allowed Ed25519 SSH key. Unix-like clients look for
 unencrypted Ed25519 keys in `~/.ssh` and can use `SSH_AUTH_SOCK`; set

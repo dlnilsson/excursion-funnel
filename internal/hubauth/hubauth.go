@@ -387,7 +387,7 @@ type Client struct {
 var clientCache sync.Map // map[string]*Client
 
 // NewClient returns the process-wide cache for this hub/key combination so
-// short-lived reporters (including dashboard requests) do not re-login.
+// short-lived reporters do not re-login.
 func NewClient(cfg ClientConfig) *Client {
 	key := fmt.Sprintf("%t\x00%s\x00%s", cfg.Insecure, cfg.Address, cfg.KeyPath)
 	created := &Client{cfg: cfg}
@@ -414,7 +414,7 @@ func (c *Client) login(ctx context.Context) (string, time.Time, error) {
 	if err != nil {
 		return "", time.Time{}, err
 	}
-	base := gatewayURL(c.cfg.Address, c.cfg.Insecure)
+	base := GatewayURL(c.cfg.Address, c.cfg.Insecure)
 	hc := &http.Client{Timeout: 30 * time.Second}
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/api/v1/auth/challenge", nil)
 	if err != nil {
@@ -477,7 +477,8 @@ func (c *Client) login(ctx context.Context) (string, time.Time, error) {
 	return "", time.Time{}, fmt.Errorf("no authorized Ed25519 key accepted by hub (attempted %s)", strings.Join(attempted, ", "))
 }
 
-func gatewayURL(address string, insecure bool) string {
+// GatewayURL returns the hub's HTTP base URL, using TLS unless insecure is set.
+func GatewayURL(address string, insecure bool) string {
 	address = strings.TrimPrefix(strings.TrimPrefix(strings.TrimSpace(address), "quack://"), "quack:")
 	scheme := "https"
 	if insecure {
