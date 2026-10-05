@@ -12,6 +12,7 @@ require (
 	github.com/duckdb/duckdb-go/v2 v2.10505.0
 	github.com/pelletier/go-toml/v2 v2.2.4
 	github.com/pires/go-proxyproto v0.15.0
+	github.com/pkg/browser v0.0.0-20240102092130-5ac0b6a4141c
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/pflag v1.0.10
 	golang.org/x/crypto v0.56.0

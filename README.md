@@ -104,6 +104,17 @@ Once it's running:
 - Usage data is stored in a file called `usage.duckdb`
 - It listens on `127.0.0.1:8787` by default
 
+Open the dashboard in your default browser:
+
+```sh
+ef open
+```
+
+`ef open` uses `EF_ADDR`, or `EF_HUB_ADDR` in distributed mode. You can override
+them with `--addr` or `--hub-addr`. Hub dashboards use HTTPS unless `--insecure`
+or `EF_HUB_INSECURE=true` is set. Start `ef serve` or the hub before opening
+the dashboard.
+
 ### Point Codex at it
 
 Run:
@@ -194,9 +205,9 @@ sudo tailscale serve \
 The hub requires PROXY protocol from a loopback peer so authentication logs
 and rate limits use each client's source address.
 
-The team dashboard is available through the TLS gateway at
-`https://<server-address>:9494/ui/`, and locally on the hub at
-`http://127.0.0.1:8788/ui/`.
+The team dashboard listens separately from the usage gateway on port `8788`.
+Expose that listener through TLS to access `https://<server-address>:8788/ui/`.
+On the hub itself, the dashboard is at `http://127.0.0.1:8788/ui/`.
 
 **On each person's machine**, set a few environment variables before starting
 `ef serve` so it reports to the hub instead of only saving locally:

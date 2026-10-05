@@ -51,6 +51,13 @@ func (f *Flags) BindHub(fs *pflag.FlagSet) {
 	fs.BoolVar(&f.values.UIEnabled, "ui-enabled", f.values.UIEnabled, "serve the read-only dashboard at /ui/")
 }
 
+// BindOpen registers options used to locate the web dashboard.
+func (f *Flags) BindOpen(fs *pflag.FlagSet) {
+	fs.StringVar(&f.values.Addr, "addr", f.values.Addr, "local dashboard address (host:port)")
+	fs.StringVar(&f.values.HubAddr, "hub-addr", f.values.HubAddr, "hub gateway address (opens the hub dashboard)")
+	fs.BoolVar(&f.values.HubInsecure, "insecure", f.values.HubInsecure, "use HTTP for the hub dashboard instead of HTTPS")
+}
+
 // Resolve applies explicitly changed flags over built-in and environment
 // configuration, preserving flags > environment > defaults precedence.
 func (f *Flags) Resolve(fs *pflag.FlagSet) (config.Config, error) {

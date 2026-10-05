@@ -120,4 +120,39 @@ func TestRegisterOnlyRelevantOptions(t *testing.T) {
 	if hubSet.Lookup("openai-upstream") != nil {
 		t.Fatal("hub unexpectedly exposes --openai-upstream")
 	}
+
+	openFlags := New()
+	openSet := pflag.NewFlagSet("open", pflag.ContinueOnError)
+	openFlags.BindOpen(openSet)
+	if openSet.Lookup("hub-token") != nil || openSet.Lookup("db") != nil {
+		t.Fatal("open unexpectedly exposes daemon options")
+	}
+}
+
+func TestOpenEnvironmentAndFlagPrecedence(t *testing.T) {
+	t.Setenv("EF_ADDR", "127.0.0.1:8888")
+	t.Setenv("EF_HUB_ADDR", "environment.example.test:9494")
+	t.Setenv("EF_HUB_INSECURE", "true")
+	var (
+		flags = New()
+		set   = pflag.NewFlagSet("open", pflag.ContinueOnError)
+	)
+	flags.BindOpen(set)
+	cfg, err := flags.Resolve(set)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Addr != "127.0.0.1:8888" || cfg.HubAddr != "environment.example.test:9494" || !cfg.HubInsecure {
+		t.Fatalf("open environment = %+v", cfg)
+	}
+	if err := set.Parse([]string{"--addr", "localhost:9999", "--hub-addr", "flag.example.test:9494", "--insecure=false"}); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err = flags.Resolve(set)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Addr != "localhost:9999" || cfg.HubAddr != "flag.example.test:9494" || cfg.HubInsecure {
+		t.Fatalf("open flags = %+v", cfg)
+	}
 }

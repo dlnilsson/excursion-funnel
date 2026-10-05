@@ -53,7 +53,11 @@ func Run(ctx context.Context, cfg config.Config, out io.Writer) error {
 		defer forwarder.Stop()
 		writer = outbox
 		if cfg.UIEnabled {
-			dashboard = newHubDashboard(cfg)
+			var err error
+			dashboard, err = newHubDashboard(cfg)
+			if err != nil {
+				return err
+			}
 		}
 	} else {
 		mode = "standalone"

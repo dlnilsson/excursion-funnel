@@ -32,18 +32,21 @@ func TestRemoteDashboardRedirectsWithoutHub(t *testing.T) {
 		insecure bool
 		want     string
 	}{
-		{"tls", "hub.example.test:9494", false, "https://hub.example.test:9494/ui/"},
-		{"insecure", "127.0.0.1:9494", true, "http://127.0.0.1:9494/ui/"},
-		{"quack URI", "quack://hub.example.test:9494", false, "https://hub.example.test:9494/ui/"},
-		{"quack address", " quack:hub.example.test:9494 ", false, "https://hub.example.test:9494/ui/"},
-		{"ipv6", "[::1]:9494", true, "http://[::1]:9494/ui/"},
+		{"tls", "homebox.tail588fb8.ts.net:9494", false, "https://homebox.tail588fb8.ts.net:8788/ui/"},
+		{"insecure", "127.0.0.1:9494", true, "http://127.0.0.1:8788/ui/"},
+		{"quack URI", "quack://hub.example.test:9494", false, "https://hub.example.test:8788/ui/"},
+		{"quack address", " quack:hub.example.test:9494 ", false, "https://hub.example.test:8788/ui/"},
+		{"ipv6", "[::1]:9494", true, "http://[::1]:8788/ui/"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := config.Config{
 				HubAddr: tc.address, HubInsecure: tc.insecure,
 				HubKey: filepath.Join(t.TempDir(), "missing_key"),
 			}
-			handler := newHubDashboard(cfg)
+			handler, err := newHubDashboard(cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
 			for _, path := range []string{"/ui", "/ui/", "/ui/api/kpis"} {
 				rec := httptest.NewRecorder()
 				handler.ServeHTTP(rec, httptest.NewRequestWithContext(t.Context(), http.MethodGet, path, nil))
