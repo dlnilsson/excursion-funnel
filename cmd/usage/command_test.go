@@ -92,8 +92,10 @@ func TestHeatmapJSONEmitsActivityRows(t *testing.T) {
 	total := int64(4_096)
 	started := reporting.BeginningOfDay(time.Now()).Add(13 * time.Hour)
 	if err := st.InsertBatch(t.Context(), []queue.UsageEvent{
-		{RequestID: "mine", Source: "daniel", StartedAt: started, Method: "POST", Path: "/v1/messages",
-			UpstreamURL: "https://api.anthropic.com/v1/messages", Usage: queue.Usage{TotalTokens: &total}},
+		{
+			RequestID: "mine", Source: "daniel", StartedAt: started, Method: "POST", Path: "/v1/messages",
+			UpstreamURL: "https://api.anthropic.com/v1/messages", Usage: queue.Usage{TotalTokens: &total},
+		},
 	}); err != nil {
 		t.Fatal(err)
 	}

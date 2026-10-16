@@ -103,9 +103,11 @@ func handleSessions(rep *report.Reporter, log *slog.Logger) http.HandlerFunc {
 			weekly = []report.SessionRow{}
 		}
 		now := time.Now()
-		response := sessionDashboard{Daily: daily, Weekly: weekly,
+		response := sessionDashboard{
+			Daily: daily, Weekly: weekly,
 			Today:    sessionCountsForPeriod(daily, reporting.BeginningOfDay(now).Format("2006-01-02")),
-			ThisWeek: sessionCountsForPeriod(weekly, reporting.BeginningOfWeek(now).Format("2006-01-02"))}
+			ThisWeek: sessionCountsForPeriod(weekly, reporting.BeginningOfWeek(now).Format("2006-01-02")),
+		}
 		writeJSON(w, log, response)
 	}
 }

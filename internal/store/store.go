@@ -292,6 +292,7 @@ func (*sessionValidator) Config() duckdb.ScalarFuncConfig {
 	result, _ := duckdb.NewTypeInfo(duckdb.TYPE_BOOLEAN)
 	return duckdb.ScalarFuncConfig{InputTypeInfos: []duckdb.TypeInfo{input}, ResultTypeInfo: result, Volatile: true}
 }
+
 func (v *sessionValidator) Executor() duckdb.ScalarFuncExecutor {
 	return duckdb.ScalarFuncExecutor{RowExecutor: func(values []driver.Value) (any, error) {
 		if len(values) != 1 {
@@ -390,10 +391,14 @@ func ensureLedgerSchema(db *sql.DB) error {
 		return fmt.Errorf("create schema: %w", err)
 	}
 	for _, col := range []struct{ name, typ string }{
-		{"originator", "VARCHAR"}, {"client_name", "VARCHAR"},
+		{"originator", "VARCHAR"},
+		{"client_name", "VARCHAR"},
 		{"session_id", "VARCHAR"},
-		{"directory", "VARCHAR"}, {"git_branch", "VARCHAR"}, {"effort", "VARCHAR"},
-		{"source", "VARCHAR DEFAULT 'unknown'"}, {"host", "VARCHAR"},
+		{"directory", "VARCHAR"},
+		{"git_branch", "VARCHAR"},
+		{"effort", "VARCHAR"},
+		{"source", "VARCHAR DEFAULT 'unknown'"},
+		{"host", "VARCHAR"},
 	} {
 		if err := addColumnIfMissing(db, "requests", col.name, col.typ); err != nil {
 			return err

@@ -129,6 +129,7 @@ func (h *Hub) reapLoop() {
 		}
 	}
 }
+
 func (h *Hub) reap(now time.Time) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -312,6 +313,7 @@ func (h *Hub) permitted(ip string) bool {
 	h.failures[ip] = kept
 	return len(kept) < 10
 }
+
 func (h *Hub) failed(ip string) {
 	h.mu.Lock()
 	h.failures[ip] = append(h.failures[ip], time.Now())
@@ -341,9 +343,11 @@ func (h *Hub) ValidateSession(token string) bool {
 func signingPayload(id string, challenge []byte) []byte {
 	return append(append([]byte("ef-hub-auth-v1\n"+id+"\n"), challenge...), '\n')
 }
+
 func canonicalKey(key ssh.PublicKey) string {
 	return strings.TrimSpace(string(ssh.MarshalAuthorizedKey(key)))
 }
+
 func clientIP(r *http.Request) string {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err == nil {
@@ -351,6 +355,7 @@ func clientIP(r *http.Request) string {
 	}
 	return r.RemoteAddr
 }
+
 func writeJSON(w http.ResponseWriter, value any) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.MarshalWrite(w, value)
@@ -394,6 +399,7 @@ func NewClient(cfg ClientConfig) *Client {
 	actual, _ := clientCache.LoadOrStore(key, created)
 	return actual.(*Client)
 }
+
 func (c *Client) Credential(ctx context.Context) (string, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -544,6 +550,7 @@ func discoverKeys(explicit string) ([]ssh.Signer, error) {
 	}
 	return keys, nil
 }
+
 func loadPrivateKey(path string) (ssh.Signer, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {

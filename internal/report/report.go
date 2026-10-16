@@ -846,9 +846,11 @@ func (r *Reporter) scanSummary(ctx context.Context, query string, args ...any) (
 	})
 }
 
-const DefaultInspectLimit = 20
-const DefaultRecentRequestLimit = 50
-const DefaultRecentToolCallLimit = 50
+const (
+	DefaultInspectLimit        = 20
+	DefaultRecentRequestLimit  = 50
+	DefaultRecentToolCallLimit = 50
+)
 
 // RecentRequests returns lightweight metadata for the newest recorded
 // requests without loading their tool calls or web requests.
