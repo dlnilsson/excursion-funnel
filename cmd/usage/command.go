@@ -32,6 +32,7 @@ type options struct {
 	json       bool
 	heatmap    bool
 	family     bool
+	clients    bool
 }
 
 // New creates the usage command and its today child command.
@@ -48,6 +49,7 @@ func New() *cobra.Command {
 	cmd.PersistentFlags().BoolVar(&opts.json, "json", false, "print the summary as JSON")
 	cmd.PersistentFlags().BoolVar(&opts.heatmap, "heatmap", false, "render a token-activity calendar instead of the summary table")
 	cmd.PersistentFlags().BoolVar(&opts.family, "family", false, "merge model versions into one row per family (claude-opus-5-5 -> claude-opus)")
+	cmd.PersistentFlags().BoolVar(&opts.clients, "merge-clients", false, "merge rows from all clients (Claude Code, Codex, Zed, ...) into one")
 	cmd.RunE = run(&opts, false)
 	cmd.AddCommand(&cobra.Command{
 		Use:   "today",
@@ -68,17 +70,18 @@ func run(opts *options, today bool) func(*cobra.Command, []string) error {
 			out       = cmd.OutOrStdout()
 			statusOut = cmd.ErrOrStderr()
 			appOpts   = appusage.Options{
-				Connection: opts.connection.Resolve(cmd.Flags()),
-				Since:      opts.since,
-				Until:      opts.until,
-				GroupBy:    opts.groupBy,
-				Directory:  opts.directory,
-				Branch:     opts.branch,
-				Source:     reportflags.CurrentSource(opts.all),
-				JSON:       opts.json,
-				Today:      today,
-				Heatmap:    opts.heatmap,
-				Family:     opts.family,
+				Connection:   opts.connection.Resolve(cmd.Flags()),
+				Since:        opts.since,
+				Until:        opts.until,
+				GroupBy:      opts.groupBy,
+				Directory:    opts.directory,
+				Branch:       opts.branch,
+				Source:       reportflags.CurrentSource(opts.all),
+				JSON:         opts.json,
+				Today:        today,
+				Heatmap:      opts.heatmap,
+				Family:       opts.family,
+				MergeClients: opts.clients,
 			}
 		)
 		// Measure the real output stream: rendering may happen after the

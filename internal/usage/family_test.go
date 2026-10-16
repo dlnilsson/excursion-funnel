@@ -31,7 +31,7 @@ func TestModelFamily(t *testing.T) {
 	}
 }
 
-func TestGroupByFamily(t *testing.T) {
+func TestMergeRowsFamily(t *testing.T) {
 	rows := []report.SummaryRow{
 		{Provider: "anthropic", Client: "Claude Code", Model: "claude-opus-5", Requests: 1, Input: 10, Output: 1, Total: 11},
 		{Provider: "openai", Client: "Codex", Model: "gpt-5.6-sol", Requests: 2, Input: 20, Output: 2, Total: 22},
@@ -43,7 +43,7 @@ func TestGroupByFamily(t *testing.T) {
 		{Provider: "openai", Client: "Codex", Model: "gpt-5.6-terra", Requests: 8, Input: 80, Output: 8, Total: 88},
 	}
 
-	got := groupByFamily(rows)
+	got := mergeRows(rows, true, false)
 
 	want := []report.SummaryRow{
 		{Provider: "anthropic", Client: "Claude Code", Model: "claude-opus", Requests: 11, Input: 110, Output: 11, Total: 121},
@@ -53,27 +53,63 @@ func TestGroupByFamily(t *testing.T) {
 		{Provider: "openai", Client: "Codex", Model: "gpt-terra", Requests: 8, Input: 80, Output: 8, Total: 88},
 	}
 	if !slices.Equal(got, want) {
-		t.Fatalf("groupByFamily() =\n%+v\nwant\n%+v", got, want)
+		t.Fatalf("mergeRows() =\n%+v\nwant\n%+v", got, want)
 	}
 	if rows[0].Model != "claude-opus-5" {
-		t.Fatalf("groupByFamily mutated input: Model = %q", rows[0].Model)
+		t.Fatalf("mergeRows mutated input: Model = %q", rows[0].Model)
 	}
 }
 
-func TestGroupByFamilyKeepsOtherDimensionsApart(t *testing.T) {
+func TestMergeRowsKeepsOtherDimensionsApart(t *testing.T) {
 	rows := []report.SummaryRow{
 		{Day: "2026-10-15", Model: "claude-opus-5", Total: 1},
 		{Day: "2026-10-16", Model: "claude-opus-5-5", Total: 2},
 		{Day: "2026-10-16", Model: "claude-opus-5", Total: 3},
 	}
 
-	got := groupByFamily(rows)
+	got := mergeRows(rows, true, false)
 
 	want := []report.SummaryRow{
 		{Day: "2026-10-15", Model: "claude-opus", Total: 1},
 		{Day: "2026-10-16", Model: "claude-opus", Total: 5},
 	}
 	if !slices.Equal(got, want) {
-		t.Fatalf("groupByFamily() =\n%+v\nwant\n%+v", got, want)
+		t.Fatalf("mergeRows() =\n%+v\nwant\n%+v", got, want)
 	}
+}
+
+func TestMergeRowsClients(t *testing.T) {
+	rows := []report.SummaryRow{
+		{Provider: "anthropic", Client: "Claude Code", Model: "claude-opus-5", Requests: 1, Total: 10},
+		{Provider: "anthropic", Client: "Zed", Model: "claude-opus-5", Requests: 2, Total: 20},
+		{Provider: "anthropic", Client: "Zed", Model: "claude-opus-5-5", Requests: 3, Total: 30},
+		{Provider: "openai", Client: "Codex CLI", Model: "gpt-5.6-sol", Requests: 4, Total: 40},
+		{Provider: "openai", Client: "Zed", Model: "gpt-6.1-sol", Requests: 5, Total: 50},
+	}
+
+	t.Run("clients only", func(t *testing.T) {
+		got := mergeRows(rows, false, true)
+
+		want := []report.SummaryRow{
+			{Provider: "anthropic", Model: "claude-opus-5", Requests: 3, Total: 30},
+			{Provider: "anthropic", Model: "claude-opus-5-5", Requests: 3, Total: 30},
+			{Provider: "openai", Model: "gpt-5.6-sol", Requests: 4, Total: 40},
+			{Provider: "openai", Model: "gpt-6.1-sol", Requests: 5, Total: 50},
+		}
+		if !slices.Equal(got, want) {
+			t.Fatalf("mergeRows() =\n%+v\nwant\n%+v", got, want)
+		}
+	})
+
+	t.Run("family and clients", func(t *testing.T) {
+		got := mergeRows(rows, true, true)
+
+		want := []report.SummaryRow{
+			{Provider: "anthropic", Model: "claude-opus", Requests: 6, Total: 60},
+			{Provider: "openai", Model: "gpt-sol", Requests: 9, Total: 90},
+		}
+		if !slices.Equal(got, want) {
+			t.Fatalf("mergeRows() =\n%+v\nwant\n%+v", got, want)
+		}
+	})
 }

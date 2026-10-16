@@ -3,6 +3,7 @@ package usage
 import (
 	"fmt"
 	"io"
+	"slices"
 	"sort"
 	"strconv"
 
@@ -29,6 +30,10 @@ func printRows(out io.Writer, rows []report.SummaryRow, groupBy string) error {
 
 	rows = sortedByTotal(rows)
 	columns := summaryColumns(groupBy, summaryTotals(rows).Total)
+	// --merge-clients blanks every client, which leaves an empty column.
+	if !slices.ContainsFunc(rows, func(row report.SummaryRow) bool { return row.Client != "" }) {
+		columns = slices.DeleteFunc(columns, func(column summaryColumn) bool { return column.header == "CLIENT" })
+	}
 	headers := make([]string, len(columns))
 	numeric := make([]bool, len(columns))
 	values := make([][]string, 0, len(rows))

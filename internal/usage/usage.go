@@ -25,6 +25,8 @@ type Options struct {
 	// Family merges models of one family, like claude-opus-5 and
 	// claude-opus-5-5, into a single row.
 	Family bool
+	// MergeClients merges rows that differ only by client.
+	MergeClients bool
 	// Width is the terminal columns available to the heatmap. It is resolved by
 	// the command layer from the real output stream, because rendering may be
 	// handed a buffer that has no terminal to measure.
@@ -81,8 +83,8 @@ func Load(ctx context.Context, opts Options) (Data, error) {
 	if err != nil {
 		return Data{}, err
 	}
-	if opts.Family {
-		rows = groupByFamily(rows)
+	if opts.Family || opts.MergeClients {
+		rows = mergeRows(rows, opts.Family, opts.MergeClients)
 	}
 	// A single-day window has one obvious date, but only the day grouping
 	// selects it. Stamp it on the rows so the JSON output still carries it.

@@ -36,15 +36,21 @@ func isVersionSegment(part string) bool {
 	return true
 }
 
-// groupByFamily merges rows whose models share a family and all other
-// dimensions match, keeping the order in which each group first appears.
-func groupByFamily(rows []report.SummaryRow) []report.SummaryRow {
+// mergeRows merges rows that match once model versions are reduced to their
+// family (family) and clients are dropped (clients), keeping the order in
+// which each group first appears.
+func mergeRows(rows []report.SummaryRow, family, clients bool) []report.SummaryRow {
 	var (
 		merged = make([]report.SummaryRow, 0, len(rows))
 		index  = make(map[report.SummaryRow]int, len(rows))
 	)
 	for _, row := range rows {
-		row.Model = modelFamily(row.Model)
+		if family {
+			row.Model = modelFamily(row.Model)
+		}
+		if clients {
+			row.Client = ""
+		}
 		key := report.SummaryRow{
 			Day:       row.Day,
 			Provider:  row.Provider,

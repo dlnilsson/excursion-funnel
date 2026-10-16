@@ -253,3 +253,14 @@ func TestPrintRowsSortsByTotalDescending(t *testing.T) {
 		t.Errorf("printRows() mutated caller rows = %v, want %v", rows, original)
 	}
 }
+
+func TestPrintRowsHidesClientColumnWhenClientsMerged(t *testing.T) {
+	var output bytes.Buffer
+	rows := []report.SummaryRow{{Provider: "anthropic", Model: "claude-opus", Requests: 1, Total: 10}}
+	if err := printRows(&output, rows, "model"); err != nil {
+		t.Fatal(err)
+	}
+	if got := output.String(); strings.Contains(got, "CLIENT") || !strings.Contains(got, "claude-opus") {
+		t.Fatalf("output = %q, want MODEL column without CLIENT", got)
+	}
+}
