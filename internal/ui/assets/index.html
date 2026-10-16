@@ -1835,7 +1835,7 @@ function calendarDayKey(date) {
 
 function renderHistoryStackedChart() {
   const rows = keepSelectedSources(latestHistoryRows, selectedHistoryChartSources);
-  const modelProviders = new Map(latestHistoryRows.map(row => [modelLabel(row), row.Provider]));
+  const modelProviders = new Map(latestHistoryRows.map(row => [modelFamily(modelLabel(row)), row.Provider]));
   const metric = selectedHistoryMetric === "requests" ? "Requests" : "Total";
   const byDayModel = new Map();
   const byModel = new Map();
@@ -1843,7 +1843,7 @@ function renderHistoryStackedChart() {
     if (!r.Day) {
       continue;
     }
-    const label = modelLabel(r);
+    const label = modelFamily(modelLabel(r));
     const value = Number(r[metric]) || 0;
     const key = `${r.Day}\t${label}`;
     byDayModel.set(key, (byDayModel.get(key) || 0) + value);
@@ -1998,6 +1998,13 @@ function modelColor(model, provider) {
   const saturation = range.saturation + (hash >>> 8) % 25;
   const lightness = 43 + hash % 23;
   return `hsl(${hue}, ${saturation}%, ${lightness}%)`;
+}
+
+// modelFamily drops version segments so releases of one model line share a series:
+// claude-opus-5-5 -> claude-opus, gpt-6.1-sol -> gpt-sol.
+function modelFamily(model) {
+  const parts = model.split("-").filter(part => !/^\d+(\.\d+)*$/.test(part));
+  return parts.length > 0 ? parts.join("-") : model;
 }
 
 function modelLabel(row) {
