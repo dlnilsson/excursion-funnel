@@ -44,6 +44,7 @@ $distPath = Join-Path $repoRoot 'dist'
 $tempBase = [IO.Path]::GetFullPath([IO.Path]::GetTempPath())
 $tempRoot = [IO.Path]::GetFullPath((Join-Path $tempBase "excursion-funnel-goreleaser-$([guid]::NewGuid().ToString('N'))"))
 $vendorPath = Join-Path $tempRoot 'vendor'
+$toolchainPath = Join-Path $tempRoot 'toolchain'
 $originalGoProxy = [Environment]::GetEnvironmentVariable('GOPROXY', 'Process')
 
 try {
@@ -60,6 +61,33 @@ try {
     finally {
         Pop-Location
     }
+
+    # The image may ship an older Go than go.mod requires. Stage the matching
+    # Linux toolchain and its checksum database entries so the container can
+    # switch to it offline.
+    Write-Host 'Preparing Linux Go toolchain...'
+    Push-Location $repoRoot
+    try {
+        $goVersion = & $go.Source list -m -f '{{.GoVersion}}'
+        if ($LASTEXITCODE -ne 0) {
+            throw 'Could not read the Go version from go.mod.'
+        }
+        $toolchainVersion = "v0.0.1-go$goVersion.linux-amd64"
+        $toolchain = & $go.Source mod download -json "golang.org/toolchain@$toolchainVersion" | Out-String | ConvertFrom-Json
+        if ($LASTEXITCODE -ne 0) {
+            throw "Could not download Go toolchain $toolchainVersion."
+        }
+        $sumdbSource = Join-Path (& $go.Source env GOMODCACHE) 'cache/download/sumdb/sum.golang.org'
+    }
+    finally {
+        Pop-Location
+    }
+    $toolchainCache = Join-Path $toolchainPath 'cache/download/golang.org/toolchain/@v'
+    $sumdbCache = Join-Path $toolchainPath 'cache/download/sumdb/sum.golang.org'
+    $null = New-Item -ItemType Directory -Force -Path $toolchainCache, (Join-Path $sumdbCache 'lookup/golang.org')
+    Copy-Item -LiteralPath $toolchain.Info, $toolchain.GoMod, $toolchain.Zip -Destination $toolchainCache
+    Copy-Item -LiteralPath (Join-Path $sumdbSource "lookup/golang.org/toolchain@$toolchainVersion") -Destination (Join-Path $sumdbCache 'lookup/golang.org')
+    Copy-Item -Recurse -LiteralPath (Join-Path $sumdbSource 'tile') -Destination $sumdbCache
 
     # Build a temporary vendor tree strictly from the local module cache. This
     # lets the Linux container compile with no network and read-only source.
@@ -89,7 +117,10 @@ exec goreleaser build --snapshot --single-target --skip=before --output /output/
         --mount 'type=volume,target=/workspace' `
         --mount "type=bind,source=$distPath,target=/output" `
         --mount "type=bind,source=$vendorPath,target=/workspace/vendor,readonly" `
+        --mount "type=bind,source=$toolchainPath,target=/toolchain" `
         --workdir /workspace `
+        --env GOMODCACHE=/toolchain `
+        --env GOPROXY=off `
         --env GIT_CONFIG_COUNT=1 `
         --env GIT_CONFIG_KEY_0=safe.directory `
         --env GIT_CONFIG_VALUE_0=/workspace `

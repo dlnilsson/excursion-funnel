@@ -40,6 +40,11 @@ npm run vendor-ui --prefix "$repo_root"
 echo 'Preparing Linux dependencies...'
 (cd "$repo_root" && go mod download)
 
+# The image may ship an older Go than go.mod requires. Cache the matching
+# toolchain so the container can switch to it offline.
+go_version=$(cd "$repo_root" && go list -m -f '{{.GoVersion}}')
+go mod download "golang.org/toolchain@v0.0.1-go$go_version.linux-amd64"
+
 if ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
     echo 'Pulling GoReleaser Cross image...'
     docker pull "$IMAGE"
