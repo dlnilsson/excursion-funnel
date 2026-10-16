@@ -324,6 +324,32 @@
     padding-bottom: 0;
   }
 
+  .table-controls {
+    align-items: center;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem 1.5rem;
+    padding: 0 0 0.75rem;
+  }
+
+  .table-controls .source-filter {
+    padding-bottom: 0;
+  }
+
+  .table-option {
+    align-items: center;
+    color: var(--text-muted);
+    cursor: pointer;
+    display: inline-flex;
+    font-size: 0.85rem;
+    gap: 0.35rem;
+  }
+
+  .table-option input {
+    accent-color: var(--accent);
+    margin: 0;
+  }
+
   .source-filter label {
     align-items: center;
     cursor: pointer;
@@ -923,7 +949,10 @@
 
 <details class="table-section" data-table-key="model-activity" open>
   <summary>Model activity table overall</summary>
-  <div class="source-filter" id="model-activity-source-filter" role="group" aria-label="Filter model activity by source"></div>
+  <div class="table-controls">
+    <div class="source-filter" id="model-activity-source-filter" role="group" aria-label="Filter model activity by source"></div>
+    <label class="table-option"><input type="checkbox" id="model-activity-family-toggle">Group by family</label>
+  </div>
   <table id="model-activity-table">
     <thead><tr><th>Model</th><th>Input tokens</th><th>Output tokens</th><th>Total tokens</th><th>Requests</th><th>Avg tokens/request</th><th>Share</th></tr></thead>
     <tbody></tbody>
@@ -1024,6 +1053,7 @@ let latestToolRows = [];
 let latestSummaryRows = [];
 let selectedSummarySources = null;
 let selectedModelActivitySources = null;
+let groupModelActivityByFamily = false;
 let selectedHistoryChartSources = null;
 let selectedHistoryMetric = "tokens";
 let selectedTokenActivityRange = "24h";
@@ -1155,6 +1185,10 @@ function initSourceFilters() {
   });
   bindSourceFilter("model-activity-source-filter", input => {
     toggleSource(selectedModelActivitySources, input);
+    renderModelActivityTable();
+  });
+  document.getElementById("model-activity-family-toggle").addEventListener("change", event => {
+    groupModelActivityByFamily = event.target.checked;
     renderModelActivityTable();
   });
   bindSourceFilter("history-chart-source-filter", input => {
@@ -1905,7 +1939,7 @@ function renderHistoryStackedChart() {
 
 function renderModelActivityTable() {
   const rows = keepSelectedSources(latestModelHistoryRows, selectedModelActivitySources);
-  const modelRows = aggregateModelActivityRows(rows);
+  const modelRows = aggregateModelActivityRows(rows, groupModelActivityByFamily);
   const topRows = modelRows.sort((a, b) => b.Total - a.Total).slice(0, 12);
   const totals = modelRows.reduce((summary, row) => {
     summary.Input += row.Input;
@@ -1939,10 +1973,10 @@ function renderModelActivityTable() {
   }).join("");
 }
 
-function aggregateModelActivityRows(rows) {
+function aggregateModelActivityRows(rows, byFamily) {
   const byModel = new Map();
   for (const row of rows) {
-    const model = modelLabel(row);
+    const model = byFamily ? modelFamily(modelLabel(row)) : modelLabel(row);
     const aggregate = byModel.get(model) || { Model: model, Requests: 0, Input: 0, Output: 0, Total: 0 };
     aggregate.Requests += Number(row.Requests) || 0;
     aggregate.Input += Number(row.Input) || 0;
