@@ -105,7 +105,7 @@ func TestRenderCalendarTruncatesToTheMostRecentWeeks(t *testing.T) {
 	if strings.Contains(text, "last 12 months") {
 		t.Fatal("narrow render still claims a full year")
 	}
-	for _, line := range strings.Split(strings.TrimSuffix(text, "\n"), "\n") {
+	for line := range strings.SplitSeq(strings.TrimSuffix(text, "\n"), "\n") {
 		if width := lipgloss.Width(line); width > opts.Width {
 			t.Fatalf("line %q is %d columns wide, want at most %d", line, width, opts.Width)
 		}

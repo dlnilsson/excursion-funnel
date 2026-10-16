@@ -179,7 +179,7 @@ func TestPrintRowsRendersShareOfTotal(t *testing.T) {
 func lineContaining(t *testing.T, text, label string) string {
 	t.Helper()
 	found := ""
-	for _, line := range strings.Split(text, "\n") {
+	for line := range strings.SplitSeq(text, "\n") {
 		if strings.Contains(line, label) {
 			found = line
 		}
