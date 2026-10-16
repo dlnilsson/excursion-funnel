@@ -31,6 +31,7 @@ type options struct {
 	all        bool
 	json       bool
 	heatmap    bool
+	family     bool
 }
 
 // New creates the usage command and its today child command.
@@ -46,6 +47,7 @@ func New() *cobra.Command {
 	cmd.PersistentFlags().BoolVar(&opts.all, "all", false, "include usage recorded from all sources")
 	cmd.PersistentFlags().BoolVar(&opts.json, "json", false, "print the summary as JSON")
 	cmd.PersistentFlags().BoolVar(&opts.heatmap, "heatmap", false, "render a token-activity calendar instead of the summary table")
+	cmd.PersistentFlags().BoolVar(&opts.family, "family", false, "merge model versions into one row per family (claude-opus-5-5 -> claude-opus)")
 	cmd.RunE = run(&opts, false)
 	cmd.AddCommand(&cobra.Command{
 		Use:   "today",
@@ -76,6 +78,7 @@ func run(opts *options, today bool) func(*cobra.Command, []string) error {
 				JSON:       opts.json,
 				Today:      today,
 				Heatmap:    opts.heatmap,
+				Family:     opts.family,
 			}
 		)
 		// Measure the real output stream: rendering may happen after the
