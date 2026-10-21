@@ -8,7 +8,7 @@
 # Usage: ./scripts/goreleaser-build.sh
 set -euo pipefail
 
-IMAGE=${IMAGE:-ghcr.io/goreleaser/goreleaser-cross@sha256:3ce3506ee9179c4122ba0b5dc13ab564ff259fb65f45bfad005ddd5e4a3d326d}
+IMAGE=${IMAGE:-ghcr.io/goreleaser/goreleaser-cross@sha256:1820cee53c4c06cfb43c2203caca73f9497042f5b6061c8916a251228a321975}
 
 for tool in goreleaser docker go npm; do
     if ! command -v "$tool" >/dev/null 2>&1; then

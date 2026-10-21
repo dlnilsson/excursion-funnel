@@ -78,7 +78,7 @@ fi
 for tool in go gcc g++ git; do
     if ! command -v "$tool" >/dev/null 2>&1; then
         echo "error: $tool is not installed in WSL" >&2
-        echo "install Go 1.25+ and run: sudo apt update && sudo apt install build-essential" >&2
+        echo "install Go 1.27.3+ and run: sudo apt update && sudo apt install build-essential" >&2
         exit 127
     fi
 done
