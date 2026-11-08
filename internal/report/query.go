@@ -60,10 +60,12 @@ func queryRowsInto[T any](ctx context.Context, db *sql.DB, label, query string, 
 	return out, nil
 }
 
-// placeholders returns "?, ?, …" for an IN clause of n values.
-func placeholders(n int) string {
-	if n == 0 {
-		return ""
+// stringLiterals quotes IDs for indexed child lookups. Quack's serialized
+// index scans can lose bound IN parameters, so these lookups use SQL literals.
+func stringLiterals(values []string) string {
+	quoted := make([]string, 0, len(values))
+	for _, value := range values {
+		quoted = append(quoted, "'"+strings.ReplaceAll(value, "'", "''")+"'")
 	}
-	return strings.Repeat("?, ", n-1) + "?"
+	return strings.Join(quoted, ", ")
 }

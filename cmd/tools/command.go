@@ -15,6 +15,7 @@ type options struct {
 	all        bool
 	json       bool
 	verbose    bool
+	failed     bool
 }
 
 const loadingToolsText = "Loading tools…"
@@ -28,6 +29,7 @@ func New() *cobra.Command {
 	cmd.PersistentFlags().BoolVar(&opts.all, "all", false, "include tool calls recorded from all sources")
 	cmd.PersistentFlags().BoolVar(&opts.json, "json", false, "print tool calls as JSON")
 	cmd.PersistentFlags().BoolVar(&opts.verbose, "verbose", false, "include tool-call metadata in output")
+	cmd.PersistentFlags().BoolVar(&opts.failed, "failed", false, "show only failed tool calls")
 	cmd.AddCommand(&cobra.Command{
 		Use:   "today",
 		Short: "Show tool calls recorded during the current local day",
@@ -44,6 +46,7 @@ func New() *cobra.Command {
 					Source:     reportflags.CurrentSource(opts.all),
 					JSON:       opts.json,
 					Verbose:    opts.verbose,
+					FailedOnly: opts.failed,
 				}
 			)
 			if !loading.ShouldAnimate(appOpts.JSON, loading.IsTerminalWriter(out), loading.IsTerminalWriter(statusOut)) {

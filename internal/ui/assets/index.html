@@ -395,6 +395,15 @@
     max-width: 30rem;
   }
 
+  #tools-table tr.tool-failed td {
+    background: color-mix(in srgb, var(--error) 10%, transparent);
+  }
+
+  #tools-table tr.tool-failed td:last-child {
+    color: var(--error);
+    font-weight: 700;
+  }
+
   #tools-table td:nth-child(5) {
     max-width: 20rem;
   }
@@ -970,8 +979,9 @@
 
 <details class="table-section" data-table-key="tools" open>
   <summary>Tools used today</summary>
+  <label><input type="checkbox" id="tools-failed-only"> Failed only</label>
   <table id="tools-table">
-    <thead><tr><th>Started</th><th>Client</th><th>Model</th><th>Tool</th><th>Description</th><th>Command</th></tr></thead>
+    <thead><tr><th>Started</th><th>Client</th><th>Model</th><th>Tool</th><th>Description</th><th>Command</th><th>Result</th></tr></thead>
     <tbody></tbody>
   </table>
 </details>
@@ -1291,7 +1301,7 @@ function setTokenActivityRange(range) {
 }
 
 async function load() {
-  const [kpis, sessions, summary, directories, hourlyHistory, history, modelHistory, errors, tools, webRequests] = await Promise.all([
+  const [kpis, sessions, summary, directories, hourlyHistory, history, modelHistory, errors, webRequests] = await Promise.all([
     fetch("/ui/api/kpis").then(r => r.json()),
     fetch("/ui/api/sessions").then(r => r.json()),
     fetch("/ui/api/summary").then(r => r.json()),
@@ -1300,8 +1310,8 @@ async function load() {
     fetch("/ui/api/history").then(r => r.json()),
     fetch("/ui/api/history/models").then(r => r.json()),
     fetch("/ui/api/errors").then(r => r.json()),
-    fetch("/ui/api/tools").then(r => r.json()),
     fetch("/ui/api/web-requests").then(r => r.json()),
+    refreshTools(),
   ]);
   renderStats(summary, kpis, sessions);
   renderSummary(summary);
@@ -1311,7 +1321,6 @@ async function load() {
   renderTokenActivityChart();
   renderHistoryCharts(history, modelHistory);
   renderErrors(errors);
-  renderTools(tools);
   renderWebRequests(webRequests);
 }
 
@@ -2081,19 +2090,41 @@ function renderErrors(rows) {
   </tr>`).join("");
 }
 
+function toolCallsURL() {
+  return document.getElementById("tools-failed-only").checked ? "/ui/api/tools?failed=true" : "/ui/api/tools";
+}
+
+let toolFilterVersion = 0;
+async function refreshTools() {
+  const version = ++toolFilterVersion;
+  try {
+    const response = await fetch(toolCallsURL());
+    if (!response.ok) throw new Error("Unable to load tool calls");
+    const rows = await response.json();
+    if (version === toolFilterVersion) renderTools(rows);
+  } catch {
+    if (version === toolFilterVersion) {
+      document.querySelector("#tools-table tbody").innerHTML = '<tr><td colspan="7" class="empty">Unable to load tool calls</td></tr>';
+    }
+  }
+}
+
 function renderTools(rows) {
   latestToolRows = rows;
   const tbody = document.querySelector("#tools-table tbody");
   if (rows.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="6" class="empty">No tool calls captured yet</td></tr>';
+    const message = document.getElementById("tools-failed-only").checked ? "No failed tool calls recorded today" : "No tool calls captured yet";
+    tbody.innerHTML = `<tr><td colspan="7" class="empty">${message}</td></tr>`;
     return;
   }
   tbody.innerHTML = rows.map((r, index) => {
     const command = String(r.Command || "");
     const copyButton = command ? `<button class="copy-command" type="button" data-command-index="${index}" aria-label="Copy command to clipboard">${copyIcon}</button>` : "";
-    return `<tr>
+    const status = r.Failed === null || r.Failed === undefined ? "Unknown" : r.Failed ? "Failed" : "OK";
+    const result = r.ExitCode === null || r.ExitCode === undefined ? status : `${status} (exit ${r.ExitCode})`;
+    return `<tr class="${r.Failed ? "tool-failed" : ""}">
     <td>${escapeHTML(toolTimestamp(r.StartedAt))}</td><td>${escapeHTML(clientLabel(r))}</td><td>${escapeHTML(r.Model)}</td>
-    <td>${escapeHTML(r.Name)}</td><td>${escapeHTML(r.Description || "-")}</td><td><div class="tool-command-cell"><pre class="tool-command-block"><code class="tool-command language-bash">${escapeHTML(command || "-")}</code></pre>${copyButton}</div></td>
+    <td>${escapeHTML(r.Name)}</td><td>${escapeHTML(r.Description || "-")}</td><td><div class="tool-command-cell"><pre class="tool-command-block"><code class="tool-command language-bash">${escapeHTML(command || "-")}</code></pre>${copyButton}</div></td><td>${escapeHTML(result)}</td>
   </tr>`;
   }).join("");
   highlightToolCommands();
@@ -2159,6 +2190,7 @@ initTableCollapse();
 initDashboardSectionCollapse();
 initThemeToggle();
 initToolCopy();
+document.getElementById("tools-failed-only").addEventListener("change", refreshTools);
 initSourceFilters();
 load().finally(hideLoadingOverlay);
 loadVersion();

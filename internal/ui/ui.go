@@ -59,6 +59,7 @@ func New(rep *report.Reporter, log *slog.Logger) http.Handler {
 		since, until := today()
 		return rep.ToolCalls(r.Context(), report.ToolCallOptions{
 			Since: since, Until: until, Limit: recentToolCallsLimit,
+			FailedOnly: r.URL.Query().Get("failed") == "true",
 		})
 	}))
 	mux.HandleFunc("GET /ui/api/web-requests", rowsHandler(log, "web requests", func(r *http.Request) ([]report.WebRequestRow, error) {

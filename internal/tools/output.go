@@ -23,16 +23,20 @@ func printRows(out io.Writer, rows []report.ToolCallRow, verbose bool) error {
 		if verbose {
 			values = append(values, []string{
 				reporting.LocalTimestamp(row.StartedAt), reporting.EmptyAsDash(row.Client), reporting.EmptyAsDash(row.Model),
-				reporting.EmptyAsDash(row.Name), reporting.EmptyAsDash(reporting.CompactValue(row.Description)),
+				reporting.EmptyAsDash(row.Name), row.Status(), reporting.EmptyAsDash(reporting.CompactValue(row.Description)),
 				reporting.EmptyAsDash(reporting.CompactValue(row.Command)),
 			})
 			continue
 		}
-		values = append(values, []string{reporting.CompactValue(row.Command)})
+		command := toolTitle(row)
+		if row.Failed != nil && *row.Failed {
+			command = "[" + row.Status() + "] " + command
+		}
+		values = append(values, []string{command})
 	}
 	headers := []string{"COMMAND"}
 	if verbose {
-		headers = []string{"STARTED", "CLIENT", "MODEL", "TOOL", "DESCRIPTION", "COMMAND"}
+		headers = []string{"STARTED", "CLIENT", "MODEL", "TOOL", "STATUS", "DESCRIPTION", "COMMAND"}
 	}
 
 	return reporting.RenderTable(out, reporting.Table{
@@ -42,6 +46,13 @@ func printRows(out io.Writer, rows []report.ToolCallRow, verbose bool) error {
 		Width:     reporting.TerminalWidth(out, defaultTableWidth, maxTableWidth),
 		Wrap:      true,
 	})
+}
+
+func toolTitle(row report.ToolCallRow) string {
+	if row.Command != "" {
+		return reporting.CompactValue(row.Command)
+	}
+	return reporting.CompactValue(row.Name + " " + row.Description)
 }
 
 func printEmpty(out io.Writer) error {

@@ -41,6 +41,13 @@ type ToolCall struct {
 	ArgumentsJSON string
 }
 
+// ToolResult contains only outcome metadata, never the tool's output.
+type ToolResult struct {
+	ID       string
+	ExitCode *int64
+	Failed   bool
+}
+
 // WebRequest is one provider-reported external web request associated with a
 // model response. ArgumentsJSON preserves the provider payload while the
 // projected fields make common search/browse details easy to query.
@@ -233,6 +240,7 @@ type UsageEvent struct {
 	Usage       Usage
 	UsageJSON   json.RawMessage
 	ToolCalls   []ToolCall
+	ToolResults []ToolResult
 	WebRequests []WebRequest
 }
 

@@ -78,18 +78,18 @@ func joinChildRows[T any](ctx context.Context, r *Reporter, requests []toolCallR
 		return nil, nil
 	}
 	byID := make(map[string]toolCallRequest, len(requests))
-	ids := make([]any, len(requests))
+	ids := make([]string, len(requests))
 	for i, req := range requests {
 		byID[req.ID] = req
 		ids[i] = req.ID
 	}
 
 	byRequest := make(map[string][]T, len(requests))
-	query := q.sql + " WHERE request_id IN (" + placeholders(len(ids)) + ")"
+	query := q.sql + " WHERE request_id IN (" + stringLiterals(ids) + ")"
 	if q.filter != "" {
 		query += " AND " + q.filter
 	}
-	if _, err := queryRowsInto(ctx, r.store.DB(), q.label, query, ids, func(rows *sql.Rows, row *T) (bool, error) {
+	if _, err := queryRowsInto(ctx, r.store.DB(), q.label, query, nil, func(rows *sql.Rows, row *T) (bool, error) {
 		requestID, err := q.scan(rows, row)
 		if err != nil {
 			return false, err
@@ -104,13 +104,20 @@ func joinChildRows[T any](ctx context.Context, r *Reporter, requests []toolCallR
 		return nil, err
 	}
 
-	out := make([]T, 0, limit)
+	capacity := limit
+	if capacity < 0 {
+		capacity = len(requests)
+	}
+	out := make([]T, 0, capacity)
 	for _, req := range requests {
 		children := byRequest[req.ID]
 		sort.Slice(children, func(i, j int) bool { return q.ordinal(children[i]) < q.ordinal(children[j]) })
 		out = append(out, children...)
 	}
-	return out[:min(len(out), limit)], nil
+	if limit >= 0 {
+		out = out[:min(len(out), limit)]
+	}
+	return out, nil
 }
 
 type toolCallRequest struct {
@@ -120,6 +127,8 @@ type toolCallRequest struct {
 	Provider  string
 	Client    string
 	Model     string
+	Host      string
+	SessionID string
 }
 
 // candidateRequests reads the newest requests matching where, to be joined
@@ -128,10 +137,11 @@ func (r *Reporter) candidateRequests(ctx context.Context, where string, whereArg
 	args := append(slices.Clone(whereArgs), limit)
 	return queryRows(ctx, r.store.DB(), "candidate requests", `
 SELECT id, COALESCE(source, 'unknown'), started_at, `+provider.SQLForPath("path")+`, `+provider.ClientSQL()+`,
-  COALESCE(model_reported, model_requested, 'unknown')
+  COALESCE(model_reported, model_requested, 'unknown'), COALESCE(host, ''),
+  COALESCE(NULLIF(session_id, ''), codex_session_id, '')
 FROM requests
 `+where+`
 ORDER BY started_at DESC LIMIT ?`, args, func(rows *sql.Rows, req *toolCallRequest) error {
-		return rows.Scan(&req.ID, &req.Source, &req.StartedAt, &req.Provider, &req.Client, &req.Model)
+		return rows.Scan(&req.ID, &req.Source, &req.StartedAt, &req.Provider, &req.Client, &req.Model, &req.Host, &req.SessionID)
 	})
 }

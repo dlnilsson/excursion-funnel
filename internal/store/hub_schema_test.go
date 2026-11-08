@@ -10,10 +10,12 @@ import (
 	"github.com/dlnilsson/excursion-funnel/internal/queue"
 )
 
-func hubTables() []string { return []string{"requests", "sessions", "tool_calls", "web_requests"} }
+func hubTables() []string {
+	return []string{"requests", "sessions", "tool_calls", "tool_results", "web_requests"}
+}
 
 func stagingTables() []string {
-	return []string{"staging_requests", "staging_sessions", "staging_tool_calls", "staging_web_requests"}
+	return []string{"staging_requests", "staging_sessions", "staging_tool_calls", "staging_tool_results", "staging_web_requests"}
 }
 
 func TestOpenHubKeepsConstraintsAndAddsStaging(t *testing.T) {

@@ -27,11 +27,12 @@ const LocalQuackToken = "excursion-funnel-local"
 // Store is a DuckDB-backed usage ledger. A remote Store is a small in-memory
 // DuckDB client with a Quack catalog attached as its current database.
 type Store struct {
-	db               *sql.DB
-	quackConn        *sql.Conn
-	quackURI         string
-	remoteCatalog    string
-	remoteHasStaging bool
+	db                   *sql.DB
+	quackConn            *sql.Conn
+	quackURI             string
+	remoteCatalog        string
+	remoteHasStaging     bool
+	remoteHasToolResults bool
 }
 
 // QuackServer describes a running Quack listener.
@@ -152,7 +153,13 @@ func OpenRemote(ctx context.Context, address, token string, disableSSL bool) (*S
 		_ = db.Close()
 		return nil, fmt.Errorf("inspect Quack ledger schema %s: %w", uri, err)
 	}
-	return &Store{db: db, remoteCatalog: "quack_remote", remoteHasStaging: hasStaging}, nil
+	var resultColumns int
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM information_schema.columns
+WHERE table_name = 'staging_tool_results' AND column_name = 'tool_call_id'`).Scan(&resultColumns); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("inspect remote tool result schema: %w", err)
+	}
+	return &Store{db: db, remoteCatalog: "quack_remote", remoteHasStaging: hasStaging, remoteHasToolResults: resultColumns > 0}, nil
 }
 
 func remoteHasStagingTables(ctx context.Context, db *sql.DB) (bool, error) {
@@ -342,6 +349,9 @@ func (s *Store) DeleteRequestsStartedBefore(ctx context.Context, cutoff time.Tim
 WHERE request_id IN (SELECT id FROM requests WHERE started_at < ?)`, cutoff); err != nil {
 		return 0, fmt.Errorf("delete old tool calls: %w", err)
 	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM tool_results WHERE observed_at < ?`, cutoff); err != nil {
+		return 0, fmt.Errorf("delete old tool results: %w", err)
+	}
 	if _, err := tx.ExecContext(ctx, `
 DELETE FROM web_requests
 WHERE request_id IN (SELECT id FROM requests WHERE started_at < ?)`, cutoff); err != nil {
@@ -385,6 +395,7 @@ func ensureLedgerSchema(db *sql.DB) error {
 		requestsTable.createSQL(),
 		sessionsTable.createSQL(),
 		toolCallsTable.createSQL(),
+		toolResultsTable.createSQL(),
 		webRequestsTable.createSQL(),
 	}, "\n")
 	if _, err := db.Exec(create); err != nil {
@@ -410,6 +421,7 @@ CREATE INDEX IF NOT EXISTS idx_requests_response_id ON requests(response_id);
 CREATE INDEX IF NOT EXISTS idx_requests_source ON requests(source);
 CREATE INDEX IF NOT EXISTS idx_sessions_first_seen_at ON sessions(first_seen_at);
 CREATE INDEX IF NOT EXISTS idx_tool_calls_request_id ON tool_calls(request_id);
+CREATE INDEX IF NOT EXISTS idx_tool_results_call_id ON tool_results(tool_call_id);
 CREATE INDEX IF NOT EXISTS idx_web_requests_request_id ON web_requests(request_id);
 CREATE INDEX IF NOT EXISTS idx_requests_directory ON requests(directory);
 CREATE INDEX IF NOT EXISTS idx_requests_git_branch ON requests(git_branch);
@@ -451,6 +463,7 @@ func ensureStagingSchema(db *sql.DB) error {
 		requestsTable.createStagingSQL(),
 		sessionsTable.createStagingSQL(),
 		toolCallsTable.createStagingSQL(),
+		toolResultsTable.createStagingSQL(),
 		webRequestsTable.createStagingSQL(),
 	}, "\n")
 	if _, err := db.Exec(create); err != nil {
@@ -493,6 +506,7 @@ func repairLedgerPrimaryKeys(db *sql.DB) error {
 		{requestsTable.name, requestsTable.columnsDDL(), requestsTable.primaryKey},
 		{sessionsTable.name, sessionsTable.columnsDDL(), sessionsTable.primaryKey},
 		{toolCallsTable.name, toolCallsTable.columnsDDL(), toolCallsTable.primaryKey},
+		{toolResultsTable.name, toolResultsTable.columnsDDL(), toolResultsTable.primaryKey},
 		{webRequestsTable.name, webRequestsTable.columnsDDL(), webRequestsTable.primaryKey},
 	} {
 		exists, err := tableExists(db, t.name)
@@ -677,6 +691,7 @@ func tableColumns(db *sql.DB, table string) (map[string]bool, error) {
 var (
 	insertRequestSQL    = requestsTable.insertSQL()
 	insertToolCallSQL   = toolCallsTable.insertSQL()
+	insertToolResultSQL = toolResultsTable.insertSQL()
 	insertWebRequestSQL = webRequestsTable.insertSQL()
 )
 
@@ -715,6 +730,11 @@ func (s *Store) InsertBatch(ctx context.Context, events []queue.UsageEvent) erro
 		return fmt.Errorf("prepare tool call insert: %w", err)
 	}
 	defer toolStmt.Close()
+	resultStmt, err := tx.PrepareContext(ctx, insertToolResultSQL)
+	if err != nil {
+		return fmt.Errorf("prepare tool result insert: %w", err)
+	}
+	defer resultStmt.Close()
 
 	webStmt, err := tx.PrepareContext(ctx, insertWebRequestSQL)
 	if err != nil {
@@ -736,6 +756,11 @@ func (s *Store) InsertBatch(ctx context.Context, events []queue.UsageEvent) erro
 		for _, child := range toolCallRows(ev) {
 			if _, err := toolStmt.ExecContext(ctx, toolCallsTable.args(child)...); err != nil {
 				return fmt.Errorf("insert tool call for request %s: %w", ev.RequestID, err)
+			}
+		}
+		for _, child := range toolResultRows(ev) {
+			if _, err := resultStmt.ExecContext(ctx, toolResultsTable.args(child)...); err != nil {
+				return fmt.Errorf("insert tool result for request %s: %w", ev.RequestID, err)
 			}
 		}
 		for _, child := range webRequestRows(ev) {
@@ -764,6 +789,7 @@ func (s *Store) insertRemoteBatch(ctx context.Context, events []queue.UsageEvent
 	var (
 		requestTuples    = make([]string, 0, len(events))
 		toolTuples       []string
+		resultTuples     []string
 		webTuples        []string
 		sessionFirstSeen = make(map[string]time.Time)
 	)
@@ -779,6 +805,9 @@ func (s *Store) insertRemoteBatch(ctx context.Context, events []queue.UsageEvent
 		}
 		for _, child := range toolCallRows(ev) {
 			toolTuples = append(toolTuples, toolCallsTable.valuesTuple(child))
+		}
+		for _, child := range toolResultRows(ev) {
+			resultTuples = append(resultTuples, toolResultsTable.valuesTuple(child))
 		}
 		for _, child := range webRequestRows(ev) {
 			webTuples = append(webTuples, webRequestsTable.valuesTuple(child))
@@ -805,6 +834,12 @@ func (s *Store) insertRemoteBatch(ctx context.Context, events []queue.UsageEvent
 	}
 	if err := s.stageRemote(ctx, toolCallsTable.name, toolCallsTable.columnNames(), toolTuples); err != nil {
 		return fmt.Errorf("stage remote tool calls: %w", err)
+	}
+	// Older hubs can still receive usage while clients roll forward.
+	if s.remoteHasToolResults {
+		if err := s.stageRemote(ctx, toolResultsTable.name, toolResultsTable.columnNames(), resultTuples); err != nil {
+			return fmt.Errorf("stage remote tool results: %w", err)
+		}
 	}
 	if err := s.stageRemote(ctx, webRequestsTable.name, webRequestsTable.columnNames(), webTuples); err != nil {
 		return fmt.Errorf("stage remote web requests: %w", err)
@@ -855,10 +890,13 @@ SET first_seen_at = LEAST(sessions.first_seen_at, excluded.first_seen_at)`); err
 	if _, err := tx.ExecContext(ctx, toolCallsTable.mergeStagingSQL()); err != nil {
 		return 0, fmt.Errorf("merge staged tool calls: %w", err)
 	}
+	if _, err := tx.ExecContext(ctx, toolResultsTable.mergeStagingSQL()); err != nil {
+		return 0, fmt.Errorf("merge staged tool results: %w", err)
+	}
 	if _, err := tx.ExecContext(ctx, webRequestsTable.mergeStagingSQL()); err != nil {
 		return 0, fmt.Errorf("merge staged web requests: %w", err)
 	}
-	for _, staging := range []string{"staging_requests", "staging_sessions", "staging_tool_calls", "staging_web_requests"} {
+	for _, staging := range []string{"staging_requests", "staging_sessions", "staging_tool_calls", "staging_tool_results", "staging_web_requests"} {
 		if _, err := tx.ExecContext(ctx, "DELETE FROM "+staging); err != nil {
 			return 0, fmt.Errorf("clear %s: %w", staging, err)
 		}

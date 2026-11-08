@@ -35,7 +35,13 @@ func commandPickerOptions(verbose bool, setClipboard func(string) tea.Cmd) picke
 			// The title is compacted so a multi-line command stays on one row,
 			// but filtering matches the raw command so a search for the text the
 			// user actually typed still finds it.
-			return reporting.CompactValue(row.Command), description, row.Command
+			title = toolTitle(row)
+			filterValue = row.Command
+			if row.Failed != nil && *row.Failed {
+				title = "[" + row.Status() + "] " + title
+				filterValue = "failed " + title + " " + filterValue
+			}
+			return title, description, filterValue
 		},
 		OnSelect: func(row report.ToolCallRow) tea.Cmd {
 			return tea.Sequence(setClipboard(row.Command), tea.Quit)
@@ -49,6 +55,7 @@ func commandMetadata(row report.ToolCallRow) string {
 		"client=" + reporting.EmptyAsDash(row.Client),
 		"model=" + reporting.EmptyAsDash(row.Model),
 		"tool=" + reporting.EmptyAsDash(row.Name),
+		"status=" + row.Status(),
 		"description=" + reporting.EmptyAsDash(reporting.CompactValue(row.Description)),
 	}
 	return strings.Join(parts, "  •  ")

@@ -439,6 +439,7 @@ func (p *Proxy) handleProxy(w http.ResponseWriter, r *http.Request) {
 		SessionID:         strings.TrimSpace(sessionID),
 		Directory:         pick.First(r.Header.Get("X-EF-Cwd"), directory),
 		GitBranch:         pick.First(r.Header.Get("X-EF-Git-Branch"), gitBranch),
+		ToolResults:       queue.ExtractToolResults(body),
 	}
 	switch {
 	case !parseable:

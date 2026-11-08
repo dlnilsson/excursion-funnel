@@ -146,7 +146,7 @@ func TestHandleIndex_ServesDashboardHTML(t *testing.T) {
 		`fetch("/ui/api/history/models")`,
 		`fetch("/ui/api/directories")`,
 		`id="tools-table"`,
-		`fetch("/ui/api/tools")`,
+		`fetch(toolCallsURL())`,
 		`data-table-key="web-requests"`,
 		`id="web-requests-table"`,
 		`fetch("/ui/api/web-requests")`,

@@ -337,6 +337,10 @@ ef sessions today --all
 ef tools today --all
 ef inspect --all
 
+# Only tool calls with a recorded failure (also highlights failures in normal output).
+ef tools today --failed
+ef tools today --failed --json
+
 # Today's usage only.
 ef usage today
 
@@ -382,6 +386,12 @@ ef requests --since 2026-08-01 --until 2026-08-07
 ef inspect resp_abc123
 ef inspect --limit 50 req_abc123
 ```
+
+Tool outcomes are captured when a client sends results in a later API request.
+The dashboard highlights failures and offers a **Failed only** filter. Positive
+exit codes and explicit tool errors count as failures; missing or unrecognized
+outcomes remain unknown. Older calls have no outcome unless their results are
+sent again. In team mode, upgrade the hub as well as clients to retain outcomes.
 
 Working directory and git branch are captured automatically from the client
 context sent by Claude Code or Codex. They remain unknown when the client does

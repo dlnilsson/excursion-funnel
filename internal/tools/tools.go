@@ -19,6 +19,7 @@ type Options struct {
 	Source     string
 	JSON       bool
 	Verbose    bool
+	FailedOnly bool
 }
 
 // Load queries today's tool calls.
@@ -37,7 +38,8 @@ func Load(ctx context.Context, opts Options) ([]report.ToolCallRow, error) {
 		Until:        since.AddDate(0, 0, 1),
 		Limit:        opts.Limit,
 		Source:       opts.Source,
-		CommandsOnly: !opts.JSON,
+		CommandsOnly: !opts.JSON && !opts.FailedOnly,
+		FailedOnly:   opts.FailedOnly,
 	})
 	if err != nil {
 		return nil, err
@@ -51,6 +53,10 @@ func Render(ctx context.Context, in io.Reader, out io.Writer, rows []report.Tool
 		return printJSON(out, rows)
 	}
 	if len(rows) == 0 {
+		if opts.FailedOnly {
+			_, err := fmt.Fprintln(out, "no failed tool calls recorded today")
+			return err
+		}
 		return printEmpty(out)
 	}
 	if shouldUseCommandList(opts.JSON, termio.IsTerminal(in), termio.IsTerminal(out)) {

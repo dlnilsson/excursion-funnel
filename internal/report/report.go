@@ -332,6 +332,10 @@ type ToolCallRow struct {
 	Name        string
 	Command     string
 	Description string
+	Host        string
+	SessionID   string
+	ExitCode    *int64
+	Failed      *bool
 }
 
 // WebRequestRow is a web request with parent request metadata for reporting
@@ -360,6 +364,8 @@ type ToolCallOptions struct {
 	Source string
 	// CommandsOnly excludes tool calls whose command is empty.
 	CommandsOnly bool
+	// FailedOnly retains calls with a known failure outcome.
+	FailedOnly bool
 }
 
 // Summary returns live usage totals for the selected interval.
@@ -918,7 +924,11 @@ func (r *Reporter) ToolCalls(ctx context.Context, opts ToolCallOptions) ([]ToolC
 			if opts.CommandsOnly {
 				filter = `COALESCE(command, '') <> ''`
 			}
-			return joinChildRows(ctx, r, requests, limit, childRowQuery[ToolCallRow]{
+			childLimit := limit
+			if opts.FailedOnly {
+				childLimit = -1 // Enrich and filter before applying the report limit.
+			}
+			out, err := joinChildRows(ctx, r, requests, childLimit, childRowQuery[ToolCallRow]{
 				label: "tool calls for candidate requests",
 				sql: `
 SELECT request_id, ordinal, COALESCE(tool_call_id, ''), name, COALESCE(command, ''), COALESCE(description, '')
@@ -931,9 +941,26 @@ FROM tool_calls`,
 				attach: func(row *ToolCallRow, req toolCallRequest) {
 					row.Source, row.StartedAt = req.Source, req.StartedAt
 					row.Provider, row.Client, row.Model = req.Provider, req.Client, req.Model
+					row.Host, row.SessionID = req.Host, req.SessionID
 				},
 				ordinal: func(row ToolCallRow) int { return row.Ordinal },
 			})
+			if err != nil {
+				return nil, err
+			}
+			if err := r.attachToolResults(ctx, out); err != nil {
+				return nil, err
+			}
+			if opts.FailedOnly {
+				filtered := out[:0]
+				for _, row := range out {
+					if row.Failed != nil && *row.Failed {
+						filtered = append(filtered, row)
+					}
+				}
+				out = filtered
+			}
+			return out[:min(len(out), limit)], nil
 		})
 }
 
