@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"fmt"
 	"strings"
+
+	"github.com/dlnilsson/excursion-funnel/internal/store"
 )
 
 // queryRows runs a query and scans every row into a T. label names the result
@@ -14,8 +16,8 @@ import (
 //
 // It is a package-level function rather than a Reporter method because Go does
 // not allow generic methods.
-func queryRows[T any](ctx context.Context, db *sql.DB, label, query string, args []any, scan func(*sql.Rows, *T) error) ([]T, error) {
-	rows, err := db.QueryContext(ctx, query, args...)
+func queryRows[T any](ctx context.Context, st *store.Store, label, query string, args []any, scan func(*sql.Rows, *T) error) ([]T, error) {
+	rows, err := st.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("query %s: %w", label, err)
 	}
@@ -37,8 +39,8 @@ func queryRows[T any](ctx context.Context, db *sql.DB, label, query string, args
 // queryRowsInto is queryRows for callers that discard some scanned columns
 // instead of storing them, such as a filter applied during the scan. Returning
 // false from scan drops the row.
-func queryRowsInto[T any](ctx context.Context, db *sql.DB, label, query string, args []any, scan func(*sql.Rows, *T) (bool, error)) ([]T, error) {
-	rows, err := db.QueryContext(ctx, query, args...)
+func queryRowsInto[T any](ctx context.Context, st *store.Store, label, query string, args []any, scan func(*sql.Rows, *T) (bool, error)) ([]T, error) {
+	rows, err := st.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("query %s: %w", label, err)
 	}
@@ -60,12 +62,26 @@ func queryRowsInto[T any](ctx context.Context, db *sql.DB, label, query string, 
 	return out, nil
 }
 
-// stringLiterals quotes IDs for indexed child lookups. Quack's serialized
-// index scans can lose bound IN parameters, so these lookups use SQL literals.
-func stringLiterals(values []string) string {
-	quoted := make([]string, 0, len(values))
-	for _, value := range values {
-		quoted = append(quoted, "'"+strings.ReplaceAll(value, "'", "''")+"'")
+// queryRow scans the first row through the same remote-parameter handling as
+// list queries. Like sql.QueryRow, it ignores any subsequent rows.
+func queryRow(ctx context.Context, st *store.Store, label, query string, args []any, scan func(*sql.Rows) error) error {
+	rows, err := st.QueryContext(ctx, query, args...)
+	if err != nil {
+		return fmt.Errorf("query %s: %w", label, err)
 	}
-	return strings.Join(quoted, ", ")
+	defer rows.Close()
+	if !rows.Next() {
+		if err := rows.Err(); err != nil {
+			return fmt.Errorf("iterate %s: %w", label, err)
+		}
+		return fmt.Errorf("query %s: %w", label, sql.ErrNoRows)
+	}
+	if err := scan(rows); err != nil {
+		return fmt.Errorf("scan %s: %w", label, err)
+	}
+	return nil
+}
+
+func placeholders(n int) string {
+	return strings.Repeat("?, ", n-1) + "?"
 }

@@ -412,7 +412,7 @@ func (r *Reporter) HourlyTokens(ctx context.Context, opts HourlyTokenOptions) ([
 	if opts.KnownProvidersOnly {
 		where = appendWherePredicate(where, provider.SQLForPath("path")+" != 'unknown'")
 	}
-	scanned, err := queryRows(ctx, r.store.DB(), "hourly tokens", `SELECT
+	scanned, err := queryRows(ctx, r.store, "hourly tokens", `SELECT
   date_trunc('hour', started_at) AS hour,
   SUM(`+provider.FreshInputSQL("path")+`) AS fresh_input_tokens,
   SUM(COALESCE(output_tokens, 0)) AS output_tokens
@@ -460,7 +460,7 @@ func (r *Reporter) TokenActivity(ctx context.Context, opts TokenActivityOptions)
 	}
 
 	where, args := r.activityWhere(opts)
-	scanned, err := queryRows(ctx, r.store.DB(), "token activity", `SELECT
+	scanned, err := queryRows(ctx, r.store, "token activity", `SELECT
   date_trunc('`+opts.Bucket+`', started_at) AS bucket,
   SUM(COALESCE(total_tokens, 0)) AS total_tokens
 FROM requests
@@ -512,14 +512,14 @@ func (r *Reporter) LongestSession(ctx context.Context, opts TokenActivityOptions
 	// Grouping inside a subquery keeps this a single-table scan, which a
 	// Quack-attached remote catalog requires.
 	var seconds sql.NullInt64
-	err = r.store.DB().QueryRowContext(ctx, `SELECT MAX(span_seconds) FROM (
+	err = queryRow(ctx, r.store, "longest session", `SELECT MAX(span_seconds) FROM (
   SELECT date_diff('second', MIN(started_at), MAX(started_at)) AS span_seconds
   FROM requests
   `+where+`
   GROUP BY `+schema.sessionExpression+`
-) spans`, args...).Scan(&seconds)
+) spans`, args, func(rows *sql.Rows) error { return rows.Scan(&seconds) })
 	if err != nil {
-		return 0, false, fmt.Errorf("query longest session: %w", err)
+		return 0, false, err
 	}
 	if !seconds.Valid || seconds.Int64 <= 0 {
 		return 0, false, nil
@@ -574,7 +574,7 @@ func (r *Reporter) KPIs(ctx context.Context, opts KPIOptions) (KPIStats, error) 
 		p50   sql.NullFloat64
 		p95   sql.NullFloat64
 	)
-	err := r.store.DB().QueryRowContext(ctx, `SELECT
+	err := queryRow(ctx, r.store, "KPIs", `SELECT
   COUNT(*) AS requests,
   COALESCE(COUNT_IF(`+failure+`), 0) AS errors,
   quantile_cont(duration_ms, 0.5) FILTER (
@@ -596,17 +596,19 @@ func (r *Reporter) KPIs(ctx context.Context, opts KPIOptions) (KPIStats, error) 
   COALESCE(SUM(CASE WHEN `+anthropic+` THEN COALESCE(`+cache1H+`, 0) ELSE 0 END), 0) AS anthropic_cache_write_1h_tokens,
   COALESCE(SUM(CASE WHEN `+anthropic+` THEN GREATEST(COALESCE(cache_write_tokens, 0) - `+cacheTTL+`, 0) ELSE 0 END), 0) AS anthropic_cache_write_unclassified_tokens
 FROM requests
-`+where, args...).Scan(
-		&stats.Requests, &stats.Errors, &p50, &p95,
-		&stats.CacheEligibleRequests, &stats.CacheHitRequests,
-		&stats.Anthropic.Requests, &stats.Anthropic.OutputReportedRequests,
-		&stats.Anthropic.ThinkingReportedRequests, &stats.Anthropic.ThinkingTokens,
-		&stats.Anthropic.OutputTokens, &stats.Anthropic.CacheWriteReportedRequests,
-		&stats.Anthropic.CacheWriteTokens, &stats.Anthropic.CacheWrite5MTokens,
-		&stats.Anthropic.CacheWrite1HTokens, &stats.Anthropic.CacheWriteUnclassifiedTokens,
-	)
+`+where, args, func(rows *sql.Rows) error {
+		return rows.Scan(
+			&stats.Requests, &stats.Errors, &p50, &p95,
+			&stats.CacheEligibleRequests, &stats.CacheHitRequests,
+			&stats.Anthropic.Requests, &stats.Anthropic.OutputReportedRequests,
+			&stats.Anthropic.ThinkingReportedRequests, &stats.Anthropic.ThinkingTokens,
+			&stats.Anthropic.OutputTokens, &stats.Anthropic.CacheWriteReportedRequests,
+			&stats.Anthropic.CacheWriteTokens, &stats.Anthropic.CacheWrite5MTokens,
+			&stats.Anthropic.CacheWrite1HTokens, &stats.Anthropic.CacheWriteUnclassifiedTokens,
+		)
+	})
 	if err != nil {
-		return KPIStats{}, fmt.Errorf("query KPIs: %w", err)
+		return KPIStats{}, err
 	}
 	if p50.Valid {
 		stats.LatencyP50MS = &p50.Float64
@@ -677,7 +679,7 @@ GROUP BY period, provider`
 	// Each scan must finish before the next begins: a Quack-attached remote
 	// catalog cannot stream-scan two tables at once, and queryRows closes its
 	// cursor before returning.
-	started, err := queryRows(ctx, r.store.DB(), "sessions started", startedQuery, startedArgs,
+	started, err := queryRows(ctx, r.store, "sessions started", startedQuery, startedArgs,
 		func(rows *sql.Rows, row *SessionRow) error {
 			return rows.Scan(&row.Period, &row.Provider, &row.Started)
 		})
@@ -695,7 +697,7 @@ GROUP BY period, provider`
 		usedWhere = appendWherePredicate(usedWhere, "COALESCE(source, 'unknown') = ?")
 		usedArgs = append(usedArgs, opts.Source)
 	}
-	used, err := queryRows(ctx, r.store.DB(), "sessions used",
+	used, err := queryRows(ctx, r.store, "sessions used",
 		`SELECT `+periodFromRequest+` AS period, `+provider.SQLForPath("path")+` AS provider,
   COUNT(DISTINCT `+schema.sessionExpression+`)
 FROM requests
@@ -737,7 +739,7 @@ type sessionSchema struct {
 
 func (r *Reporter) sessionSchema(ctx context.Context) (sessionSchema, error) {
 	type schemaColumn struct{ table, column string }
-	columns, err := queryRows(ctx, r.store.DB(), "session schema", `SELECT table_name, column_name
+	columns, err := queryRows(ctx, r.store, "session schema", `SELECT table_name, column_name
 FROM information_schema.columns
 WHERE (table_name = 'requests' AND column_name IN ('session_id', 'codex_session_id'))
    OR table_name = 'sessions'`, nil, func(rows *sql.Rows, col *schemaColumn) error {
@@ -786,7 +788,7 @@ func (r *Reporter) peakConcurrency(ctx context.Context, opts KPIOptions) (int64,
 	}
 
 	type interval struct{ start, end time.Time }
-	intervals, err := queryRows(ctx, r.store.DB(), "request intervals for peak concurrency",
+	intervals, err := queryRows(ctx, r.store, "request intervals for peak concurrency",
 		`SELECT started_at, completed_at
 FROM requests
 `+where, args, func(rows *sql.Rows, iv *interval) error {
@@ -845,7 +847,7 @@ func (r *Reporter) HistoricalByDay(ctx context.Context) ([]SummaryRow, error) {
 }
 
 func (r *Reporter) scanSummary(ctx context.Context, query string, args ...any) ([]SummaryRow, error) {
-	return queryRows(ctx, r.store.DB(), "summary", query, args, func(rows *sql.Rows, row *SummaryRow) error {
+	return queryRows(ctx, r.store, "summary", query, args, func(rows *sql.Rows, row *SummaryRow) error {
 		return rows.Scan(&row.Day, &row.Provider, &row.Client, &row.Model, &row.Source, &row.Directory, &row.GitBranch,
 			&row.Requests, &row.Errors, &row.Input, &row.FreshInput, &row.Cached, &row.CacheWrite,
 			&row.Output, &row.Reasoning, &row.Total)
@@ -871,7 +873,7 @@ func (r *Reporter) RecentRequests(ctx context.Context, limit int, source string)
 		args = append(args, source)
 	}
 	args = append(args, limit)
-	return queryRows(ctx, r.store.DB(), "recent requests", `
+	return queryRows(ctx, r.store, "recent requests", `
 SELECT id, COALESCE(response_id, ''), started_at, `+provider.SQLForPath("path")+`, `+provider.ClientSQL()+`,
   COALESCE(model_reported, model_requested, ''), http_status, method, path
 FROM requests
@@ -1013,7 +1015,7 @@ func (r *Reporter) queryInspectRows(ctx context.Context, whereClause, orderBy st
 	// The row scan must fully complete before the per-request child queries
 	// below run: a Quack-attached remote catalog cannot stream-scan two tables
 	// at once, and queryRows closes its cursor before returning.
-	out, err := queryRows(ctx, r.store.DB(), "inspect",
+	out, err := queryRows(ctx, r.store, "inspect",
 		buildInspectQuery(whereClause, orderBy, sessionExpression), append(args, limit),
 		func(rows *sql.Rows, row *InspectRow) error {
 			return rows.Scan(
@@ -1045,7 +1047,7 @@ func (r *Reporter) queryInspectRows(ctx context.Context, whereClause, orderBy st
 }
 
 func (r *Reporter) toolCalls(ctx context.Context, requestID string) ([]ToolCall, error) {
-	return queryRows(ctx, r.store.DB(), "tool calls for request "+requestID,
+	return queryRows(ctx, r.store, "tool calls for request "+requestID,
 		`SELECT ordinal, COALESCE(tool_call_id, ''), name,
  COALESCE(command, ''), COALESCE(description, ''), COALESCE(arguments_json, '')
 FROM tool_calls WHERE request_id = ? ORDER BY ordinal`,
@@ -1055,7 +1057,7 @@ FROM tool_calls WHERE request_id = ? ORDER BY ordinal`,
 }
 
 func (r *Reporter) webRequests(ctx context.Context, requestID string) ([]WebRequest, error) {
-	return queryRowsInto(ctx, r.store.DB(), "web requests for request "+requestID, `
+	return queryRowsInto(ctx, r.store, "web requests for request "+requestID, `
 SELECT ordinal, COALESCE(web_request_id, ''), name,
   COALESCE(query, ''), COALESCE(url, ''), COALESCE(domain, ''), COALESCE(arguments_json, '')
 FROM web_requests

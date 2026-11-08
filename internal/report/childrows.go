@@ -78,18 +78,18 @@ func joinChildRows[T any](ctx context.Context, r *Reporter, requests []toolCallR
 		return nil, nil
 	}
 	byID := make(map[string]toolCallRequest, len(requests))
-	ids := make([]string, len(requests))
+	ids := make([]any, len(requests))
 	for i, req := range requests {
 		byID[req.ID] = req
 		ids[i] = req.ID
 	}
 
 	byRequest := make(map[string][]T, len(requests))
-	query := q.sql + " WHERE request_id IN (" + stringLiterals(ids) + ")"
+	query := q.sql + " WHERE request_id IN (" + placeholders(len(ids)) + ")"
 	if q.filter != "" {
 		query += " AND " + q.filter
 	}
-	if _, err := queryRowsInto(ctx, r.store.DB(), q.label, query, nil, func(rows *sql.Rows, row *T) (bool, error) {
+	if _, err := queryRowsInto(ctx, r.store, q.label, query, ids, func(rows *sql.Rows, row *T) (bool, error) {
 		requestID, err := q.scan(rows, row)
 		if err != nil {
 			return false, err
@@ -135,7 +135,7 @@ type toolCallRequest struct {
 // against a child table.
 func (r *Reporter) candidateRequests(ctx context.Context, where string, whereArgs []any, limit int) ([]toolCallRequest, error) {
 	args := append(slices.Clone(whereArgs), limit)
-	return queryRows(ctx, r.store.DB(), "candidate requests", `
+	return queryRows(ctx, r.store, "candidate requests", `
 SELECT id, COALESCE(source, 'unknown'), started_at, `+provider.SQLForPath("path")+`, `+provider.ClientSQL()+`,
   COALESCE(model_reported, model_requested, 'unknown'), COALESCE(host, ''),
   COALESCE(NULLIF(session_id, ''), codex_session_id, '')

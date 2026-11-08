@@ -3,7 +3,6 @@ package report
 import (
 	"context"
 	"database/sql"
-	"fmt"
 	"strconv"
 )
 
@@ -32,15 +31,16 @@ func (r *Reporter) attachToolResults(ctx context.Context, calls []ToolCallRow) e
 	}
 	// Read-only reports can open ledgers written by older versions.
 	var columns int
-	if err := r.store.DB().QueryRowContext(ctx, `SELECT COUNT(*) FROM information_schema.columns
-WHERE table_name = 'tool_results' AND column_name = 'tool_call_id'`).Scan(&columns); err != nil {
-		return fmt.Errorf("inspect tool result schema: %w", err)
+	if err := queryRow(ctx, r.store, "tool result schema", `SELECT COUNT(*) FROM information_schema.columns
+WHERE table_name = 'tool_results' AND column_name = 'tool_call_id'`, nil,
+		func(rows *sql.Rows) error { return rows.Scan(&columns) }); err != nil {
+		return err
 	}
 	if columns == 0 {
 		return nil
 	}
 	var (
-		ids  = make([]string, 0, len(calls))
+		ids  = make([]any, 0, len(calls))
 		seen = make(map[string]bool, len(calls))
 	)
 	for _, call := range calls {
@@ -53,10 +53,10 @@ WHERE table_name = 'tool_results' AND column_name = 'tool_call_id'`).Scan(&colum
 		return nil
 	}
 	// Use an independent scan: Quack cannot stream a SQL join of ledger tables.
-	rows, err := queryRows(ctx, r.store.DB(), "tool results", `SELECT source, host, provider, session_id,
-tool_call_id, exit_code, failed FROM tool_results WHERE tool_call_id IN (`+stringLiterals(ids)+`)
+	rows, err := queryRows(ctx, r.store, "tool results", `SELECT source, host, provider, session_id,
+tool_call_id, exit_code, failed FROM tool_results WHERE tool_call_id IN (`+placeholders(len(ids))+`)
 QUALIFY row_number() OVER (PARTITION BY source, host, provider, session_id, tool_call_id
-ORDER BY observed_at DESC, request_id DESC, ordinal DESC) = 1`, nil,
+ORDER BY observed_at DESC, request_id DESC, ordinal DESC) = 1`, ids,
 		func(rows *sql.Rows, result *toolResultOutcome) error {
 			return rows.Scan(&result.key.source, &result.key.host, &result.key.provider, &result.key.session,
 				&result.key.id, &result.exitCode, &result.failed)
