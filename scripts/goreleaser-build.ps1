@@ -11,7 +11,7 @@ GoReleaser Cross container for Linux. Docker Desktop must be running.
 #>
 [CmdletBinding()]
 param(
-    [string]$Image = 'ghcr.io/goreleaser/goreleaser-cross@sha256:1820cee53c4c06cfb43c2203caca73f9497042f5b6061c8916a251228a321975'
+    [string]$Image = 'ghcr.io/goreleaser/goreleaser-cross:v1.27.3-1'
 )
 
 Set-StrictMode -Version Latest
@@ -37,6 +37,15 @@ if ($null -eq $npm) {
 & $docker.Source info --format '{{.ServerVersion}}' *> $null
 if ($LASTEXITCODE -ne 0) {
     throw 'Docker Desktop is not running.'
+}
+
+& $docker.Source image inspect $Image *> $null
+if ($LASTEXITCODE -ne 0) {
+    Write-Host 'Pulling GoReleaser Cross image...'
+    & $docker.Source pull $Image
+    if ($LASTEXITCODE -ne 0) {
+        throw "Could not pull GoReleaser Cross image $Image."
+    }
 }
 
 $repoRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
