@@ -399,7 +399,7 @@
     background: color-mix(in srgb, var(--error) 10%, transparent);
   }
 
-  #tools-table tr.tool-failed td:last-child {
+  #tools-table tr.tool-failed td:nth-child(4) {
     color: var(--error);
     font-weight: 700;
   }
@@ -981,7 +981,7 @@
   <summary>Tools used today</summary>
   <label><input type="checkbox" id="tools-failed-only"> Failed only</label>
   <table id="tools-table">
-    <thead><tr><th>Started</th><th>Client</th><th>Model</th><th>Tool</th><th>Description</th><th>Command</th><th>Result</th></tr></thead>
+    <thead><tr><th>Started</th><th>Client</th><th>Model</th><th>Tool</th><th>Description</th><th>Command</th></tr></thead>
     <tbody></tbody>
   </table>
 </details>
@@ -2104,7 +2104,7 @@ async function refreshTools() {
     if (version === toolFilterVersion) renderTools(rows);
   } catch {
     if (version === toolFilterVersion) {
-      document.querySelector("#tools-table tbody").innerHTML = '<tr><td colspan="7" class="empty">Unable to load tool calls</td></tr>';
+      document.querySelector("#tools-table tbody").innerHTML = '<tr><td colspan="6" class="empty">Unable to load tool calls</td></tr>';
     }
   }
 }
@@ -2114,17 +2114,15 @@ function renderTools(rows) {
   const tbody = document.querySelector("#tools-table tbody");
   if (rows.length === 0) {
     const message = document.getElementById("tools-failed-only").checked ? "No failed tool calls recorded today" : "No tool calls captured yet";
-    tbody.innerHTML = `<tr><td colspan="7" class="empty">${message}</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="6" class="empty">${message}</td></tr>`;
     return;
   }
   tbody.innerHTML = rows.map((r, index) => {
     const command = String(r.Command || "");
     const copyButton = command ? `<button class="copy-command" type="button" data-command-index="${index}" aria-label="Copy command to clipboard">${copyIcon}</button>` : "";
-    const status = r.Failed === null || r.Failed === undefined ? "Unknown" : r.Failed ? "Failed" : "OK";
-    const result = r.ExitCode === null || r.ExitCode === undefined ? status : `${status} (exit ${r.ExitCode})`;
     return `<tr class="${r.Failed ? "tool-failed" : ""}">
     <td>${escapeHTML(toolTimestamp(r.StartedAt))}</td><td>${escapeHTML(clientLabel(r))}</td><td>${escapeHTML(r.Model)}</td>
-    <td>${escapeHTML(r.Name)}</td><td>${escapeHTML(r.Description || "-")}</td><td><div class="tool-command-cell"><pre class="tool-command-block"><code class="tool-command language-bash">${escapeHTML(command || "-")}</code></pre>${copyButton}</div></td><td>${escapeHTML(result)}</td>
+    <td>${escapeHTML(r.Name)}</td><td>${escapeHTML(r.Description || "-")}</td><td><div class="tool-command-cell"><pre class="tool-command-block"><code class="tool-command language-bash">${escapeHTML(command || "-")}</code></pre>${copyButton}</div></td>
   </tr>`;
   }).join("");
   highlightToolCommands();
